@@ -1,6 +1,6 @@
 /**
  * @file app.js
- * @description Express application setup, middlewares configuration, and routing mounts.
+ * @description Express application setup, security middlewares, CORS configuration, and routing mounts.
  */
 
 import express from 'express';
@@ -25,31 +25,49 @@ import errorHandler from './middlewares/errorHandler.js';
 
 const app = express();
 
-// 1. HTTP Security Headers
-app.use(helmet());
+// Enable trust proxy for production deployments behind reverse proxies (Render, Vercel, Cloudflare)
+app.set('trust proxy', 1);
 
-// 2. CORS Policy configuration
+// 1. HTTP Security Headers
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: 'cross-origin' }
+  })
+);
+
+// 2. Production CORS Policy configuration
 const allowedOrigins = [
-  'http://localhost:3000', // Organizer Dashboard dev
-  'http://localhost:3001', // Super Admin Dashboard dev
+  'http://localhost:3000',
+  'http://localhost:3001',
+  'https://visitexpo-client.vercel.app',
+  'https://visitexpo-admin.vercel.app',
+  'https://visitexpo-server.onrender.com',
   'https://dashboard.visitexpo.in',
   'https://admin.visitexpo.in',
-  'https://visitexpo.in'    // Main WordPress site
+  'https://visitexpo.in'
 ];
+
+if (process.env.CLIENT_URL) allowedOrigins.push(process.env.CLIENT_URL);
+if (process.env.ADMIN_URL) allowedOrigins.push(process.env.ADMIN_URL);
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (like mobile apps or curl)
-      if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+      // Allow requests with no origin (mobile apps, postman, curl) or matched origins / vercel preview deployments
+      if (
+        !origin ||
+        allowedOrigins.indexOf(origin) !== -1 ||
+        origin.endsWith('.vercel.app') ||
+        origin.endsWith('.onrender.com')
+      ) {
         callback(null, true);
       } else {
-        callback(new Error('Blocked by CORS policy'));
+        callback(new Error(`Blocked by CORS policy for origin: ${origin}`));
       }
     },
     credentials: true, // Allow cookies transfer
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
   })
 );
 
@@ -72,12 +90,23 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/admin', adminRoutes);
 
-// Health check endpoint
+// Health check endpoint for Render monitoring
 app.get('/api/health', (req, res) => {
   res.status(200).json({
     success: true,
     status: 'healthy',
+    environment: process.env.NODE_ENV || 'production',
+    serverUrl: 'https://visitexpo-server.onrender.com',
     timestamp: new Date()
+  });
+});
+
+// Root welcome endpoint
+app.get('/', (req, res) => {
+  res.status(200).json({
+    success: true,
+    message: 'VisitExpo API Server running live on Render',
+    docs: 'https://visitexpo-server.onrender.com/api/health'
   });
 });
 
