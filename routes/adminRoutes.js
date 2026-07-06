@@ -7,6 +7,7 @@ import express from 'express';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
 import Event from '../models/Event.js';
+import Exhibitor from '../models/Exhibitor.js';
 import Order from '../models/Order.js';
 import Subscription from '../models/Subscription.js';
 import Invoice from '../models/Invoice.js';
@@ -264,6 +265,184 @@ router.get('/invoices', async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: invoices
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get pending organizer account registrations
+// @route   GET /api/admin/pending-organizers
+router.get('/pending-organizers', async (req, res, next) => {
+  try {
+    const pendingUsers = await User.find({ role: 'organizer', isVerified: false })
+      .populate('organization')
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: pendingUsers
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Approve or Reject Organizer registration
+// @route   PUT /api/admin/organizers/:id/status
+router.put('/organizers/:id/status', async (req, res, next) => {
+  try {
+    const { action } = req.body; // 'approve' or 'reject'
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User account not found' });
+    }
+
+    if (action === 'approve') {
+      user.isVerified = true;
+      await user.save();
+    } else if (action === 'reject') {
+      // Delete or mark inactive
+      await User.findByIdAndDelete(req.params.id);
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Organizer account request set to ${action}d successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get pending exhibitor registrations across all events
+// @route   GET /api/admin/pending-exhibitors
+router.get('/pending-exhibitors', async (req, res, next) => {
+  try {
+    const pendingExhibitors = await Exhibitor.find({ status: 'pending' })
+      .populate('event', 'title city startDate venue')
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: pendingExhibitors
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Approve or Reject Exhibitor registration (Super Admin)
+// @route   PUT /api/admin/exhibitors/:id/status
+router.put('/exhibitors/:id/status', async (req, res, next) => {
+  try {
+    const { status } = req.body; // 'approved' or 'rejected'
+
+    if (!status || !['approved', 'rejected', 'pending'].includes(status)) {
+      return res.status(400).json({ success: false, error: 'Valid status is required' });
+    }
+
+    const exhibitor = await Exhibitor.findById(req.params.id);
+    if (!exhibitor) {
+      return res.status(404).json({ success: false, error: 'Exhibitor request not found' });
+    }
+
+    exhibitor.status = status;
+    await exhibitor.save();
+
+    // Sync to event if approved
+    if (status === 'approved') {
+      const event = await Event.findById(exhibitor.event);
+      if (event) {
+        const exists = event.exhibitors.some(e => e.name === exhibitor.name);
+        if (!exists) {
+          event.exhibitors.push({
+            name: exhibitor.name,
+            logo: exhibitor.logo,
+            boothNumber: exhibitor.boothNumber,
+            website: exhibitor.website,
+            description: exhibitor.description
+          });
+          await event.save();
+        }
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Exhibitor onboarding request set to ${status} successfully`,
+      exhibitor
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get pending event ownership claims
+// @route   GET /api/admin/pending-claims
+router.get('/pending-claims', async (req, res, next) => {
+  try {
+    const pendingClaims = await Event.find({ isClaimed: true, status: 'draft' })
+      .populate('claimedBy', 'name email')
+      .populate('organizer', 'name contact')
+      .sort({ updatedAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: pendingClaims
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get approved event ownership claims history
+// @route   GET /api/admin/claim-history
+router.get('/claim-history', async (req, res, next) => {
+  try {
+    const claimHistory = await Event.find({ isClaimed: true, status: 'published' })
+      .populate('claimedBy', 'name email')
+      .populate('organizer', 'name contact')
+      .sort({ updatedAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: claimHistory
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Approve or Reject Event Ownership Claim
+// @route   PUT /api/admin/claims/:id/status
+router.put('/claims/:id/status', async (req, res, next) => {
+  try {
+    const { action } = req.body; // 'approve' or 'reject'
+    const event = await Event.findById(req.params.id);
+
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Claimed event record not found' });
+    }
+
+    if (action === 'approve') {
+      event.status = 'published';
+      await event.save();
+      // Also verify claiming user if exists
+      if (event.claimedBy) {
+        await User.findByIdAndUpdate(event.claimedBy, { isVerified: true });
+      }
+    } else if (action === 'reject') {
+      event.isClaimed = false;
+      event.claimedBy = null;
+      event.status = 'draft';
+      await event.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Event claim request set to ${action}d successfully`
     });
   } catch (error) {
     next(error);

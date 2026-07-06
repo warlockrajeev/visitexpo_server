@@ -4,6 +4,7 @@
  */
 
 import express from 'express';
+import User from '../models/User.js';
 import AuthService from '../services/AuthService.js';
 import { protect } from '../middlewares/auth.js';
 import { authLimiter } from '../middlewares/rateLimiter.js';
@@ -115,11 +116,27 @@ router.post('/logout', protect, async (req, res, next) => {
 });
 
 // Get currently logged in user profile
-router.get('/me', protect, async (req, res) => {
-  res.status(200).json({
-    success: true,
-    user: req.user
-  });
+router.get('/me', protect, async (req, res, next) => {
+  try {
+    const userDoc = await User.findById(req.user.id).select('-password');
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'User profile not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      user: {
+        id: userDoc._id,
+        name: userDoc.name,
+        email: userDoc.email,
+        role: userDoc.role,
+        isVerified: userDoc.isVerified,
+        organization: userDoc.organization
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 export default router;

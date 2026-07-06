@@ -19,6 +19,7 @@ import ticketRoutes from './routes/ticketRoutes.js';
 import orderRoutes from './routes/orderRoutes.js';
 import campaignRoutes from './routes/campaignRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
+import wordpressRoutes from './routes/wordpressRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -89,6 +90,7 @@ app.use('/api/tickets', ticketRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/wordpress', wordpressRoutes);
 
 // Health check endpoint for Render monitoring
 app.get('/api/health', (req, res) => {

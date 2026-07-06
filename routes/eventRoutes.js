@@ -24,7 +24,7 @@ router.get('/', wordpressLimiter, async (req, res, next) => {
     // Default options
     const options = {
       page: parseInt(page, 10) || 1,
-      limit: parseInt(limit, 10) || 10,
+      limit: parseInt(limit, 10) || 100,
       sort: sort ? JSON.parse(sort) : { startDate: 1 }, // Default sort chronologically
       populate: 'organizer'
     };

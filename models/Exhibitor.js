@@ -63,6 +63,14 @@ const ExhibitorSchema = new mongoose.Schema(
       enum: ['in_person', 'virtual', 'hybrid'],
       default: 'in_person',
       index: true
+    },
+    productCategories: {
+      type: [String],
+      default: []
+    },
+    wpSource: {
+      type: Boolean,
+      default: true
     }
   },
   {

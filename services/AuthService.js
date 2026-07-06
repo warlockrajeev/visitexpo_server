@@ -53,6 +53,7 @@ class AuthService {
         name: user.name,
         email: user.email,
         role: user.role,
+        isVerified: user.isVerified,
         organization: user.organization
       },
       accessToken,
@@ -77,7 +78,14 @@ class AuthService {
       throw err;
     }
 
-    // 3. Generate tokens
+    // 3. Block login if organizer account is pending admin verification
+    if (user.role === 'organizer' && !user.isVerified) {
+      const err = new Error('Your organizer account registration is pending Super Admin approval. Access will be granted once approved.');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    // 4. Generate tokens
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
@@ -92,6 +100,7 @@ class AuthService {
         name: user.name,
         email: user.email,
         role: user.role,
+        isVerified: user.isVerified,
         organization: user.organization
       },
       accessToken,

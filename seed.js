@@ -126,6 +126,81 @@ const seed = async () => {
     });
     console.log(`Event "${event.title}" created.`);
 
+    // 4.1 Seed WordPress 7.0 Directory Events (Unclaimed)
+    console.log('Seeding WordPress 7.0 directory events...');
+    const wpEvents = [
+      {
+        title: '11th Asian Australian Rotorcraft Forum',
+        slug: '11th-asian-australian-rotorcraft-forum',
+        description: 'Global forum on vertical flight, rotorcraft technology, and advanced air mobility.',
+        venue: 'IIT Madras, Chennai',
+        city: 'Chennai',
+        startDate: new Date('2025-06-09'),
+        endDate: new Date('2025-06-11'),
+        categories: ['Aeronautics', 'Engineering'],
+        wpPostId: 'wp-1001',
+        isClaimed: false,
+        status: 'published'
+      },
+      {
+        title: '12th Symposium on Diseases in Asian Aquaculture (DAA12)',
+        slug: '12th-symposium-on-diseases-in-asian-aquaculture-daa12',
+        description: 'International symposium focusing on aquatic animal health and one health aquaculture.',
+        venue: 'Chennai Convention Center',
+        city: 'Chennai',
+        startDate: new Date('2025-06-09'),
+        endDate: new Date('2025-06-12'),
+        categories: ['Aquaculture', 'Marine'],
+        wpPostId: 'wp-1002',
+        isClaimed: false,
+        status: 'published'
+      },
+      {
+        title: '15th Cement Expo 2025',
+        slug: '15th-cement-expo-2025',
+        description: 'Premier trade fair for cement manufacturing technology and green building materials.',
+        venue: 'Pragati Maidan',
+        city: 'New Delhi',
+        startDate: new Date('2025-10-29'),
+        endDate: new Date('2025-10-31'),
+        categories: ['Construction', 'Industrial'],
+        wpPostId: 'wp-1003',
+        isClaimed: false,
+        status: 'published'
+      },
+      {
+        title: '6th EV India Expo 2026',
+        slug: '6th-ev-india-expo-2026',
+        description: 'Electric vehicle, battery storage, and charging infrastructure exhibition.',
+        venue: 'India Expo Mart, Greater Noida',
+        city: 'Greater Noida',
+        startDate: new Date('2026-07-03'),
+        endDate: new Date('2026-07-05'),
+        categories: ['Automotive', 'EV Technology'],
+        wpPostId: 'wp-1004',
+        isClaimed: false,
+        status: 'published'
+      },
+      {
+        title: '74th India International Garment Fair (IIGF)',
+        slug: '74th-india-international-garment-fair-iigf',
+        description: 'Major apparel and textile sourcing fair for international buyers and fashion brands.',
+        venue: 'Yashobhoomi Complex, New Delhi',
+        city: 'New Delhi',
+        startDate: new Date('2026-01-04'),
+        endDate: new Date('2026-01-06'),
+        categories: ['Textile', 'Fashion'],
+        wpPostId: 'wp-1005',
+        isClaimed: false,
+        status: 'published'
+      }
+    ];
+
+    for (const wpEvt of wpEvents) {
+      await Event.create(wpEvt);
+    }
+    console.log(`Seeded ${wpEvents.length} WordPress directory events.`);
+
     // 5. Create Exhibitors
     console.log('Creating seed exhibitors (in-person and virtual)...');
     const exhibitors = [
