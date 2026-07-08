@@ -100,11 +100,23 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
   try {
     const { eventId, page, limit, search } = req.query;
     
-    if (!eventId) {
-      return res.status(400).json({ success: false, error: 'Event ID parameter is required' });
-    }
+    const query = {};
 
-    const query = { event: eventId };
+    if (eventId) {
+      if (req.user.role === 'organizer') {
+        const event = await Event.findById(eventId);
+        if (!event || event.organizer.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ success: false, error: 'Not authorized to access visitors for this event' });
+        }
+      }
+      query.event = eventId;
+    } else {
+      if (req.user.role === 'organizer') {
+        const myEvents = await Event.find({ organizer: req.user._id });
+        const myEventIds = myEvents.map(e => e._id);
+        query.event = { $in: myEventIds };
+      }
+    }
 
     if (search) {
       query.$or = [

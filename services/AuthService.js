@@ -78,9 +78,15 @@ class AuthService {
       throw err;
     }
 
-    // 3. Block login if organizer account is pending admin verification
+    // 3. Block login if account is pending admin/organizer verification
     if (user.role === 'organizer' && !user.isVerified) {
       const err = new Error('Your organizer account registration is pending Super Admin approval. Access will be granted once approved.');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    if (user.role === 'exhibitor' && !user.isVerified) {
+      const err = new Error('Your exhibitor onboarding request is pending Organizer approval. Access will be granted once approved.');
       err.statusCode = 403;
       throw err;
     }

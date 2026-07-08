@@ -316,6 +316,23 @@ router.put('/organizers/:id/status', async (req, res, next) => {
   }
 });
 
+// @desc    Get verified/approved organizers history
+// @route   GET /api/admin/organizer-history
+router.get('/organizer-history', async (req, res, next) => {
+  try {
+    const verifiedUsers = await User.find({ role: 'organizer', isVerified: true })
+      .populate('organization')
+      .sort({ updatedAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: verifiedUsers
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @desc    Get pending exhibitor registrations across all events
 // @route   GET /api/admin/pending-exhibitors
 router.get('/pending-exhibitors', async (req, res, next) => {
@@ -351,6 +368,26 @@ router.put('/exhibitors/:id/status', async (req, res, next) => {
     exhibitor.status = status;
     await exhibitor.save();
 
+    // Sync isVerified on User
+    const associatedUser = await User.findOne({ email: exhibitor.contactEmail });
+    if (associatedUser && associatedUser.role === 'exhibitor') {
+      if (status === 'approved') {
+        associatedUser.isVerified = true;
+        await associatedUser.save();
+      } else {
+        // Only mark unverified if they have NO other approved exhibitor accounts
+        const otherApproved = await Exhibitor.findOne({
+          contactEmail: exhibitor.contactEmail,
+          _id: { $ne: exhibitor._id },
+          status: 'approved'
+        });
+        if (!otherApproved) {
+          associatedUser.isVerified = false;
+          await associatedUser.save();
+        }
+      }
+    }
+
     // Sync to event if approved
     if (status === 'approved') {
       const event = await Event.findById(exhibitor.event);
@@ -373,6 +410,23 @@ router.put('/exhibitors/:id/status', async (req, res, next) => {
       success: true,
       message: `Exhibitor onboarding request set to ${status} successfully`,
       exhibitor
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get processed exhibitors history (approved or rejected)
+// @route   GET /api/admin/exhibitor-history
+router.get('/exhibitor-history', async (req, res, next) => {
+  try {
+    const processedExhibitors = await Exhibitor.find({ status: { $in: ['approved', 'rejected'] } })
+      .populate('event', 'title city startDate venue')
+      .sort({ updatedAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: processedExhibitors
     });
   } catch (error) {
     next(error);

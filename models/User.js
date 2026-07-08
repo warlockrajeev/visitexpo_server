@@ -30,7 +30,7 @@ const UserSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ['super_admin', 'organizer', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
+      enum: ['super_admin', 'organizer', 'exhibitor', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
       default: 'organizer'
     },
     organization: {

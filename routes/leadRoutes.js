@@ -5,6 +5,7 @@
 
 import express from 'express';
 import Lead from '../models/Lead.js';
+import Event from '../models/Event.js';
 import { protect, authorize } from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -19,11 +20,23 @@ router.get('/', async (req, res, next) => {
   try {
     const { eventId, status, search, page, limit } = req.query;
 
-    if (!eventId) {
-      return res.status(400).json({ success: false, error: 'Event ID parameter is required' });
-    }
+    const query = {};
 
-    const query = { event: eventId };
+    if (eventId) {
+      if (req.user.role === 'organizer') {
+        const event = await Event.findById(eventId);
+        if (!event || event.organizer.toString() !== req.user._id.toString()) {
+          return res.status(403).json({ success: false, error: 'Not authorized to access leads for this event' });
+        }
+      }
+      query.event = eventId;
+    } else {
+      if (req.user.role === 'organizer') {
+        const myEvents = await Event.find({ organizer: req.user._id });
+        const myEventIds = myEvents.map(e => e._id);
+        query.event = { $in: myEventIds };
+      }
+    }
 
     if (status && status !== 'all') {
       query.status = status;
