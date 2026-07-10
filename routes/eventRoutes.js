@@ -85,7 +85,7 @@ router.get('/:slug', wordpressLimiter, async (req, res, next) => {
 // Create a new event
 router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
   try {
-    if (!req.user.organization) {
+    if (req.user.role !== 'super_admin' && !req.user.organization) {
       return res.status(400).json({ success: false, error: 'User does not belong to any organization' });
     }
 

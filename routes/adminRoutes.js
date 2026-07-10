@@ -28,13 +28,21 @@ router.get('/dashboard', async (req, res, next) => {
       totalOrganizations,
       totalEvents,
       activeSubscriptions,
-      completedOrders
+      completedOrders,
+      pendingOrganizers,
+      pendingExhibitors,
+      pendingClaims,
+      pendingEvents
     ] = await Promise.all([
       User.countDocuments(),
       Organization.countDocuments(),
       Event.countDocuments(),
       Subscription.countDocuments({ status: 'active' }),
-      Order.find({ status: 'completed' })
+      Order.find({ status: 'completed' }),
+      User.countDocuments({ role: 'organizer', isVerified: false }),
+      Exhibitor.countDocuments({ status: 'pending' }),
+      Event.countDocuments({ isClaimed: true, status: 'draft' }),
+      Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } })
     ]);
 
     // Sum revenue
@@ -62,7 +70,11 @@ router.get('/dashboard', async (req, res, next) => {
           totalOrganizations,
           totalEvents,
           activeSubscriptions,
-          totalRevenue
+          totalRevenue,
+          pendingOrganizers,
+          pendingExhibitors,
+          pendingClaims,
+          pendingEvents
         },
         packagesBreakdown: packagesCount
       }
@@ -497,6 +509,150 @@ router.put('/claims/:id/status', async (req, res, next) => {
     res.status(200).json({
       success: true,
       message: `Event claim request set to ${action}d successfully`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get pending event onboarding submissions
+// @route   GET /api/admin/pending-events
+router.get('/pending-events', async (req, res, next) => {
+  try {
+    const pendingEvents = await Event.find({ status: 'draft', isClaimed: { $ne: true } })
+      .populate('organizer', 'name contact')
+      .sort({ updatedAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: pendingEvents
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get approved/moderated new events history
+// @route   GET /api/admin/event-history
+router.get('/event-history', async (req, res, next) => {
+  try {
+    const eventHistory = await Event.find({ status: { $in: ['published', 'cancelled'] }, isClaimed: { $ne: true } })
+      .populate('organizer', 'name contact')
+      .sort({ updatedAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: eventHistory
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Approve or Reject Event Onboarding Submission
+// @route   PUT /api/admin/events/:id/status
+router.put('/events/:id/status', async (req, res, next) => {
+  try {
+    const { action } = req.body; // 'approve' or 'reject'
+    const event = await Event.findById(req.params.id);
+
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event record not found' });
+    }
+
+    if (action === 'approve') {
+      event.status = 'published';
+
+      // Real-time Sync to WordPress Pages
+      const wpUser = process.env.WORDPRESS_API_USER;
+      const wpPass = process.env.WORDPRESS_API_PASSWORD;
+      const wpKey = process.env.WORDPRESS_API_KEY;
+      const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
+
+      if (wpKey) {
+        try {
+          const wpPayload = {
+            title: event.title,
+            content: `<!-- wp:paragraph -->\n<p>${event.description || ''}</p>\n<!-- /wp:paragraph -->`,
+            slug: event.slug,
+            wpPostId: event.wpPostId || ''
+          };
+
+          const endpoint = `${wpUrl}/wp-json/visitexpo/v1/create-event`;
+          console.log(`[WP-Sync] Pushing event approval to WordPress Custom Endpoint: ${endpoint}`);
+          
+          const wpResponse = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-VisitExpo-Key': wpKey
+            },
+            body: JSON.stringify(wpPayload)
+          });
+
+          if (wpResponse.ok) {
+            const wpData = await wpResponse.json();
+            event.wpPostId = String(wpData.id);
+            event.wpUrl = wpData.link;
+            console.log(`[WP-Sync] Successfully synced page via WordPress Custom Endpoint. ID: ${wpData.id}, Link: ${wpData.link}`);
+          } else {
+            const errText = await wpResponse.text();
+            console.error(`[WP-Sync] WordPress Custom Endpoint returned error: ${wpResponse.status} - ${errText}`);
+          }
+        } catch (wpErr) {
+          console.error('[WP-Sync] Failed to connect to WordPress Custom REST API:', wpErr);
+        }
+      } else if (wpUser && wpPass) {
+        try {
+          const authBuffer = Buffer.from(`${wpUser}:${wpPass}`).toString('base64');
+          
+          const wpPayload = {
+            title: event.title,
+            content: `<!-- wp:paragraph -->\n<p>${event.description || ''}</p>\n<!-- /wp:paragraph -->`,
+            status: 'publish',
+            slug: event.slug
+          };
+
+          const endpoint = event.wpPostId 
+            ? `${wpUrl}/wp-json/wp/v2/pages/${event.wpPostId}`
+            : `${wpUrl}/wp-json/wp/v2/pages`;
+
+          console.log(`[WP-Sync] Pushing event approval to WordPress standard API. Endpoint: ${endpoint}`);
+          const wpResponse = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Basic ${authBuffer}`
+            },
+            body: JSON.stringify(wpPayload)
+          });
+
+          if (wpResponse.ok) {
+            const wpData = await wpResponse.json();
+            event.wpPostId = String(wpData.id);
+            event.wpUrl = wpData.link;
+            console.log(`[WP-Sync] Successfully synced page in WordPress. ID: ${wpData.id}, Link: ${wpData.link}`);
+          } else {
+            const errText = await wpResponse.text();
+            console.error(`[WP-Sync] WordPress API returned error: ${wpResponse.status} - ${errText}`);
+          }
+        } catch (wpErr) {
+          console.error('[WP-Sync] Failed to connect to WordPress REST API:', wpErr);
+        }
+      } else {
+        console.log('[WP-Sync] Skipped: WordPress API credentials / API Key not found in env configuration.');
+      }
+
+      await event.save();
+    } else if (action === 'reject') {
+      event.status = 'cancelled';
+      await event.save();
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Event onboarding request set to ${action}d successfully`,
+      event
     });
   } catch (error) {
     next(error);
