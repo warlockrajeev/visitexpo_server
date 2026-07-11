@@ -20,6 +20,7 @@ import orderRoutes from './routes/orderRoutes.js';
 import campaignRoutes from './routes/campaignRoutes.js';
 import adminRoutes from './routes/adminRoutes.js';
 import wordpressRoutes from './routes/wordpressRoutes.js';
+import uploadRoutes from './routes/uploadRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -91,6 +92,7 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/campaigns', campaignRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/wordpress', wordpressRoutes);
+app.use('/api/upload', uploadRoutes);
 
 // Health check endpoint for Render monitoring
 app.get('/api/health', (req, res) => {

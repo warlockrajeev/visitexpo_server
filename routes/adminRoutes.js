@@ -575,7 +575,11 @@ router.put('/events/:id/status', async (req, res, next) => {
             title: event.title,
             content: `<!-- wp:paragraph -->\n<p>${event.description || ''}</p>\n<!-- /wp:paragraph -->`,
             slug: event.slug,
-            wpPostId: event.wpPostId || ''
+            wpPostId: event.wpPostId || '',
+            startDate: event.startDate ? Math.floor(new Date(event.startDate).getTime() / 1000) : 0,
+            endDate: event.endDate ? Math.floor(new Date(event.endDate).getTime() / 1000) : 0,
+            address: `${event.venue || ''}, ${event.city || ''}`.trim().replace(/^,\s*/, ''),
+            banner: event.banner || ''
           };
 
           const endpoint = `${wpUrl}/wp-json/visitexpo/v1/create-event`;

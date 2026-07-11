@@ -99,6 +99,39 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
  */
 router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
   try {
+    const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
+    const wpKey = process.env.WORDPRESS_API_KEY;
+
+    if (wpKey) {
+      try {
+        console.log(`[WP-Claimable] Fetching live claimable events from WordPress: ${wpUrl}/wp-json/visitexpo/v1/claimable-events`);
+        const wpResponse = await fetch(`${wpUrl}/wp-json/visitexpo/v1/claimable-events`, {
+          headers: {
+            'X-VisitExpo-Key': wpKey
+          }
+        });
+
+        if (wpResponse.ok) {
+          const wpData = await wpResponse.json();
+          // Filter if search term is provided
+          const { search } = req.query;
+          if (search && wpData.success && wpData.data && wpData.data.docs) {
+            const cleanSearch = search.toLowerCase();
+            wpData.data.docs = wpData.data.docs.filter(e => 
+              e.title.toLowerCase().includes(cleanSearch) || 
+              (e.venue && e.venue.toLowerCase().includes(cleanSearch))
+            );
+            wpData.data.total = wpData.data.docs.length;
+          }
+          return res.status(200).json(wpData);
+        } else {
+          console.warn(`[WP-Claimable] WordPress returned error status ${wpResponse.status}. Falling back to MongoDB.`);
+        }
+      } catch (wpErr) {
+        console.error('[WP-Claimable] Error connecting to WordPress custom API. Falling back to MongoDB:', wpErr);
+      }
+    }
+
     const { search, city, limit = 100, page = 1 } = req.query;
 
     const query = {
