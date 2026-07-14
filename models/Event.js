@@ -102,6 +102,33 @@ const EventSchema = new mongoose.Schema(
       default: null
     },
     website: String,
+    orgName: { type: String, default: '' },
+    orgEmail: { type: String, default: '' },
+    orgPhone: { type: String, default: '' },
+    orgWebsite: { type: String, default: '' },
+    orgDesc: { type: String, default: '' },
+    orgLogo: { type: String, default: '' },
+    schedules: [
+      {
+        name: { type: String, default: '' },
+        date: { type: String, default: '' }
+      }
+    ],
+    sponsorsList: [
+      {
+        name: { type: String, default: '' },
+        link: { type: String, default: '' },
+        logo: { type: String, default: '' },
+        tier: { type: String, default: '' }
+      }
+    ],
+    faqsList: [
+      {
+        question: { type: String, default: '' },
+        answer: { type: String, default: '' }
+      }
+    ],
+    contactShortcode: { type: String, default: '' },
     registrationSettings: {
       maxLimit: { type: Number, default: 1000 },
       isOpen: { type: Boolean, default: true },

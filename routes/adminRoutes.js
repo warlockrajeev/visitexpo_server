@@ -571,6 +571,30 @@ router.put('/events/:id/status', async (req, res, next) => {
 
       if (wpKey) {
         try {
+          // Compile sponsor levels and mapping
+          const sponsorsLogos = [];
+          const sponsorLevelMap = {};
+          
+          let logoCounter = 0;
+          if (Array.isArray(event.sponsorsList)) {
+            event.sponsorsList.forEach(sp => {
+              const tierName = sp.tier || 'Sponsors';
+              if (!sponsorLevelMap[tierName]) {
+                sponsorLevelMap[tierName] = [];
+              }
+              
+              const logoIndex = 10 + logoCounter;
+              sponsorsLogos.push(sp.logo || '');
+              
+              sponsorLevelMap[tierName].push({
+                link: sp.link || '',
+                logoIndex: logoIndex
+              });
+              
+              logoCounter++;
+            });
+          }
+
           const wpPayload = {
             title: event.title,
             content: `<!-- wp:paragraph -->\n<p>${event.description || ''}</p>\n<!-- /wp:paragraph -->`,
@@ -579,7 +603,24 @@ router.put('/events/:id/status', async (req, res, next) => {
             startDate: event.startDate ? Math.floor(new Date(event.startDate).getTime() / 1000) : 0,
             endDate: event.endDate ? Math.floor(new Date(event.endDate).getTime() / 1000) : 0,
             address: `${event.venue || ''}, ${event.city || ''}`.trim().replace(/^,\s*/, ''),
-            banner: event.banner || ''
+            banner: event.banner || '',
+            // Organizer details
+            orgName: event.orgName || '',
+            orgEmail: event.orgEmail || '',
+            orgPhone: event.orgPhone || '',
+            orgWebsite: event.orgWebsite || '',
+            orgDesc: event.orgDesc || '',
+            orgLogo: event.orgLogo || '',
+            // Schedules
+            schedules: event.schedules || [],
+            // FAQs
+            faqs: event.faqsList || [],
+            // Contact
+            contactShortcode: event.contactShortcode || '',
+            // Sponsors
+            sponsorsLogos,
+            sponsorLevels: Object.keys(sponsorLevelMap),
+            sponsorGroups: Object.values(sponsorLevelMap)
           };
 
           const endpoint = `${wpUrl}/wp-json/visitexpo/v1/create-event`;
