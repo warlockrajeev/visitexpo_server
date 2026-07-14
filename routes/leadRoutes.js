@@ -25,14 +25,23 @@ router.get('/', async (req, res, next) => {
     if (eventId) {
       if (req.user.role === 'organizer') {
         const event = await Event.findById(eventId);
-        if (!event || event.organizer.toString() !== req.user._id.toString()) {
+        const orgId = req.user.organization;
+        const userId = req.user.id;
+        const isOwner = (event?.organizer && orgId && event.organizer.toString() === orgId.toString()) ||
+                        (event?.claimedBy && userId && event.claimedBy.toString() === userId.toString());
+        if (!event || !isOwner) {
           return res.status(403).json({ success: false, error: 'Not authorized to access leads for this event' });
         }
       }
       query.event = eventId;
     } else {
       if (req.user.role === 'organizer') {
-        const myEvents = await Event.find({ organizer: req.user._id });
+        const myEvents = await Event.find({
+          $or: [
+            { organizer: req.user.organization },
+            { claimedBy: req.user.id }
+          ]
+        });
         const myEventIds = myEvents.map(e => e._id);
         query.event = { $in: myEventIds };
       }

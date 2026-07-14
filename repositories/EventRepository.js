@@ -57,7 +57,10 @@ class EventRepository extends BaseRepository {
     }
 
     if (filters.organizerId) {
-      filter.organizer = filters.organizerId;
+      filter.$or = [
+        { organizer: filters.organizerId },
+        { claimedBy: filters.organizerId }
+      ];
       // Organizers should be able to view draft events too
       delete filter.status;
       if (filters.status) {
