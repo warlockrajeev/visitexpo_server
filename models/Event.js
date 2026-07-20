@@ -129,6 +129,8 @@ const EventSchema = new mongoose.Schema(
       }
     ],
     contactShortcode: { type: String, default: '' },
+    isFreeEvent: { type: Boolean, default: true },
+    paidTicketPrice: { type: Number, default: 0 },
     registrationSettings: {
       maxLimit: { type: Number, default: 1000 },
       isOpen: { type: Boolean, default: true },

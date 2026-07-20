@@ -6,6 +6,7 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
+import Ticket from '../models/Ticket.js';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
 import AuthService from '../services/AuthService.js';
@@ -75,6 +76,24 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
           ...eventData,
           isClaimed: false
         });
+
+        // Auto-create a default ticket tier for the new event
+        const ticketPrice = item.ticketPrice ? parseInt(item.ticketPrice, 10) : 0;
+        const existingTicket = await Ticket.findOne({ event: event._id });
+        if (!existingTicket) {
+          await Ticket.create({
+            title: ticketPrice > 0 ? 'General Admission' : 'Visitor Pass',
+            description: ticketPrice > 0
+              ? `Standard paid entry ticket — ₹${ticketPrice}`
+              : 'Complimentary visitor registration pass',
+            type: ticketPrice > 0 ? 'paid' : 'free',
+            price: ticketPrice,
+            currency: 'INR',
+            capacity: 1000,
+            event: event._id
+          });
+        }
+
         synced.push(event);
       }
     }

@@ -5,10 +5,51 @@
 
 import express from 'express';
 import EventService from '../services/EventService.js';
+import Ticket from '../models/Ticket.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 
 const router = express.Router();
+
+/**
+ * Helper: Auto-create or update the default ticket tier for an event
+ * based on the isFreeEvent / paidTicketPrice fields from the wizard or edit form.
+ */
+async function syncDefaultTicketTier(eventId, body) {
+  // Only process if ticketing data is explicitly provided
+  if (body.isFreeEvent === undefined && body.paidTicketPrice === undefined) return;
+
+  const isFree = body.isFreeEvent === true || body.isFreeEvent === 'true';
+  const price = isFree ? 0 : (parseInt(body.paidTicketPrice, 10) || 0);
+  const type = isFree ? 'free' : (price > 0 ? 'paid' : 'free');
+
+  // Look for an existing default ticket for this event
+  let ticket = await Ticket.findOne({ event: eventId, title: { $in: ['Default Entry Pass', 'General Admission', 'Visitor Pass'] } });
+
+  if (ticket) {
+    // Update existing default tier
+    ticket.type = type;
+    ticket.price = price;
+    ticket.title = isFree ? 'Visitor Pass' : 'General Admission';
+    ticket.description = isFree
+      ? 'Complimentary visitor registration pass'
+      : `Standard paid entry ticket — ₹${price}`;
+    await ticket.save();
+  } else {
+    // Create new default tier
+    await Ticket.create({
+      title: isFree ? 'Visitor Pass' : 'General Admission',
+      description: isFree
+        ? 'Complimentary visitor registration pass'
+        : `Standard paid entry ticket — ₹${price}`,
+      type,
+      price,
+      currency: body.currency || 'INR',
+      capacity: body.ticketCapacity || 1000,
+      event: eventId
+    });
+  }
+}
 
 // ==========================================
 // PUBLIC WORDPRESS / FRONTEND CONSUMPTION APIS
@@ -90,6 +131,10 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
     }
 
     const event = await EventService.createEvent(req.body, req.user.organization);
+
+    // Auto-create default ticket tier if ticketing data is provided
+    await syncDefaultTicketTier(event._id, req.body);
+
     res.status(201).json({ success: true, message: 'Event created successfully', event });
   } catch (error) {
     next(error);
@@ -100,6 +145,10 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
 router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
   try {
     const event = await EventService.updateEvent(req.params.id, req.body, req.user.organization);
+
+    // Sync default ticket tier if ticketing data changed
+    await syncDefaultTicketTier(event._id, req.body);
+
     res.status(200).json({ success: true, message: 'Event updated successfully', event });
   } catch (error) {
     next(error);

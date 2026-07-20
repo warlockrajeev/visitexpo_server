@@ -595,6 +595,33 @@ router.put('/events/:id/status', async (req, res, next) => {
             });
           }
 
+          // Fetch Ticket Tiers from MongoDB
+          const Ticket = (await import('../models/Ticket.js')).default;
+          const dbTickets = await Ticket.find({ event: event._id });
+
+          let ticketsPayload = [];
+          if (dbTickets && dbTickets.length > 0) {
+            ticketsPayload = dbTickets.map(t => ({
+              title: t.title,
+              description: t.description || '',
+              type: t.type || 'free',
+              price: t.price || 0,
+              currency: t.currency || 'INR',
+              capacity: t.capacity || 1000
+            }));
+          } else {
+            const isFree = event.isFreeEvent !== false;
+            const price = isFree ? 0 : (event.paidTicketPrice || 0);
+            ticketsPayload = [{
+              title: isFree ? 'Visitor Pass' : 'General Admission',
+              description: isFree ? 'Complimentary visitor registration pass' : `Standard paid entry ticket — ₹${price}`,
+              type: isFree ? 'free' : 'paid',
+              price: price,
+              currency: 'INR',
+              capacity: 1000
+            }];
+          }
+
           const wpPayload = {
             title: event.title,
             content: `<!-- wp:paragraph -->\n<p>${event.description || ''}</p>\n<!-- /wp:paragraph -->`,
@@ -620,7 +647,11 @@ router.put('/events/:id/status', async (req, res, next) => {
             // Sponsors
             sponsorsLogos,
             sponsorLevels: Object.keys(sponsorLevelMap),
-            sponsorGroups: Object.values(sponsorLevelMap)
+            sponsorGroups: Object.values(sponsorLevelMap),
+            // Ticketing & Pricing
+            isFreeEvent: event.isFreeEvent,
+            paidTicketPrice: event.paidTicketPrice || 0,
+            tickets: ticketsPayload
           };
 
           const endpoint = `${wpUrl}/wp-json/visitexpo/v1/create-event`;
