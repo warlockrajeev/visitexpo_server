@@ -12,6 +12,11 @@ import Order from '../models/Order.js';
 import Subscription from '../models/Subscription.js';
 import Invoice from '../models/Invoice.js';
 import { protect, authorize } from '../middlewares/auth.js';
+import {
+  sendEmail,
+  sendOrganizerApprovalNotification,
+  sendExhibitorApprovalNotification
+} from '../services/emailService.js';
 
 const router = express.Router();
 
@@ -314,6 +319,14 @@ router.put('/organizers/:id/status', async (req, res, next) => {
     if (action === 'approve') {
       user.isVerified = true;
       await user.save();
+
+      // Trigger automatic account creation notification email to organizer
+      const org = await Organization.findById(user.organization);
+      sendOrganizerApprovalNotification({
+        name: user.name,
+        email: user.email,
+        orgName: org?.name || ''
+      }).catch(err => console.error('[AdminRoutes] Email notification error:', err.message));
     } else if (action === 'reject') {
       // Delete or mark inactive
       await User.findByIdAndDelete(req.params.id);
@@ -416,12 +429,104 @@ router.put('/exhibitors/:id/status', async (req, res, next) => {
           await event.save();
         }
       }
+
+      // Trigger automatic approval email notification to exhibitor
+      sendExhibitorApprovalNotification({
+        companyName: exhibitor.name,
+        contactEmail: exhibitor.contactEmail,
+        eventName: event?.title || '',
+        boothNumber: exhibitor.boothNumber
+      }).catch(err => console.error('[AdminRoutes] Exhibitor email error:', err.message));
     }
 
     res.status(200).json({
       success: true,
       message: `Exhibitor onboarding request set to ${status} successfully`,
       exhibitor
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Send manual email notification to organizer or exhibitor
+// @route   POST /api/admin/send-notification
+router.post('/send-notification', async (req, res, next) => {
+  try {
+    const { to, subject, message, recipientName } = req.body;
+    if (!to || !message) {
+      return res.status(400).json({ success: false, error: 'Recipient email and message content are required' });
+    }
+
+    const emailSubject = subject || `🎉 Account Onboarding Successful — Welcome to VisitExpo!`;
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Account Onboarding Successful</title>
+        <style>
+          body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f8fafc; margin: 0; padding: 0; color: #1e293b; }
+          .wrapper { width: 100%; table-layout: fixed; background-color: #f8fafc; padding: 40px 0; }
+          .main-card { max-width: 600px; margin: 0 auto; background: #ffffff; border-radius: 20px; overflow: hidden; box-shadow: 0 10px 30px rgba(0,0,0,0.06); border: 1px solid #e2e8f0; }
+          .header { background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%); padding: 40px 32px; text-align: center; color: #ffffff; }
+          .brand-badge { display: inline-block; background: rgba(255,255,255,0.2); backdrop-filter: blur(10px); padding: 6px 16px; border-radius: 50px; font-size: 11px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; margin-bottom: 12px; }
+          .header h1 { margin: 0; font-size: 26px; font-weight: 800; letter-spacing: -0.5px; line-height: 1.2; }
+          .content { padding: 36px 32px; }
+          .greeting { font-size: 20px; font-weight: 800; color: #0f172a; margin-bottom: 12px; }
+          .status-box { background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 16px; padding: 20px; margin: 20px 0; text-align: center; }
+          .status-badge { display: inline-block; background: #22c55e; color: #ffffff; font-weight: 800; padding: 6px 16px; border-radius: 50px; font-size: 13px; margin-bottom: 8px; }
+          .status-text { font-size: 14px; color: #166534; font-weight: 700; margin: 0; }
+          .msg-body { font-size: 15px; color: #334155; line-height: 1.6; margin: 20px 0; white-space: pre-wrap; background: #f8fafc; border-left: 4px solid #4f46e5; padding: 20px; border-radius: 8px; }
+          .btn-container { text-align: center; margin: 32px 0 16px 0; }
+          .btn { display: inline-block; background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); color: #ffffff !important; font-weight: 800; text-decoration: none; padding: 16px 36px; border-radius: 14px; font-size: 15px; box-shadow: 0 6px 20px rgba(79,70,229,0.35); }
+          .footer { background: #f8fafc; border-top: 1px solid #e2e8f0; padding: 24px; text-align: center; font-size: 12px; color: #94a3b8; line-height: 1.5; }
+          .footer a { color: #6366f1; text-decoration: none; font-weight: 700; }
+        </style>
+      </head>
+      <body>
+        <div class="wrapper">
+          <div class="main-card">
+            <div class="header">
+              <div class="brand-badge">VisitExpo Engine</div>
+              <h1>Account Onboarding Successful 🎉</h1>
+            </div>
+            <div class="content">
+              <div class="greeting">Hello ${recipientName || 'Valued Partner'},</div>
+              
+              <div class="status-box">
+                <span class="status-badge">✓ Onboarding Complete</span>
+                <p class="status-text">Your VisitExpo account has been created and verified successfully!</p>
+              </div>
+
+              <div class="msg-body">${message}</div>
+
+              <div class="btn-container">
+                <a href="https://visitexpo-client.vercel.app/login" class="btn" target="_blank">Access Your Dashboard &rarr;</a>
+              </div>
+            </div>
+            <div class="footer">
+              VisitExpo Inc. &bull; Official Event & Expo Synchronization Engine<br>
+              Questions? Reach us at <a href="mailto:support@visitexpo.in">support@visitexpo.in</a> &bull; <a href="https://visitexpo.in">visitexpo.in</a>
+            </div>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    const result = await sendEmail({ to, subject: emailSubject, html: htmlContent });
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        error: `SMTP Login Failed: Please ensure the 'support@visitexpo.in' email account is fully created in cPanel by clicking the blue 'Create' button. (${result.error})`
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Notification email successfully sent to ${to}`
     });
   } catch (error) {
     next(error);
