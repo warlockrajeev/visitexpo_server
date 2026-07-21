@@ -12,7 +12,7 @@ dotenv.config();
 
 const PORT = process.env.PORT || 5000;
 
-// Initialize Database connection
+// Initialize Database connections
 connectDB();
 
 // Automatic Background WordPress Sync Routine
