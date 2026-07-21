@@ -10,8 +10,8 @@ dotenv.config();
 // Create reusable Nodemailer transporter
 const createTransporter = () => {
   const host = process.env.SMTP_HOST || 'nexus.herosite.pro';
-  const port = parseInt(process.env.SMTP_PORT || '587', 10);
-  const secure = process.env.SMTP_SECURE === 'true' || (port === 465 && process.env.SMTP_SECURE !== 'false');
+  const port = parseInt(process.env.SMTP_PORT || '465', 10);
+  const secure = process.env.SMTP_SECURE !== 'false';
   const user = process.env.SMTP_USER || 'support@visitexpo.in';
   const pass = process.env.SMTP_PASS || 'BdMvnk]b_pFOIQPE';
 
@@ -19,10 +19,9 @@ const createTransporter = () => {
     host,
     port,
     secure,
-    requireTLS: !secure,
-    connectionTimeout: 3000,
-    greetingTimeout: 3000,
-    socketTimeout: 3000,
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
     auth: {
       user,
       pass
@@ -34,10 +33,9 @@ const createTransporter = () => {
 };
 
 /**
- * Send an email via Nodemailer SMTP with automatic HTTPS WordPress bridge fallback (for cloud hosts like Render.com)
+ * Send an email using configured SMTP options
  */
 export const sendEmail = async ({ to, subject, html, text }) => {
-  // 1. Try Nodemailer SMTP transport with fast 3s timeout
   try {
     const transporter = createTransporter();
     const from = process.env.SMTP_FROM || '"VisitExpo Support" <support@visitexpo.in>';
@@ -51,37 +49,11 @@ export const sendEmail = async ({ to, subject, html, text }) => {
     };
 
     const info = await transporter.sendMail(mailOptions);
-    console.log(`[EmailService] Email successfully sent via SMTP to ${to}. MessageId: ${info.messageId}`);
+    console.log(`[EmailService] Email successfully sent to ${to}. MessageId: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.warn(`[EmailService] SMTP send failed (${error.message}). Attempting HTTPS WordPress mail bridge...`);
-  }
-
-  // 2. Fallback to HTTPS WordPress API Mail Bridge (bypasses cloud provider SMTP port blocks completely)
-  try {
-    const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-    const apiKey = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
-
-    const res = await fetch(`${wpUrl}/wp-json/visitexpo/v1/send-email`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-VisitExpo-Key': apiKey
-      },
-      body: JSON.stringify({ to, subject, html })
-    });
-
-    const data = await res.json();
-    if (res.ok && data.success) {
-      console.log(`[EmailService] Email successfully sent via WordPress HTTPS Bridge to ${to}`);
-      return { success: true, messageId: 'wp_bridge_' + Date.now() };
-    } else {
-      console.error(`[EmailService] HTTPS Bridge error:`, data);
-      return { success: false, error: data.message || data.error || 'HTTPS Mail Bridge failed' };
-    }
-  } catch (bridgeError) {
-    console.error(`[EmailService] Both SMTP and HTTPS Mail Bridge failed:`, bridgeError.message);
-    return { success: false, error: bridgeError.message };
+    console.error(`[EmailService] Error sending email to ${to}:`, error.message);
+    return { success: false, error: error.message };
   }
 };
 
