@@ -17,7 +17,7 @@ export const generateAccessToken = (user) => {
       organization: user.organization
     },
     ACCESS_SECRET,
-    { expiresIn: process.env.JWT_ACCESS_EXPIRE || '15m' }
+    { expiresIn: process.env.JWT_ACCESS_EXPIRE || '7d' }
   );
 };
 
