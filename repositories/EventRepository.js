@@ -38,7 +38,15 @@ class EventRepository extends BaseRepository {
   }
 
   async searchAndPaginate(filters = {}, options = {}) {
-    const filter = { status: 'published' };
+    const filter = {};
+
+    if (filters.all !== 'true' && filters.all !== true && filters.status !== 'all') {
+      if (filters.status) {
+        filter.status = filters.status;
+      } else {
+        filter.status = 'published';
+      }
+    }
 
     if (filters.search) {
       filter.$or = [

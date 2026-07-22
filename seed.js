@@ -18,6 +18,7 @@ import Lead from './models/Lead.js';
 import Ticket from './models/Ticket.js';
 import Order from './models/Order.js';
 import Payment from './models/Payment.js';
+import SupportTicket from './models/SupportTicket.js';
 
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/visitexpo';
 
@@ -38,7 +39,8 @@ const seed = async () => {
       Lead.deleteMany({}),
       Ticket.deleteMany({}),
       Order.deleteMany({}),
-      Payment.deleteMany({})
+      Payment.deleteMany({}),
+      SupportTicket.deleteMany({})
     ]);
     console.log('Collections cleared.');
 
@@ -78,8 +80,20 @@ const seed = async () => {
     });
     console.log(`User "${user.name}" (${user.email}) created.`);
 
-    // Add user back to organization team members
+    // 3.2 Create Rajeev Haldar Organizer User
+    const rajeevUser = await User.create({
+      name: 'Rajeev Haldar',
+      email: 'rajeevhaldar8265@gmail.com',
+      password: '007007',
+      role: 'organizer',
+      organization: organization._id,
+      isVerified: true
+    });
+    console.log(`User "${rajeevUser.name}" (${rajeevUser.email}) created.`);
+
+    // Add users back to organization team members
     organization.teamMembers.push({ user: user._id, role: 'organizer' });
+    organization.teamMembers.push({ user: rajeevUser._id, role: 'organizer' });
     await organization.save();
 
     // 4. Create Event
@@ -127,74 +141,58 @@ const seed = async () => {
     console.log(`Event "${event.title}" created.`);
 
     // 4.1 Seed WordPress 7.0 Directory Events (Unclaimed)
-    console.log('Seeding WordPress 7.0 directory events...');
-    const wpEvents = [
-      {
-        title: '11th Asian Australian Rotorcraft Forum',
-        slug: '11th-asian-australian-rotorcraft-forum',
-        description: 'Global forum on vertical flight, rotorcraft technology, and advanced air mobility.',
-        venue: 'IIT Madras, Chennai',
-        city: 'Chennai',
-        startDate: new Date('2025-06-09'),
-        endDate: new Date('2025-06-11'),
-        categories: ['Aeronautics', 'Engineering'],
-        wpPostId: 'wp-1001',
-        isClaimed: false,
-        status: 'published'
-      },
-      {
-        title: '12th Symposium on Diseases in Asian Aquaculture (DAA12)',
-        slug: '12th-symposium-on-diseases-in-asian-aquaculture-daa12',
-        description: 'International symposium focusing on aquatic animal health and one health aquaculture.',
-        venue: 'Chennai Convention Center',
-        city: 'Chennai',
-        startDate: new Date('2025-06-09'),
-        endDate: new Date('2025-06-12'),
-        categories: ['Aquaculture', 'Marine'],
-        wpPostId: 'wp-1002',
-        isClaimed: false,
-        status: 'published'
-      },
-      {
-        title: '15th Cement Expo 2025',
-        slug: '15th-cement-expo-2025',
-        description: 'Premier trade fair for cement manufacturing technology and green building materials.',
-        venue: 'Pragati Maidan',
-        city: 'New Delhi',
-        startDate: new Date('2025-10-29'),
-        endDate: new Date('2025-10-31'),
-        categories: ['Construction', 'Industrial'],
-        wpPostId: 'wp-1003',
-        isClaimed: false,
-        status: 'published'
-      },
-      {
-        title: '6th EV India Expo 2026',
-        slug: '6th-ev-india-expo-2026',
-        description: 'Electric vehicle, battery storage, and charging infrastructure exhibition.',
-        venue: 'India Expo Mart, Greater Noida',
-        city: 'Greater Noida',
-        startDate: new Date('2026-07-03'),
-        endDate: new Date('2026-07-05'),
-        categories: ['Automotive', 'EV Technology'],
-        wpPostId: 'wp-1004',
-        isClaimed: false,
-        status: 'published'
-      },
-      {
-        title: '74th India International Garment Fair (IIGF)',
-        slug: '74th-india-international-garment-fair-iigf',
-        description: 'Major apparel and textile sourcing fair for international buyers and fashion brands.',
-        venue: 'Yashobhoomi Complex, New Delhi',
-        city: 'New Delhi',
-        startDate: new Date('2026-01-04'),
-        endDate: new Date('2026-01-06'),
-        categories: ['Textile', 'Fashion'],
-        wpPostId: 'wp-1005',
-        isClaimed: false,
-        status: 'published'
-      }
+    console.log('Seeding WordPress & 10times directory events...');
+    const fullDirectoryList = [
+      { title: 'RAHSTA Expo 8th edition', city: 'Mumbai', venue: 'Bandra Kurla Complex', startDate: '2026-07-08', description: 'The Future of India’s Infrastructure is Being Built Here', categories: ['Infrastructure', 'Construction'] },
+      { title: 'India Energy Storage Week', city: 'New Delhi', venue: 'Pragati Maidan', startDate: '2026-07-08', description: 'Powering the Net-Zero Transition: India Energy Storage Week', categories: ['Energy', 'EV Technology'] },
+      { title: 'Rickshaw Expo Mumbai 2026', city: 'Mumbai', venue: 'Bombay Exhibition Centre', startDate: '2026-07-08', description: 'The Future of Last-Mile Mobility is Here', categories: ['Automotive', 'Logistics'] },
+      { title: 'India International STEM Education Fest 6th edition', city: 'Bengaluru', venue: 'BIEC Exhibition Center', startDate: '2026-07-08', description: 'Shaping the Next Gen Education', categories: ['Education', 'Technology'] },
+      { title: 'Prawaas (Transport Expo) 5th edition Gandhinagar', city: 'Gandhinagar', venue: 'Mahatma Mandir Convention Centre', startDate: '2026-07-09', description: 'The Epicenter of Mobility Evolution in Gujarat', categories: ['Automotive', 'Transport'] },
+      { title: 'GRI Funding Opportunities India', city: 'Mumbai', venue: 'Jotun Grand Hall', startDate: '2026-07-09', description: 'The Future of Indian Real Estate Finance & Capital Markets', categories: ['Real Estate', 'Finance'] },
+      { title: 'BioResources & Circular Economy Summit & Expo (BioCE Summit) 1st edition', city: 'Mumbai', venue: 'Jio World Convention Centre', startDate: '2026-07-10', description: 'India’s First Dedicated Bioresources Event', categories: ['Bioresources', 'Environment'] },
+      { title: 'Aakar Auto Show Expo 2026', city: 'Pune', venue: 'Auto Cluster Exhibition Centre', startDate: '2026-07-10', description: 'Catch the Future of Mobility at Western India’s Premier Auto Show', categories: ['Automotive'] },
+      { title: 'Travel and Tourism Fair Kolkata 2026', city: 'Kolkata', venue: 'Biswa Bangla Mela Prangan', startDate: '2026-07-10', description: 'Eastern India’s absolute powerhouse for travel procurement', categories: ['Travel', 'Tourism'] },
+      { title: 'Food And Bakery Expo', city: 'Chennai', venue: 'Chennai Trade Centre', startDate: '2026-07-10', description: 'Revolutionizing the Future of Baking & Food Tech', categories: ['Food Tech', 'Hospitality'] },
+      { title: 'Uttar Pradesh Fire And Safety Expo and Conference', city: 'Lucknow', venue: 'Indira Gandhi Pratishthan', startDate: '2026-07-10', description: 'NextGen Protection: Redefining Workplace Safety and Emergency Protection', categories: ['Safety', 'Industrial'] },
+      { title: 'India International Pumps Valves and Compressor Expo', city: 'Coimbatore', venue: 'CODISSIA Trade Fair Complex', startDate: '2026-07-11', description: 'Optimizing Fluid Flow & Process Velocity', categories: ['Industrial', 'Engineering'] },
+      { title: 'INTERPOL Digital Forensics Expert Group Meeting (DFEG)', city: 'New Delhi', venue: 'Vigyan Bhawan', startDate: '2026-07-13', description: 'Strengthening Global Cyber Resilience', categories: ['Cyber Security', 'Government'] },
+      { title: 'Pet Food Pet Forum 2026', city: 'New Delhi', venue: 'India Expo Mart', startDate: '2026-07-15', description: 'Driving Innovation in the Pet Food Economy', categories: ['Pet Food', 'Retail'] },
+      { title: 'Sustainable Fashion And LifeStyle Exhibition', city: 'Jaipur', venue: 'JECC Exhibition Centre', startDate: '2026-07-17', description: 'Style with a soul. Fashion with a future.', categories: ['Textile', 'Fashion'] },
+      { title: 'Vibrant India 2026', city: 'Ahmedabad', venue: 'Helipad Exhibition Centre', startDate: '2026-07-17', description: 'India’s Ultimate Home & Kitchen Sourcing Hub', categories: ['Retail', 'Consumer'] },
+      { title: 'India Jewellery Show Vadodara (IJS)', city: 'Vadodara', venue: 'Navlakhi Ground', startDate: '2026-07-17', description: 'The grandest celebration of jewels and bespoke luxury couture', categories: ['Jewelry', 'Luxury'] },
+      { title: 'Automation Expo – Mumbai 2026', city: 'Mumbai', venue: 'Bombay Exhibition Centre', startDate: '2026-07-22', description: 'Future-Proof Your Business at Asia’s Biggest Automation Event', categories: ['Automation', 'Industrial'] },
+      { title: 'Fabrics & Accessories Trade Show (F&A Show)', city: 'Bengaluru', venue: 'Trade Centre Whitefield', startDate: '2026-07-23', description: 'Complete the Apparel Value Chain', categories: ['Textile', 'Fashion'] },
+      { title: 'Natural Gas Vehicle Expo (NGV Expo)', city: 'New Delhi', venue: 'Pragati Maidan', startDate: '2026-07-23', description: 'Driving the Transition to Clean Mobility', categories: ['Clean Energy', 'Automotive'] },
+      { title: 'Fastener Fair India', city: 'Mumbai', venue: 'Bombay Exhibition Centre', startDate: '2026-07-24', description: 'The Backbone of Manufacturing & Engineering', categories: ['Manufacturing', 'Engineering'] },
+      { title: 'Asian Machine Tool Exhibition (AMTEX)', city: 'New Delhi', venue: 'Pragati Maidan', startDate: '2026-07-24', description: 'Shaping the Future of Smart Manufacturing', categories: ['Machine Tools', 'Automation'] },
+      { title: 'Cloud and Cyber Security EXPO', city: 'Bengaluru', venue: 'KTPO Trade Center', startDate: '2026-07-24', description: 'Securing the Cloud, Powering the Future', categories: ['Cloud', 'Cyber Security'] },
+      { title: 'India International IOT Automation Expo', city: 'New Delhi', venue: 'Yashobhoomi Complex', startDate: '2026-07-24', description: 'The Future of Smart Living & Industry', categories: ['IoT', 'Automation'] },
+      { title: 'Bridal Asia Ahmedabad', city: 'Ahmedabad', venue: 'Hyatt Regency', startDate: '2026-07-24', description: 'The Symphony of Jewels meets bespoke luxury couture', categories: ['Luxury', 'Fashion'] },
+      { title: 'Indusfood Ahmedabad 9th edition 2026', city: 'Ahmedabad', venue: 'Eka Club Exhibition Ground', startDate: '2026-07-24', description: 'Sourcing the Future of Food & Agriculture', categories: ['Food Tech', 'Agriculture'] },
+      { title: 'RENEWEEX GLOBAL', city: 'New Delhi', venue: 'India Expo Mart', startDate: '2026-07-29', description: 'Powering a sustainable tomorrow', categories: ['Renewable Energy'] },
+      { title: 'Gifts World Expo (GWE)', city: 'New Delhi', venue: 'Pragati Maidan', startDate: '2026-07-30', description: 'Scale Your Corporate Sourcing', categories: ['Corporate Gifting'] },
+      { title: 'Real Estate, Banking & Finance Expo', city: 'Bengaluru', venue: 'Manpho Convention Center', startDate: '2026-07-31', description: 'Your Gateway to Property Investment & Banking Solutions', categories: ['Real Estate', 'Finance'] },
+      { title: '11th Asian Australian Rotorcraft Forum', city: 'Chennai', venue: 'IIT Madras', startDate: '2025-06-09', description: 'Aeronautics & Helicopter Engineering Forum', categories: ['Aeronautics'] },
+      { title: '12th Symposium on Diseases in Asian Aquaculture (DAA12)', city: 'Chennai', venue: 'Chennai Convention Center', startDate: '2025-06-09', description: 'Marine & Aquatic Health Symposium', categories: ['Aquaculture'] },
+      { title: '15th Cement Expo 2025', city: 'New Delhi', venue: 'Pragati Maidan', startDate: '2025-10-29', description: 'Cement, Concrete & Building Materials Exhibition', categories: ['Construction'] },
+      { title: '74th India International Garment Fair (IIGF)', city: 'New Delhi', venue: 'Yashobhoomi Complex', startDate: '2026-01-04', description: 'International Apparel Sourcing Fair', categories: ['Fashion'] },
+      { title: '6th EV India Expo 2026', city: 'Greater Noida', venue: 'India Expo Mart', startDate: '2026-07-03', description: 'Electric Vehicle & Battery Innovation Expo', categories: ['EV Technology'] }
     ];
+
+    const wpEvents = fullDirectoryList.map((item, index) => ({
+      title: item.title,
+      slug: Event.schema.methods.slugify ? Event.schema.methods.slugify(item.title) : item.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+      description: item.description,
+      venue: item.venue,
+      city: item.city,
+      country: 'India',
+      startDate: new Date(item.startDate),
+      endDate: new Date(new Date(item.startDate).getTime() + 86400000 * 2),
+      categories: item.categories,
+      wpPostId: `wp-${1000 + index}`,
+      isClaimed: false,
+      status: 'published'
+    }));
 
     for (const wpEvt of wpEvents) {
       await Event.create(wpEvt);
@@ -584,6 +582,88 @@ const seed = async () => {
 
     const createdLeads = await Lead.create(leads);
     console.log(`${createdLeads.length} CRM Leads created.`);
+
+    // 10. Seed Support Tickets
+    console.log('Creating seed support tickets...');
+    await SupportTicket.create([
+      {
+        ticketId: 'TKT-2451',
+        user: user._id,
+        reporterName: user.name,
+        reporterEmail: user.email,
+        organization: organization._id,
+        event: event._id,
+        title: 'Payment Gateway webhook handshakes failing (Stripe sandbox)',
+        description: 'Orders created during simulated checkouts are occasionally timing out on callback verifications. Requesting team to inspect webhook secrets.',
+        category: 'billing',
+        priority: 'high',
+        status: 'open',
+        responses: [
+          {
+            sender: user._id,
+            senderName: user.name,
+            senderRole: user.role,
+            message: 'We noticed this error during our trial setup for Global Tech Expo 2026.',
+            createdAt: new Date(Date.now() - 3600000 * 3)
+          }
+        ]
+      },
+      {
+        ticketId: 'TKT-2449',
+        user: user._id,
+        reporterName: user.name,
+        reporterEmail: user.email,
+        organization: organization._id,
+        event: event._id,
+        title: 'Custom domain SSL certificate renewal for visitexpo.in subdomain',
+        description: 'Need assistance setting up automatic wildcard SSL certificates for our custom microsite URL.',
+        category: 'technical',
+        priority: 'medium',
+        status: 'in_progress',
+        responses: [
+          {
+            sender: user._id,
+            senderName: user.name,
+            senderRole: user.role,
+            message: 'DNS CNAME records have been updated to point to visitexpo proxy.',
+            createdAt: new Date(Date.now() - 86400000)
+          },
+          {
+            sender: superAdmin._id,
+            senderName: superAdmin.name,
+            senderRole: superAdmin.role,
+            message: 'Admin team is verifying Let\'s Encrypt challenge record propagation.',
+            createdAt: new Date(Date.now() - 43200000)
+          }
+        ]
+      },
+      {
+        ticketId: 'TKT-2448',
+        user: user._id,
+        reporterName: user.name,
+        reporterEmail: user.email,
+        organization: organization._id,
+        event: event._id,
+        title: 'Exhibitor roster booth allocation capacity request',
+        description: 'Would like to increase maximum exhibitor booth allocations from 50 to 100 for Hall 5.',
+        category: 'event_setup',
+        priority: 'low',
+        status: 'resolved',
+        resolutionNotes: 'Approved capacity increase to 100 booths for Hall 5.',
+        resolvedAt: new Date(Date.now() - 86400000 * 2),
+        resolvedBy: superAdmin._id,
+        responses: [
+          {
+            sender: superAdmin._id,
+            senderName: superAdmin.name,
+            senderRole: superAdmin.role,
+            message: 'Booth capacity limit has been upgraded to 100 in database settings.',
+            createdAt: new Date(Date.now() - 86400000 * 2)
+          }
+        ]
+      }
+    ]);
+    console.log('Seed Support Tickets created.');
 
     console.log('\nSeeding completed successfully!');
     process.exit(0);
