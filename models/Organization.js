@@ -51,6 +51,16 @@ const OrganizationSchema = new mongoose.Schema(
       phone: String,
       email: String
     },
+    description: {
+      type: String,
+      default: ''
+    },
+    social: {
+      linkedIn: { type: String, default: '' },
+      facebook: { type: String, default: '' },
+      instagram: { type: String, default: '' },
+      x: { type: String, default: '' }
+    },
     subscription: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Subscription',
