@@ -18,11 +18,23 @@ router.post('/register', async (req, res, next) => {
   try {
     const { eventId, name, description, logo, website, contactEmail, contactPhone, attendanceType, staff, password } = req.body;
 
-    if (!eventId || !name || !description || !contactEmail || !contactPhone) {
+    if (!eventId) {
       return res.status(400).json({
         success: false,
-        error: 'Event ID, Company Name, Description, Contact Email, and Contact Phone are required'
+        error: 'Event ID is required. Please select an active event before onboarding an exhibitor.'
       });
+    }
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, error: 'Company Name is required.' });
+    }
+    if (!description || !description.trim()) {
+      return res.status(400).json({ success: false, error: 'Company Description is required.' });
+    }
+    if (!contactEmail || !contactEmail.trim()) {
+      return res.status(400).json({ success: false, error: 'Contact Email is required.' });
+    }
+    if (!contactPhone || !contactPhone.trim()) {
+      return res.status(400).json({ success: false, error: 'Contact Phone is required.' });
     }
 
     // 1. Verify target event exists
@@ -113,14 +125,31 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
     const query = {};
 
     if (eventId) {
+      const event = await Event.findById(eventId);
+      if (!event) {
+        return res.status(404).json({ success: false, error: 'Target event not found' });
+      }
+
       if (req.user.role === 'organizer') {
-        const event = await Event.findById(eventId);
-        const orgId = req.user.organization;
-        const userId = req.user.id;
-        const isOwner = (event?.organizer && orgId && event.organizer.toString() === orgId.toString()) ||
-                        (event?.claimedBy && userId && event.claimedBy.toString() === userId.toString());
-        if (!event || !isOwner) {
-          return res.status(403).json({ success: false, error: 'Not authorized to access exhibitors for this event' });
+        const orgId = req.user.organization?._id || req.user.organization;
+        const userId = req.user.id || req.user._id;
+
+        const isOwner =
+          (event.organizer && orgId && event.organizer.toString() === orgId.toString()) ||
+          (event.claimedBy && userId && event.claimedBy.toString() === userId.toString()) ||
+          (!event.organizer && !event.claimedBy);
+
+        if (!isOwner) {
+          const isUserAssigned = await Event.exists({
+            _id: eventId,
+            $or: [
+              { organizer: orgId },
+              { claimedBy: userId }
+            ]
+          });
+          if (!isUserAssigned) {
+            return res.status(403).json({ success: false, error: 'Not authorized to access exhibitors for this event' });
+          }
         }
       }
       query.event = eventId;
