@@ -15,6 +15,8 @@ import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 
 const router = express.Router();
 
+import { syncEventToWordPress } from '../services/WordPressSyncService.js';
+
 // ==========================================
 // 1. BULK / SINGLE WORDPRESS EVENT SYNC
 // ==========================================
@@ -284,6 +286,10 @@ router.post('/onboard-organizer', async (req, res, next) => {
         ...newEventData,
         status: 'draft'
       }, orgId);
+    }
+
+    if (targetEvent) {
+      await syncEventToWordPress(targetEvent);
     }
 
     res.status(201).json({

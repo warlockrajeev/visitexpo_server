@@ -123,6 +123,8 @@ router.get('/:slug', wordpressLimiter, async (req, res, next) => {
 // ORGANIZER PRIVATE MANAGEMENT APIS
 // ==========================================
 
+import { syncEventToWordPress } from '../services/WordPressSyncService.js';
+
 // Create a new event
 router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
   try {
@@ -134,6 +136,9 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
 
     // Auto-create default ticket tier if ticketing data is provided
     await syncDefaultTicketTier(event._id, req.body);
+
+    // Automatically sync event to WordPress
+    await syncEventToWordPress(event._id);
 
     res.status(201).json({ success: true, message: 'Event created successfully', event });
   } catch (error) {
@@ -148,6 +153,9 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
 
     // Sync default ticket tier if ticketing data changed
     await syncDefaultTicketTier(event._id, req.body);
+
+    // Automatically sync event to WordPress
+    await syncEventToWordPress(event._id);
 
     res.status(200).json({ success: true, message: 'Event updated successfully', event });
   } catch (error) {
