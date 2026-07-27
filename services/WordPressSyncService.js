@@ -102,7 +102,8 @@ export const syncEventToWordPress = async (eventInput) => {
       sponsorsLogos,
       sponsorLevels: Object.keys(sponsorLevelMap),
       sponsorGroups: Object.values(sponsorLevelMap),
-      // Ticketing & Pricing
+      // Ticketing & Pricing (Keep labelTicket empty to avoid top pink register button)
+      labelTicket: '',
       isFreeEvent: event.isFreeEvent,
       paidTicketPrice: event.paidTicketPrice || 0,
       tickets: ticketsPayload
