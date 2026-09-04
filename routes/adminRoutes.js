@@ -11,6 +11,7 @@ import Exhibitor from '../models/Exhibitor.js';
 import Order from '../models/Order.js';
 import Subscription from '../models/Subscription.js';
 import Invoice from '../models/Invoice.js';
+import ContactMessage from '../models/ContactMessage.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import {
   sendEmail,
@@ -38,7 +39,8 @@ router.get('/dashboard', async (req, res, next) => {
       pendingOrganizers,
       pendingExhibitors,
       pendingClaims,
-      pendingEvents
+      pendingEvents,
+      newContactInquiries
     ] = await Promise.all([
       User.countDocuments(),
       Organization.countDocuments(),
@@ -48,7 +50,8 @@ router.get('/dashboard', async (req, res, next) => {
       User.countDocuments({ role: 'organizer', isVerified: false }),
       Exhibitor.countDocuments({ status: 'pending' }),
       Event.countDocuments({ isClaimed: true, status: 'draft' }),
-      Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } })
+      Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } }),
+      ContactMessage.countDocuments({ status: 'new' })
     ]);
 
     // Sum revenue
@@ -80,7 +83,8 @@ router.get('/dashboard', async (req, res, next) => {
           pendingOrganizers,
           pendingExhibitors,
           pendingClaims,
-          pendingEvents
+          pendingEvents,
+          newContactInquiries
         },
         packagesBreakdown: packagesCount
       }
