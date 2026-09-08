@@ -30,13 +30,29 @@ const UserSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ['super_admin', 'organizer', 'exhibitor', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
+      enum: ['super_admin', 'organizer', 'exhibitor', 'visitor', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
       default: 'organizer'
     },
     organization: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Organization',
       default: null
+    },
+    phone: {
+      type: String,
+      default: ''
+    },
+    company: {
+      type: String,
+      default: ''
+    },
+    designation: {
+      type: String,
+      default: ''
+    },
+    city: {
+      type: String,
+      default: ''
     },
     isVerified: {
       type: Boolean,

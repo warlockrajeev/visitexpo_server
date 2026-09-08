@@ -27,13 +27,13 @@ const setRefreshTokenCookie = (res, token) => {
 
 router.post('/signup', authLimiter, async (req, res, next) => {
   try {
-    const { name, email, password, organizationName } = req.body;
+    const { name, email, password, organizationName, role } = req.body;
     
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, error: 'Name, email, and password are required' });
     }
 
-    const data = await AuthService.signup(name, email, password, organizationName);
+    const data = await AuthService.signup(name, email, password, organizationName, role);
     
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken);
@@ -65,6 +65,98 @@ router.post('/login', authLimiter, async (req, res, next) => {
     res.status(200).json({
       success: true,
       message: 'Login successful',
+      accessToken: data.accessToken,
+      user: data.user
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Check if user exists and whether they have completed organizer/exhibitor profile
+router.post('/google/check', authLimiter, async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Google email is required' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const user = await User.findOne({ email: normalizedEmail }).populate('organization');
+    if (!user) {
+      return res.status(200).json({ success: true, exists: false, hasDetails: false });
+    }
+
+    // A user has details if:
+    // - For visitor: always ready
+    // - For organizer: has an organization with an explicit name
+    // - For exhibitor: has company or organization set
+    const hasOrg = !!(user.organization && user.organization.name && !user.organization.name.includes("'s Organization"));
+    const hasDetails = user.role === 'visitor' || hasOrg || !!(user.company && user.phone);
+
+    return res.status(200).json({
+      success: true,
+      exists: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        hasDetails,
+        organizationName: user.organization?.name || user.company || '',
+        phone: user.phone || user.organization?.contact?.phone || '',
+        city: user.city || user.organization?.address?.city || ''
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/google', authLimiter, async (req, res, next) => {
+  try {
+    const {
+      email,
+      name,
+      photoURL,
+      uid,
+      idToken,
+      role,
+      organizationName,
+      phone,
+      city,
+      website,
+      company,
+      designation,
+      industry
+    } = req.body;
+
+    if (!email) {
+      return res.status(400).json({ success: false, error: 'Google email is required' });
+    }
+
+    const data = await AuthService.googleAuth({
+      email,
+      name,
+      photoURL,
+      uid,
+      idToken,
+      role,
+      organizationName,
+      phone,
+      city,
+      website,
+      company,
+      designation,
+      industry
+    });
+
+    // Set refresh token cookie
+    setRefreshTokenCookie(res, data.refreshToken);
+
+    res.status(200).json({
+      success: true,
+      message: 'Google login successful',
       accessToken: data.accessToken,
       user: data.user
     });
@@ -131,6 +223,10 @@ router.get('/me', protect, async (req, res, next) => {
         id: userDoc._id,
         name: userDoc.name,
         email: userDoc.email,
+        phone: userDoc.phone || '',
+        company: userDoc.company || '',
+        designation: userDoc.designation || '',
+        city: userDoc.city || '',
         role: userDoc.role,
         isVerified: userDoc.isVerified,
         organization: userDoc.organization
@@ -213,16 +309,21 @@ router.put('/organization', protect, async (req, res, next) => {
   }
 });
 
-// Update Account Profile details (name, email)
+// Update Account Profile details (name, email, phone, company, designation, city)
 router.put('/profile', protect, async (req, res, next) => {
   try {
-    const { name, email } = req.body;
+    const { name, email, phone, company, designation, city } = req.body;
     const userDoc = await User.findById(req.user.id);
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'User account not found' });
     }
 
     if (name) userDoc.name = name;
+    if (phone !== undefined) userDoc.phone = phone;
+    if (company !== undefined) userDoc.company = company;
+    if (designation !== undefined) userDoc.designation = designation;
+    if (city !== undefined) userDoc.city = city;
+
     if (email && email.toLowerCase() !== userDoc.email.toLowerCase()) {
       const existingUser = await User.findOne({ email: email.toLowerCase() });
       if (existingUser && existingUser._id.toString() !== userDoc._id.toString()) {
@@ -242,6 +343,10 @@ router.put('/profile', protect, async (req, res, next) => {
         id: updatedUser._id,
         name: updatedUser.name,
         email: updatedUser.email,
+        phone: updatedUser.phone || '',
+        company: updatedUser.company || '',
+        designation: updatedUser.designation || '',
+        city: updatedUser.city || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
         organization: updatedUser.organization

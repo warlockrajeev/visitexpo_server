@@ -91,9 +91,32 @@ router.post('/register', async (req, res, next) => {
   }
 });
 
-// ==========================================
-// PRIVATE MANAGEMENT APIS
-// ==========================================
+// Get logged-in visitor's registered passes & badges
+router.get('/my-passes', protect, async (req, res, next) => {
+  try {
+    const userEmail = req.user.email ? req.user.email.toLowerCase().trim() : '';
+    if (!userEmail) {
+      return res.status(400).json({ success: false, error: 'User email not found' });
+    }
+
+    const passes = await Visitor.find({ email: userEmail })
+      .populate({
+        path: 'event',
+        select: 'title startDate endDate venue city banner logo shortDescription organizer'
+      })
+      .sort({ createdAt: -1 });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        docs: passes,
+        totalDocs: passes.length
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // Get visitors list for organizer dashboard
 router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 'sales_team', 'support'), async (req, res, next) => {
