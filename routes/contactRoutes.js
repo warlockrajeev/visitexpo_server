@@ -18,7 +18,7 @@ const router = express.Router();
 // @access  Public
 router.post('/', async (req, res, next) => {
   try {
-    const { role, name, email, phone, message } = req.body;
+    const { role, name, email, phone, message, source, meta } = req.body;
 
     if (!name || !email || !message) {
       return res.status(400).json({
@@ -27,8 +27,18 @@ router.post('/', async (req, res, next) => {
       });
     }
 
+    // Determine clean source label
+    let finalSource = source;
+    if (!finalSource) {
+      if (role === 'Advertiser') finalSource = 'advertise_modal';
+      else if (role === 'Subscriber') finalSource = 'newsletter';
+      else finalSource = 'landing_contact';
+    }
+
     const contact = await ContactMessage.create({
       role: role || 'Organizer',
+      source: finalSource,
+      meta: meta || {},
       name: name.trim(),
       email: email.trim().toLowerCase(),
       phone: (phone || '').trim(),
@@ -58,7 +68,7 @@ router.use(authorize('super_admin'));
 // @access  Super Admin
 router.get('/', async (req, res, next) => {
   try {
-    const { status, role, search, page = 1, limit = 50 } = req.query;
+    const { status, role, source, search, page = 1, limit = 50 } = req.query;
 
     const query = {};
 
@@ -68,6 +78,10 @@ router.get('/', async (req, res, next) => {
 
     if (role && role !== 'all') {
       query.role = role;
+    }
+
+    if (source && source !== 'all') {
+      query.source = source;
     }
 
     if (search && search.trim()) {

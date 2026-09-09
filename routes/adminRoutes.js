@@ -71,6 +71,12 @@ router.get('/dashboard', async (req, res, next) => {
       }
     });
 
+    // Get recent contact form inquiries
+    const recentInquiries = await ContactMessage.find()
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .lean();
+
     res.status(200).json({
       success: true,
       analytics: {
@@ -86,7 +92,8 @@ router.get('/dashboard', async (req, res, next) => {
           pendingEvents,
           newContactInquiries
         },
-        packagesBreakdown: packagesCount
+        packagesBreakdown: packagesCount,
+        recentInquiries
       }
     });
   } catch (error) {

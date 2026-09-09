@@ -9,9 +9,18 @@ const ContactMessageSchema = new mongoose.Schema(
   {
     role: {
       type: String,
-      enum: ['Organizer', 'Exhibitor', 'Visitor', 'Other'],
+      enum: ['Organizer', 'Exhibitor', 'Visitor', 'Advertiser', 'Subscriber', 'Claimant', 'Other'],
       default: 'Organizer',
       index: true
+    },
+    source: {
+      type: String,
+      default: 'landing_contact',
+      index: true
+    },
+    meta: {
+      type: mongoose.Schema.Types.Mixed,
+      default: {}
     },
     name: {
       type: String,
