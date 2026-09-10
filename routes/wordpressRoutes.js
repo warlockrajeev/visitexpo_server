@@ -125,16 +125,73 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
 
     if (wpKey) {
       try {
-        console.log(`[WP-Claimable] Fetching live claimable events from WordPress: ${wpUrl}/wp-json/visitexpo/v1/claimable-events`);
-        const wpResponse = await fetch(`${wpUrl}/wp-json/visitexpo/v1/claimable-events`, {
-          headers: {
-            'X-VisitExpo-Key': wpKey
+        // Try fetching all events via inspect-event-meta first (supports posts_per_page: -1)
+        console.log(`[WP-Claimable] Fetching live events from WordPress: ${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`);
+        const wpMetaResponse = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
+          headers: { 'X-VisitExpo-Key': wpKey }
+        });
+
+        if (wpMetaResponse.ok) {
+          const wpMetaData = await wpMetaResponse.json();
+          const rawDocs = wpMetaData.data?.docs || [];
+
+          if (Array.isArray(rawDocs) && rawDocs.length > 0) {
+            let docs = rawDocs.map((d, idx) => {
+              const m = d.meta || {};
+              const startTs = m.ovaem_date_start_time?.[0];
+              const endTs = m.ovaem_date_end_time?.[0];
+              const venue = m.ovaem_address_event?.[0] || m.ovaem_venue?.[0] || m.ovaem_address?.[0] || 'Exhibition Center';
+              const rawDesc = m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || (m.content?.[0] ? m.content[0].slice(0, 300) : '') || '';
+
+              return {
+                _id: String(d.id || `wp-${idx}`),
+                id: String(d.id || `wp-${idx}`),
+                wpPostId: d.id,
+                title: d.title || 'Exhibition Event',
+                slug: d.slug,
+                description: rawDesc,
+                startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
+                endDate: endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000).toISOString() : null,
+                venue: venue,
+                city: m.ovaem_city?.[0] || 'India',
+                isClaimed: false
+              };
+            });
+
+            // Filter if search term is provided
+            const { search, limit } = req.query;
+            if (search) {
+              const cleanSearch = search.toLowerCase();
+              docs = docs.filter(e => 
+                e.title.toLowerCase().includes(cleanSearch) || 
+                (e.venue && e.venue.toLowerCase().includes(cleanSearch)) ||
+                (e.city && e.city.toLowerCase().includes(cleanSearch))
+              );
+            }
+
+            const total = docs.length;
+            if (limit && limit !== 'all' && !isNaN(parseInt(limit, 10))) {
+              docs = docs.slice(0, parseInt(limit, 10));
+            }
+
+            return res.status(200).json({
+              success: true,
+              data: {
+                docs,
+                total: total,
+                count: docs.length
+              }
+            });
           }
+        }
+
+        // Fallback to claimable-events
+        const wpResponse = await fetch(`${wpUrl}/wp-json/visitexpo/v1/claimable-events`, {
+          headers: { 'X-VisitExpo-Key': wpKey }
         });
 
         if (wpResponse.ok) {
           const wpData = await wpResponse.json();
-          // Filter if search term is provided
           const { search } = req.query;
           if (search && wpData.success && wpData.data && wpData.data.docs) {
             const cleanSearch = search.toLowerCase();
