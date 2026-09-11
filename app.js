@@ -98,23 +98,25 @@ app.use('/api/upload', uploadRoutes);
 app.use('/api/support-tickets', supportTicketRoutes);
 app.use('/api/contact', contactRoutes);
 
-// Health check endpoint for Render monitoring
+// Health check endpoint
 app.get('/api/health', (req, res) => {
+  const currentUrl = process.env.SERVER_URL || `${req.protocol}://${req.get('host')}`;
   res.status(200).json({
     success: true,
     status: 'healthy',
     environment: process.env.NODE_ENV || 'production',
-    serverUrl: 'https://visitexpo-server.onrender.com',
+    serverUrl: currentUrl,
     timestamp: new Date()
   });
 });
 
 // Root welcome endpoint
 app.get('/', (req, res) => {
+  const currentUrl = process.env.SERVER_URL || `${req.protocol}://${req.get('host')}`;
   res.status(200).json({
     success: true,
-    message: 'VisitExpo API Server running live on Render',
-    docs: 'https://visitexpo-server.onrender.com/api/health'
+    message: 'VisitExpo API Server running live',
+    docs: `${currentUrl}/api/health`
   });
 });
 
