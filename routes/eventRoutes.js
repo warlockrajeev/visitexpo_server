@@ -6,7 +6,10 @@
 import express from 'express';
 import EventService from '../services/EventService.js';
 import Ticket from '../models/Ticket.js';
+import mongoose from 'mongoose';
+import Event from '../models/Event.js';
 import DeletedOrganizer from '../models/DeletedOrganizer.js';
+import DeletedEvent from '../models/DeletedEvent.js';
 import { getAggregatedOrganizers } from './adminRoutes.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
@@ -122,6 +125,24 @@ router.get('/deleted-organizers', async (req, res, next) => {
   }
 });
 
+// List of deleted events (excluded from aggregations and frontend listings)
+router.get('/deleted-events', async (req, res, next) => {
+  try {
+    const deleted = await DeletedEvent.find().lean();
+    res.status(200).json({
+      success: true,
+      data: (deleted || []).map(d => ({
+        eventId: d.eventId,
+        slug: d.slug,
+        title: d.title,
+        wpPostId: d.wpPostId
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Unified exhibitions directory endpoint (aggregates all live WordPress and platform events)
 router.get('/directory', async (req, res, next) => {
   try {
@@ -215,7 +236,52 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
 // Delete event
 router.delete('/:id', protect, authorize('super_admin', 'organizer'), async (req, res, next) => {
   try {
-    await EventService.deleteEvent(req.params.id, req.user.organization);
+    const targetId = req.params.id;
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const callerOrg = req.user.organization;
+
+    let event = null;
+    try {
+      event = await Event.findOne({
+        $or: [
+          { _id: mongoose.isValidObjectId(targetId) ? targetId : null },
+          { slug: targetId },
+          { slug: req.body?.slug || null },
+          { wpPostId: targetId }
+        ].filter(Boolean)
+      });
+    } catch (e) {
+      // ignore
+    }
+
+    if (event) {
+      if (!isSuperAdmin && String(event.organizer) !== String(callerOrg)) {
+        return res.status(403).json({ success: false, error: 'Unauthorized to delete this event' });
+      }
+      await Event.findByIdAndDelete(event._id);
+    }
+
+    // Record in DeletedEvent for permanent exclusion across WordPress and aggregated directory
+    await DeletedEvent.findOneAndUpdate(
+      {
+        $or: [
+          { eventId: String(targetId) },
+          { slug: String(req.body?.slug || event?.slug || targetId) },
+          { wpPostId: String(req.body?.wpPostId || event?.wpPostId || targetId) }
+        ]
+      },
+      {
+        eventId: String(targetId),
+        slug: String(req.body?.slug || event?.slug || targetId),
+        title: req.body?.title || event?.title || 'Exhibition Event',
+        wpPostId: String(req.body?.wpPostId || event?.wpPostId || targetId),
+        deletedAt: new Date(),
+        deletedBy: req.user.id || null,
+        reason: req.body?.reason || 'Deleted by Super Admin'
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
     res.status(200).json({ success: true, message: 'Event deleted successfully' });
   } catch (error) {
     next(error);

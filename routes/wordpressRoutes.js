@@ -16,6 +16,36 @@ import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 const router = express.Router();
 
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __wpFilename = fileURLToPath(import.meta.url);
+const __wpDirname = path.dirname(__wpFilename);
+
+function getWpImage(slug, id, wpPostId, title) {
+  try {
+    const imgPath = path.join(__wpDirname, '../data/wordpress-event-images.json');
+    if (fs.existsSync(imgPath)) {
+      const data = JSON.parse(fs.readFileSync(imgPath, 'utf8'));
+      if (slug && data[slug]) return data[slug];
+      if (id && data[String(id)]) return data[String(id)];
+      if (wpPostId && data[String(wpPostId)]) return data[String(wpPostId)];
+      if (title) {
+        const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        if (data[titleSlug]) return data[titleSlug];
+        const lowerTitle = title.toLowerCase();
+        for (const [k, url] of Object.entries(data)) {
+          if (k.length > 5 && isNaN(Number(k))) {
+            const rk = k.replace(/-/g, ' ');
+            if (lowerTitle.includes(rk) || (rk.length > 10 && rk.includes(lowerTitle))) return url;
+          }
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
 
 // ==========================================
 // 1. BULK / SINGLE WORDPRESS EVENT SYNC
@@ -143,6 +173,7 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
               const venue = m.ovaem_address_event?.[0] || m.ovaem_venue?.[0] || m.ovaem_address?.[0] || 'Exhibition Center';
               const rawDesc = m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || (m.content?.[0] ? m.content[0].slice(0, 300) : '') || '';
 
+              const realImg = getWpImage(d.slug, d.id, d.id, d.title);
               return {
                 _id: String(d.id || `wp-${idx}`),
                 id: String(d.id || `wp-${idx}`),
@@ -150,6 +181,8 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
                 title: d.title || 'Exhibition Event',
                 slug: d.slug,
                 description: rawDesc,
+                image: realImg,
+                banner: realImg,
                 startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
                 endDate: endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000).toISOString() : null,
                 venue: venue,

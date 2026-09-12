@@ -14,6 +14,7 @@ import Invoice from '../models/Invoice.js';
 import ContactMessage from '../models/ContactMessage.js';
 import Sponsor from '../models/Sponsor.js';
 import DeletedOrganizer from '../models/DeletedOrganizer.js';
+import DeletedEvent from '../models/DeletedEvent.js';
 import mongoose from 'mongoose';
 import { protect, authorize } from '../middlewares/auth.js';
 import {
@@ -23,6 +24,38 @@ import {
 } from '../services/emailService.js';
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
+
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __adminFilename = fileURLToPath(import.meta.url);
+const __adminDirname = path.dirname(__adminFilename);
+
+// Helper to look up real WordPress event image from local dataset
+function getWpImage(slug, id, wpPostId, title) {
+  try {
+    const imgPath = path.join(__adminDirname, '../data/wordpress-event-images.json');
+    if (fs.existsSync(imgPath)) {
+      const data = JSON.parse(fs.readFileSync(imgPath, 'utf8'));
+      if (slug && data[slug]) return data[slug];
+      if (id && data[String(id)]) return data[String(id)];
+      if (wpPostId && data[String(wpPostId)]) return data[String(wpPostId)];
+      if (title) {
+        const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        if (data[titleSlug]) return data[titleSlug];
+        const lowerTitle = title.toLowerCase();
+        for (const [k, url] of Object.entries(data)) {
+          if (k.length > 5 && isNaN(Number(k))) {
+            const rk = k.replace(/-/g, ' ');
+            if (lowerTitle.includes(rk) || (rk.length > 10 && rk.includes(lowerTitle))) return url;
+          }
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
 
 // Cache for categories aggregation to keep dashboard fast
 let categoriesCache = {
@@ -251,7 +284,28 @@ async function getAggregatedCategories() {
     console.warn('[Admin] inspect-event-meta fetch failed, falling back to MongoDB:', err.message);
   }
 
-  const mongoEvents = await Event.find().lean();
+  const [mongoEvents, deletedEvents] = await Promise.all([
+    Event.find().lean(),
+    DeletedEvent.find().lean()
+  ]);
+
+  const deletedEventIds = new Set((deletedEvents || []).map(d => String(d.eventId || '').trim().toLowerCase()));
+  const deletedEventSlugs = new Set((deletedEvents || []).map(d => String(d.slug || '').trim().toLowerCase()));
+  const deletedEventPostIds = new Set((deletedEvents || []).map(d => String(d.wpPostId || '').trim().toLowerCase()));
+  const deletedEventTitles = new Set((deletedEvents || []).map(d => (d.title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')));
+
+  const isEventDeleted = (id, slug, title, wpPostId) => {
+    const sId = String(id || '').trim().toLowerCase();
+    const sSlug = String(slug || '').trim().toLowerCase();
+    const sPostId = String(wpPostId || '').trim().toLowerCase();
+    const sTitle = (title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    if (sId && (deletedEventIds.has(sId) || deletedEventSlugs.has(sId) || deletedEventPostIds.has(sId))) return true;
+    if (sSlug && (deletedEventSlugs.has(sSlug) || deletedEventIds.has(sSlug))) return true;
+    if (sPostId && deletedEventPostIds.has(sPostId)) return true;
+    if (sTitle && deletedEventTitles.has(sTitle)) return true;
+    return false;
+  };
 
   const catMap = {};
   CATEGORIES_META.forEach(c => {
@@ -262,6 +316,7 @@ async function getAggregatedCategories() {
   });
 
   rawDocs.forEach((d, idx) => {
+    if (isEventDeleted(d.id, d.slug, d.title, d.id)) return;
     const m = d.meta || {};
     const startTs = m.ovaem_date_start_time?.[0];
     const endTs = m.ovaem_date_end_time?.[0];
@@ -276,6 +331,7 @@ async function getAggregatedCategories() {
                       (venue.includes('Hyderabad')) ? 'Hyderabad' :
                       (venue.includes('Ahmedabad') || venue.includes('Gandhinagar')) ? 'Ahmedabad' : 'India';
 
+    const realImg = getWpImage(d.slug, d.id, d.id, d.title);
     const evtObj = {
       id: String(d.id || `wp-${idx}`),
       title: d.title || 'Exhibition Event',
@@ -283,6 +339,8 @@ async function getAggregatedCategories() {
       category: cat,
       venue: venue,
       city: cleanCity,
+      image: realImg,
+      banner: realImg,
       startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
       endDate: endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000).toISOString() : null,
       dates: startTs ? new Date(parseInt(startTs) * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming 2026',
@@ -300,11 +358,13 @@ async function getAggregatedCategories() {
   });
 
   mongoEvents.forEach(me => {
+    if (isEventDeleted(me._id, me.slug, me.title, me.wpPostId)) return;
     const catName = Array.isArray(me.categories) ? me.categories[0] : (me.categories || 'Trade & Industry');
     const matchedCat = catMap[catName] ? catName : inferCategory(me.title, me.description);
     
     const alreadyExists = catMap[matchedCat]?.events.some(e => e.slug === me.slug);
     if (!alreadyExists && catMap[matchedCat]) {
+      const realMongoImg = me.banner || me.coverImage || me.thumbnail || me.image || getWpImage(me.slug, me._id, me.wpPostId, me.title);
       catMap[matchedCat].events.push({
         id: String(me._id),
         title: me.title,
@@ -312,6 +372,8 @@ async function getAggregatedCategories() {
         category: matchedCat,
         venue: me.venue || 'Convention Center',
         city: me.city || 'India',
+        image: realMongoImg,
+        banner: realMongoImg,
         startDate: me.startDate,
         endDate: me.endDate,
         dates: me.startDate ? new Date(me.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming',
@@ -659,14 +721,33 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     console.warn('[Admin] inspect-event-meta fetch failed for organizers, falling back to MongoDB:', err.message);
   }
 
-  const [mongoEvents, mongoOrgs, deletedOrgs] = await Promise.all([
+  const [mongoEvents, mongoOrgs, deletedOrgs, deletedEvents] = await Promise.all([
     Event.find().lean(),
     Organization.find().lean(),
-    DeletedOrganizer.find().lean()
+    DeletedOrganizer.find().lean(),
+    DeletedEvent.find().lean()
   ]);
 
   const deletedNames = new Set((deletedOrgs || []).map(d => (d.name || '').toLowerCase().trim()));
   const deletedSlugIds = new Set((deletedOrgs || []).map(d => (d.slugId || '').toLowerCase().trim()));
+
+  const deletedEventIds = new Set((deletedEvents || []).map(d => String(d.eventId || '').trim().toLowerCase()));
+  const deletedEventSlugs = new Set((deletedEvents || []).map(d => String(d.slug || '').trim().toLowerCase()));
+  const deletedEventPostIds = new Set((deletedEvents || []).map(d => String(d.wpPostId || '').trim().toLowerCase()));
+  const deletedEventTitles = new Set((deletedEvents || []).map(d => (d.title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')));
+
+  const isEventDeleted = (id, slug, title, wpPostId) => {
+    const sId = String(id || '').trim().toLowerCase();
+    const sSlug = String(slug || '').trim().toLowerCase();
+    const sPostId = String(wpPostId || '').trim().toLowerCase();
+    const sTitle = (title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    if (sId && (deletedEventIds.has(sId) || deletedEventSlugs.has(sId) || deletedEventPostIds.has(sId))) return true;
+    if (sSlug && (deletedEventSlugs.has(sSlug) || deletedEventIds.has(sSlug))) return true;
+    if (sPostId && deletedEventPostIds.has(sPostId)) return true;
+    if (sTitle && deletedEventTitles.has(sTitle)) return true;
+    return false;
+  };
 
   const orgMap = {};
 
@@ -740,6 +821,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
 
   // Process WordPress Docs
   rawDocs.forEach((d, idx) => {
+    if (isEventDeleted(d.id, d.slug, d.title, d.id)) return;
     const m = d.meta || {};
     const startTs = m.ovaem_date_start_time?.[0];
     const endTs = m.ovaem_date_end_time?.[0];
@@ -790,6 +872,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       }
     }
 
+    const realImg = getWpImage(d.slug, d.id, d.id, d.title);
     const evtObj = {
       id: String(d.id || `wp-${idx}`),
       title: d.title || 'Exhibition Event',
@@ -797,6 +880,8 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       category: cat,
       venue: venue,
       city: cleanCity,
+      image: realImg,
+      banner: realImg,
       startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
       endDate: endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000).toISOString() : null,
       dates: startTs ? new Date(parseInt(startTs) * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming 2026',
@@ -816,6 +901,9 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
   });
 
   mongoEvents.forEach(me => {
+    // If this event was deleted, skip
+    if (isEventDeleted(me._id, me.slug, me.title, me.wpPostId)) return;
+
     // If this event was already ingested from WordPress, skip duplicating
     if (me.slug && processedSlugs.has(me.slug)) return;
     if (me.slug) processedSlugs.add(me.slug);
@@ -855,6 +943,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       };
     }
 
+    const realMongoImg = me.banner || me.coverImage || me.thumbnail || me.image || getWpImage(me.slug, me._id, me.wpPostId, me.title);
     orgMap[resolvedName].events.push({
       id: String(me._id),
       title: me.title,
@@ -862,6 +951,8 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       category: Array.isArray(me.categories) ? me.categories[0] : (me.categories || 'Trade & Industry'),
       venue: me.venue || 'Convention Center',
       city: me.city || 'India',
+      image: realMongoImg,
+      banner: realMongoImg,
       startDate: me.startDate,
       endDate: me.endDate,
       dates: me.startDate ? new Date(me.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming',
@@ -2045,6 +2136,80 @@ router.put('/events/:id/status', async (req, res, next) => {
       success: true,
       message: `Event onboarding request set to ${action}d successfully`,
       event
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Permanently delete an event across MongoDB, WordPress directory, and Category breakdowns
+// @route   DELETE /api/admin/events/:id
+router.delete('/events/:id', async (req, res, next) => {
+  try {
+    const targetId = req.params.id;
+    const { slug, title, wpPostId, reason } = req.body || {};
+    const callerId = req.user?.id || getCallerId(req);
+
+    // 1. Delete from MongoDB Event collection if exists
+    let deletedDoc = null;
+    try {
+      deletedDoc = await Event.findOneAndDelete({
+        $or: [
+          { _id: mongoose.isValidObjectId(targetId) ? targetId : null },
+          { slug: targetId },
+          { slug: slug || null },
+          { wpPostId: targetId },
+          { wpPostId: wpPostId || null }
+        ].filter(Boolean)
+      });
+    } catch (dbErr) {
+      console.warn('[Admin] MongoDB delete event query warning:', dbErr.message);
+    }
+
+    const eventTitle = title || deletedDoc?.title || 'Exhibition Event';
+    const eventSlug = slug || deletedDoc?.slug || targetId;
+    const eventWpId = wpPostId || deletedDoc?.wpPostId || targetId;
+
+    // 2. Record in DeletedEvent for permanent exclusion across WordPress and aggregated directory
+    await DeletedEvent.findOneAndUpdate(
+      {
+        $or: [
+          { eventId: String(targetId) },
+          { slug: String(eventSlug) },
+          { wpPostId: String(eventWpId) }
+        ]
+      },
+      {
+        eventId: String(targetId),
+        slug: String(eventSlug),
+        title: eventTitle,
+        wpPostId: String(eventWpId),
+        deletedAt: new Date(),
+        deletedBy: callerId && mongoose.isValidObjectId(callerId) ? callerId : null,
+        reason: reason || 'Deleted by Super Admin'
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    // 3. Clean up any related tickets or exhibitor associations
+    if (deletedDoc?._id) {
+      try {
+        await Exhibitor.updateMany(
+          { event: deletedDoc._id },
+          { $set: { event: null } }
+        );
+      } catch (exErr) {
+        console.warn('[Admin] Exhibitor disassociation warning:', exErr.message);
+      }
+    }
+
+    // 4. Invalidate in-memory caches immediately
+    categoriesCache = { data: null, timestamp: 0, ttl: 0 };
+    organizersCache = { data: null, timestamp: 0, ttl: 0 };
+
+    res.status(200).json({
+      success: true,
+      message: `Event "${eventTitle}" permanently deleted successfully.`
     });
   } catch (error) {
     next(error);
