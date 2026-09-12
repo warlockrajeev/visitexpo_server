@@ -83,7 +83,14 @@ class AuthService {
       throw err;
     }
 
-    // 3. Block login if account is pending admin/organizer verification
+    // 3. Block login if user is suspended
+    if (user.isSuspended || user.status === 'suspended') {
+      const err = new Error(user.suspendReason ? `Your account has been suspended: "${user.suspendReason}". Contact support@visitexpo.in.` : 'Your account has been suspended by an administrator. Please contact support@visitexpo.in.');
+      err.statusCode = 403;
+      throw err;
+    }
+
+    // 4. Block login if account is pending admin/organizer verification
     if (user.role === 'organizer' && !user.isVerified) {
       const err = new Error('Your organizer account registration is pending Super Admin approval. Access will be granted once approved.');
       err.statusCode = 403;
@@ -96,7 +103,7 @@ class AuthService {
       throw err;
     }
 
-    // 4. Generate tokens
+    // 5. Generate tokens
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
@@ -170,6 +177,13 @@ class AuthService {
 
     const normalizedEmail = email.toLowerCase().trim();
     let user = await UserRepository.findOne({ email: normalizedEmail });
+
+    // Block Google login if account is suspended
+    if (user && (user.isSuspended || user.status === 'suspended')) {
+      const err = new Error(user.suspendReason ? `Your account has been suspended: "${user.suspendReason}". Contact support@visitexpo.in.` : 'Your account has been suspended by an administrator. Please contact support@visitexpo.in.');
+      err.statusCode = 403;
+      throw err;
+    }
 
     const assignedRole = role === 'visitor' ? 'visitor' : role === 'exhibitor' ? 'exhibitor' : 'organizer';
     const finalOrgName = organizationName || company || `${name || normalizedEmail.split('@')[0]}'s ${assignedRole === 'exhibitor' ? 'Exhibition Enterprise' : 'Organization'}`;

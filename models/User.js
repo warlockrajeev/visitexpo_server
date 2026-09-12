@@ -58,6 +58,23 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    isSuspended: {
+      type: Boolean,
+      default: false
+    },
+    status: {
+      type: String,
+      enum: ['active', 'suspended', 'pending'],
+      default: 'active'
+    },
+    suspendedAt: {
+      type: Date,
+      default: null
+    },
+    suspendReason: {
+      type: String,
+      default: ''
+    },
     verificationToken: String,
     resetPasswordToken: String,
     resetPasswordExpires: Date,

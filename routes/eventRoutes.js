@@ -6,6 +6,8 @@
 import express from 'express';
 import EventService from '../services/EventService.js';
 import Ticket from '../models/Ticket.js';
+import DeletedOrganizer from '../models/DeletedOrganizer.js';
+import { getAggregatedOrganizers } from './adminRoutes.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 
@@ -82,6 +84,53 @@ router.get('/categories', wordpressLimiter, async (req, res, next) => {
   try {
     const categories = await EventService.getCategories();
     res.status(200).json({ success: true, categories });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Distinct list of cities
+router.get('/cities', wordpressLimiter, async (req, res, next) => {
+  try {
+    const cities = await EventService.getCities();
+    res.status(200).json({ success: true, cities });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Distinct list of organizers with event counts
+router.get('/organizers', wordpressLimiter, async (req, res, next) => {
+  try {
+    const organizers = await EventService.getOrganizers();
+    res.status(200).json({ success: true, organizers });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// List of deleted organizers (excluded from aggregations)
+router.get('/deleted-organizers', async (req, res, next) => {
+  try {
+    const deleted = await DeletedOrganizer.find().lean();
+    res.status(200).json({
+      success: true,
+      data: (deleted || []).map(d => ({ name: d.name, slugId: d.slugId }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Unified exhibitions directory endpoint (aggregates all live WordPress and platform events)
+router.get('/directory', async (req, res, next) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true' || !!req.query.t;
+    const data = await getAggregatedOrganizers(forceRefresh);
+    res.status(200).json({
+      success: true,
+      data
+    });
   } catch (error) {
     next(error);
   }

@@ -103,6 +103,14 @@ class EventService {
     return await EventRepository.getCategories();
   }
 
+  async getCities() {
+    return await EventRepository.getCities();
+  }
+
+  async getOrganizers() {
+    return await EventRepository.getOrganizers();
+  }
+
   _slugify(text) {
     return text
       .toString()

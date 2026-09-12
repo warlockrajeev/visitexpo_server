@@ -37,6 +37,36 @@ class EventRepository extends BaseRepository {
     return await this.model.distinct('categories', { status: 'published' });
   }
 
+  async getCities() {
+    return await this.model.distinct('city', { status: 'published' });
+  }
+
+  async getOrganizers() {
+    return await this.model.aggregate([
+      { $match: { status: 'published', organizer: { $ne: null } } },
+      { $group: { _id: '$organizer', count: { $sum: 1 } } },
+      {
+        $lookup: {
+          from: 'organizations',
+          localField: '_id',
+          foreignField: '_id',
+          as: 'organization'
+        }
+      },
+      { $unwind: '$organization' },
+      {
+        $project: {
+          _id: '$organization._id',
+          name: '$organization.name',
+          logo: '$organization.logo',
+          website: '$organization.website',
+          count: 1
+        }
+      },
+      { $sort: { count: -1 } }
+    ]);
+  }
+
   async searchAndPaginate(filters = {}, options = {}) {
     const filter = {};
 
