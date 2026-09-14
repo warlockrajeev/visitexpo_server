@@ -274,7 +274,7 @@ async function getAggregatedCategories() {
   try {
     const wpRes = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
       headers: { 'X-VisitExpo-Key': wpKey },
-      signal: AbortSignal.timeout(8000)
+      signal: AbortSignal.timeout(25000)
     });
     if (wpRes.ok) {
       const data = await wpRes.json();
@@ -711,7 +711,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
   try {
     const wpRes = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
       headers: { 'X-VisitExpo-Key': wpKey },
-      signal: AbortSignal.timeout(8000)
+      signal: AbortSignal.timeout(25000)
     });
     if (wpRes.ok) {
       const data = await wpRes.json();

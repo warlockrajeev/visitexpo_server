@@ -23,6 +23,7 @@ import wordpressRoutes from './routes/wordpressRoutes.js';
 import uploadRoutes from './routes/uploadRoutes.js';
 import supportTicketRoutes from './routes/supportTicketRoutes.js';
 import contactRoutes from './routes/contactRoutes.js';
+import engagementRoutes from './routes/engagementRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -97,6 +98,7 @@ app.use('/api/wordpress', wordpressRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/support-tickets', supportTicketRoutes);
 app.use('/api/contact', contactRoutes);
+app.use('/api/engagements', engagementRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

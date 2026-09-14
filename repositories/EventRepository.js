@@ -3,6 +3,7 @@
  * @description Event-specific data actions, extending BaseRepository.
  */
 
+import mongoose from 'mongoose';
 import { BaseRepository } from './BaseRepository.js';
 import Event from '../models/Event.js';
 
@@ -12,7 +13,11 @@ class EventRepository extends BaseRepository {
   }
 
   async findBySlug(slug) {
-    return await this.model.findOne({ slug, status: 'published' }).populate('organizer', 'name logo');
+    const isId = mongoose.isValidObjectId(slug);
+    const query = isId
+      ? { $or: [{ slug }, { _id: slug }] }
+      : { slug };
+    return await this.model.findOne(query).populate('organizer', 'name logo website description email phone');
   }
 
   async findUpcoming(limit = 5) {
