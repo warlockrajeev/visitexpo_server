@@ -49,7 +49,9 @@ const allowedOrigins = [
   'https://visitexpo-server.onrender.com',
   'https://dashboard.visitexpo.in',
   'https://admin.visitexpo.in',
-  'https://visitexpo.in'
+  'https://visitexpo.in',
+  'https://client.visitexpo.in',
+  'https://api.visitexpo.in'
 ];
 
 if (process.env.CLIENT_URL) allowedOrigins.push(process.env.CLIENT_URL);
@@ -63,7 +65,8 @@ app.use(
         !origin ||
         allowedOrigins.indexOf(origin) !== -1 ||
         origin.endsWith('.vercel.app') ||
-        origin.endsWith('.onrender.com')
+        origin.endsWith('.onrender.com') ||
+        origin.endsWith('.visitexpo.in')
       ) {
         callback(null, true);
       } else {
