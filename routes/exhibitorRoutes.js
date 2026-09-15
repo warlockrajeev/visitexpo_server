@@ -105,7 +105,7 @@ router.get('/profile', protect, async (req, res, next) => {
       .populate('event', 'title city startDate venue description');
     
     if (!exhibitors || exhibitors.length === 0) {
-      return res.status(404).json({ success: false, error: 'Exhibitor profile not found' });
+      return res.status(200).json({ success: true, data: [] });
     }
 
     res.status(200).json({
