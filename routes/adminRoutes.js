@@ -13,6 +13,8 @@ import Subscription from '../models/Subscription.js';
 import Invoice from '../models/Invoice.js';
 import ContactMessage from '../models/ContactMessage.js';
 import Sponsor from '../models/Sponsor.js';
+import Visitor from '../models/Visitor.js';
+import EventEngagement from '../models/EventEngagement.js';
 import DeletedOrganizer from '../models/DeletedOrganizer.js';
 import DeletedEvent from '../models/DeletedEvent.js';
 import mongoose from 'mongoose';
@@ -698,6 +700,198 @@ function getDynamicBrandColors(name) {
   return PALETTES[idx];
 }
 
+// Known venue slugs mapping to full names and verified addresses
+const KNOWN_VENUE_SLUGS = {
+  'jio-world-convention-centre': { name: 'Jio World Convention Centre', city: 'Mumbai', country: 'India', address: 'Bandra Kurla Complex (BKC), Bandra East, Mumbai, Maharashtra 400051' },
+  'bharat-mandapam-pragati-maidan-new-delhi': { name: 'Bharat Mandapam (IECC)', city: 'New Delhi', country: 'India', address: 'Pragati Maidan, Mathura Road, New Delhi 110001' },
+  'yashobhoomi-iicc-dwarka': { name: 'Yashobhoomi (IICC)', city: 'New Delhi', country: 'India', address: 'Sector 25, Dwarka, New Delhi 110077' },
+  'india-expo-centre-greater-noida': { name: 'India Expo Centre & Mart', city: 'Greater Noida', country: 'India', address: 'Plot No. 23-25, Knowledge Park II, Greater Noida, UP 201306' },
+  'bombay-exhibition-centre-nesco-mumbai': { name: 'Bombay Exhibition Centre (NESCO)', city: 'Mumbai', country: 'India', address: 'Western Express Hwy, Goregaon East, Mumbai 400063' },
+  'hitex-exhibition-centre-hyderabad': { name: 'HITEX Exhibition Centre', city: 'Hyderabad', country: 'India', address: 'Izzat Nagar, Madhapur, Hyderabad, Telangana 500084' },
+  'bangalore-international-exhibition-centre-biec': { name: 'Bangalore International Exhibition Centre (BIEC)', city: 'Bengaluru', country: 'India', address: '10th Mile, Tumkur Road, Madavara Post, Bengaluru 562123' },
+  'chennai-trade-centre': { name: 'Chennai Trade Centre', city: 'Chennai', country: 'India', address: 'Nandambakkam, Chennai, Tamil Nadu 600089' },
+  'biswa-bangla-mela-prangan-kolkata': { name: 'Biswa Bangla Mela Prangan', city: 'Kolkata', country: 'India', address: 'JBS Haldane Ave, Kolkata, West Bengal 700046' },
+  'codissia-trade-fair-complex-coimbatore': { name: 'CODISSIA Trade Fair Complex', city: 'Coimbatore', country: 'India', address: 'G.V. Fair Grounds, Coimbatore, Tamil Nadu 641014' },
+  'helipad-exhibition-centre-gandhinagar': { name: 'Helipad Exhibition Centre (HEC)', city: 'Ahmedabad', country: 'India', address: 'Sector 17, Gandhinagar, Gujarat 382016' }
+};
+
+export function parseWpLocation(rawLocation = '', rawCity = '') {
+  const rawLoc = (rawLocation || '').trim();
+  
+  if (KNOWN_VENUE_SLUGS[rawLoc]) {
+    const v = KNOWN_VENUE_SLUGS[rawLoc];
+    return {
+      venue: v.name,
+      address: `${v.name}, ${v.address}`,
+      location: `${v.name}, ${v.address}`,
+      city: v.city,
+      country: v.country,
+      state: v.city === 'New Delhi' || v.city === 'Greater Noida' ? 'Delhi NCR' : v.city
+    };
+  }
+
+  if (!rawLoc && !rawCity) {
+    return {
+      venue: 'Exhibition Center',
+      address: 'Exhibition Center, India',
+      location: 'Exhibition Center, India',
+      city: 'India',
+      country: 'India',
+      state: 'India'
+    };
+  }
+
+  const parts = rawLoc.split(',').map(p => p.trim()).filter(Boolean);
+  
+  // 1. Determine City
+  let city = '';
+  const cityList = [
+    'New Delhi', 'Delhi', 'Greater Noida', 'Noida', 'Mumbai', 'Bengaluru', 'Bangalore',
+    'Chennai', 'Hyderabad', 'Kolkata', 'Pune', 'Ahmedabad', 'Gandhinagar', 'Jaipur',
+    'Kochi', 'Goa', 'Indore', 'Coimbatore', 'Surat', 'Lucknow', 'Chandigarh',
+    'Santa Barbara', 'New York', 'Chicago', 'Las Vegas', 'Los Angeles', 'San Francisco', 'Orlando',
+    'Copenhagen', 'Toronto', 'Glasgow', 'London', 'Birmingham', 'Frankfurt', 'Munich', 'Berlin',
+    'Cologne', 'Dusseldorf', 'Paris', 'Madrid', 'Barcelona', 'Valencia', 'Milan', 'Bologna', 'Dubai',
+    'Sharjah', 'Abu Dhabi', 'Riyadh', 'Jeddah', 'Singapore', 'Bangkok', 'Dhaka', 'Colombo',
+    'Tangerang', 'Jakarta', 'Tokyo', 'Chiba', 'Baghdad', 'Kuala Lumpur', 'Tehran', 'Lagos', 'Dushanbe', 'Phnom Penh', 'Doha'
+  ];
+
+  for (const c of cityList) {
+    if (new RegExp('\\b' + c + '\\b', 'i').test(rawLoc) || (rawCity && new RegExp('\\b' + c + '\\b', 'i').test(rawCity))) {
+      city = c === 'Bangalore' ? 'Bengaluru' : (c === 'Delhi' ? 'New Delhi' : (c === 'Noida' ? 'Greater Noida' : c));
+      break;
+    }
+  }
+
+  if (!city && parts.length >= 3) {
+    city = parts[parts.length - 2].replace(/[0-9\-\s]+/g, ' ').trim();
+  }
+  if (!city && parts.length >= 2) {
+    city = parts[1].replace(/[0-9\-\s]+/g, ' ').trim();
+  }
+  if (!city) city = rawCity && rawCity !== 'India' ? rawCity : 'India';
+
+  // 2. Determine State
+  let state = '';
+  const stateMap = {
+    'Maharashtra': /maharashtra/i,
+    'Karnataka': /karnataka/i,
+    'Tamil Nadu': /tamil nadu/i,
+    'Gujarat': /gujarat/i,
+    'Telangana': /telangana/i,
+    'West Bengal': /west bengal/i,
+    'Rajasthan': /rajasthan/i,
+    'Uttar Pradesh': /uttar pradesh/i,
+    'Haryana': /haryana/i,
+    'Kerala': /kerala/i,
+    'Madhya Pradesh': /madhya pradesh/i,
+    'Punjab': /punjab/i,
+    'Goa': /goa/i,
+    'Delhi NCR': /delhi|noida|gurgaon|gurugram/i,
+    'California': /california|ca\b/i,
+    'Florida': /florida|fl\b/i,
+    'Illinois': /illinois|il\b/i,
+    'Nevada': /nevada|nv\b/i,
+    'Texas': /texas|tx\b/i,
+    'New York': /new york|ny\b/i,
+    'Scotland': /scotland/i,
+    'Greater London': /london/i,
+    'Dhaka Division': /dhaka/i,
+    'Western Province': /colombo/i
+  };
+
+  for (const [stName, stRegex] of Object.entries(stateMap)) {
+    if (stRegex.test(rawLoc)) {
+      state = stName;
+      break;
+    }
+  }
+
+  if (!state) {
+    if (city === 'Mumbai' || city === 'Pune') state = 'Maharashtra';
+    else if (city === 'Bengaluru') state = 'Karnataka';
+    else if (city === 'Chennai' || city === 'Coimbatore') state = 'Tamil Nadu';
+    else if (city === 'Hyderabad') state = 'Telangana';
+    else if (city === 'Ahmedabad' || city === 'Gandhinagar' || city === 'Surat') state = 'Gujarat';
+    else if (city === 'Kolkata') state = 'West Bengal';
+    else if (city === 'New Delhi' || city === 'Greater Noida') state = 'Delhi NCR';
+    else if (city === 'Jaipur') state = 'Rajasthan';
+    else if (city === 'Lucknow') state = 'Uttar Pradesh';
+    else if (city === 'Indore') state = 'Madhya Pradesh';
+    else if (city === 'Kochi') state = 'Kerala';
+    else if (city === 'Santa Barbara') state = 'California';
+    else if (city === 'Chicago') state = 'Illinois';
+    else if (city === 'Orlando') state = 'Florida';
+    else if (city === 'Las Vegas') state = 'Nevada';
+    else if (city === 'Glasgow') state = 'Scotland';
+    else if (city === 'Dhaka') state = 'Dhaka Division';
+    else if (city === 'Colombo') state = 'Western Province';
+    else state = city;
+  }
+
+  // 3. Determine Country
+  let country = parts.length > 1 ? parts[parts.length - 1] : (rawCity || 'India');
+  country = country.replace(/[0-9\-\s]+/g, ' ').trim() || 'India';
+
+  const indianHubs = /delhi|mumbai|bengaluru|bangalore|chennai|hyderabad|pune|ahmedabad|gandhinagar|kolkata|jaipur|lucknow|indore|coimbatore|surat|kochi|goa|chandigarh|maharashtra|gujarat|karnataka/i;
+  const usHubs = /santa barbara|new york|chicago|las vegas|los angeles|san francisco|orlando|texas|california|san antonio/i;
+  const ukHubs = /london|glasgow|birmingham|manchester|scotland/i;
+  const germanyHubs = /frankfurt|munich|berlin|cologne|dusseldorf/i;
+  const uaeHubs = /dubai|abu dhabi|sharjah/i;
+
+  if (indianHubs.test(rawLoc) || indianHubs.test(rawCity) || indianHubs.test(city)) country = 'India';
+  else if (usHubs.test(rawLoc) || usHubs.test(rawCity) || usHubs.test(city)) country = 'United States';
+  else if (ukHubs.test(rawLoc) || ukHubs.test(rawCity) || ukHubs.test(city)) country = 'United Kingdom';
+  else if (germanyHubs.test(rawLoc) || germanyHubs.test(rawCity) || germanyHubs.test(city)) country = 'Germany';
+  else if (uaeHubs.test(rawLoc) || uaeHubs.test(rawCity) || uaeHubs.test(city)) country = 'United Arab Emirates';
+  else if (/usa|united states|america/i.test(country) || /united states/i.test(rawLoc)) country = 'United States';
+  else if (/uk|united kingdom|england|scotland|wales/i.test(country) || /united kingdom/i.test(rawLoc)) country = 'United Kingdom';
+  else if (/denmark/i.test(country) || /denmark/i.test(rawLoc)) country = 'Denmark';
+  else if (/canada/i.test(country) || /canada/i.test(rawLoc)) country = 'Canada';
+  else if (/indonesia/i.test(country) || /indonesia/i.test(rawLoc)) country = 'Indonesia';
+  else if (/japan/i.test(country) || /japan/i.test(rawLoc)) country = 'Japan';
+  else if (/malaysia/i.test(country) || /malaysia/i.test(rawLoc)) country = 'Malaysia';
+  else if (/iraq/i.test(country) || /iraq/i.test(rawLoc)) country = 'Iraq';
+  else if (/spain/i.test(country) || /spain/i.test(rawLoc)) country = 'Spain';
+  else if (/france/i.test(country) || /france/i.test(rawLoc)) country = 'France';
+  else if (/germany/i.test(country) || /germany/i.test(rawLoc)) country = 'Germany';
+  else if (/italy/i.test(country) || /italy/i.test(rawLoc)) country = 'Italy';
+  else if (/russia/i.test(country) || /russia/i.test(rawLoc)) country = 'Russia';
+  else if (/saudi arabia/i.test(country) || /saudi arabia/i.test(rawLoc)) country = 'Saudi Arabia';
+  else if (/singapore/i.test(country) || /singapore/i.test(rawLoc)) country = 'Singapore';
+  else if (/thailand/i.test(country) || /thailand/i.test(rawLoc)) country = 'Thailand';
+  else if (/bangladesh/i.test(country) || /bangladesh/i.test(rawLoc)) country = 'Bangladesh';
+  else if (/sri lanka/i.test(country) || /sri lanka/i.test(rawLoc)) country = 'Sri Lanka';
+  else if (/nigeria/i.test(country) || /nigeria/i.test(rawLoc)) country = 'Nigeria';
+  else if (/cambodia/i.test(country) || /cambodia/i.test(rawLoc)) country = 'Cambodia';
+  else if (/qatar/i.test(country) || /qatar/i.test(rawLoc)) country = 'Qatar';
+  else if (/tajikistan/i.test(country) || /tajikistan/i.test(rawLoc)) country = 'Tajikistan';
+  if (country === city) country = 'India';
+
+  // 4. Distinguish specific venue facility from city/state-level address
+  const firstPart = (parts[0] || '').trim();
+  const isCityOnly = parts.length <= 3 && (
+    firstPart.toLowerCase() === city.toLowerCase() ||
+    firstPart.toLowerCase() === (state || '').toLowerCase() ||
+    firstPart.toLowerCase() === (country || '').toLowerCase() ||
+    cityList.some(cl => cl.toLowerCase() === firstPart.toLowerCase()) ||
+    firstPart.toLowerCase() === 'exhibition center'
+  );
+
+  const venueName = isCityOnly ? '' : firstPart;
+  const fullAddress = rawLoc || (venueName ? `${venueName}, ${city}, ${country}` : `${city}, ${state ? `${state}, ` : ''}${country}`);
+
+  return {
+    venue: venueName,
+    address: fullAddress,
+    location: fullAddress,
+    city: city,
+    country: country,
+    state: state,
+    mapUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fullAddress)}`
+  };
+}
+
 export async function getAggregatedOrganizers(forceRefresh = false) {
   const now = Date.now();
   if (!forceRefresh && organizersCache.data && (now - organizersCache.timestamp < organizersCache.ttl)) {
@@ -825,16 +1019,10 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     const m = d.meta || {};
     const startTs = m.ovaem_date_start_time?.[0];
     const endTs = m.ovaem_date_end_time?.[0];
-    const venue = m.ovaem_address_event?.[0] || m.ovaem_venue?.[0] || m.ovaem_address?.[0] || 'Exhibition Center';
+    const rawLoc = m.ovaem_address_event?.[0] || m.ovaem_event_map_address?.[0] || m.ovaem_event_map_name?.[0] || m.ovaem_address?.[0] || m.ovaem_venue?.[0] || '';
+    const loc = parseWpLocation(rawLoc, m.ovaem_city?.[0]);
     const desc = m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || '';
     const cat = inferCategory(d.title, desc);
-
-    const cleanCity = (venue.includes('New Delhi') || venue.includes('Delhi') || venue.includes('Pragati') || venue.includes('Bharat Mandapam')) ? 'New Delhi' :
-                      (venue.includes('Mumbai') || venue.includes('BKC') || venue.includes('Jio')) ? 'Mumbai' :
-                      (venue.includes('Bengaluru') || venue.includes('BIEC')) ? 'Bengaluru' :
-                      (venue.includes('Chennai')) ? 'Chennai' :
-                      (venue.includes('Hyderabad')) ? 'Hyderabad' :
-                      (venue.includes('Ahmedabad') || venue.includes('Gandhinagar')) ? 'Ahmedabad' : 'India';
 
     const rawOrgName = m.ovaem_org_name?.[0] || d.organizer || 'Verified Organizer';
     const resolvedName = resolveOrganizer(rawOrgName);
@@ -878,8 +1066,11 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       title: d.title || 'Exhibition Event',
       slug: d.slug,
       category: cat,
-      venue: venue,
-      city: cleanCity,
+      venue: loc.venue,
+      address: loc.address,
+      location: loc.location,
+      city: loc.city,
+      country: loc.country,
       image: realImg,
       banner: realImg,
       startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
@@ -888,6 +1079,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       organizer: resolvedName,
       status: 'published',
       wpUrl: `https://visitexpo.in/event/${d.slug}/`,
+      mapUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.address || loc.venue)}`,
       isWordPress: true
     };
 
@@ -1039,25 +1231,57 @@ router.get('/dashboard', async (req, res, next) => {
       pendingExhibitors,
       pendingClaims,
       pendingEvents,
-      newContactInquiries
+      newContactInquiries,
+      totalEngagements,
+      totalVisitors
     ] = await Promise.all([
       User.countDocuments(),
       Organization.countDocuments(),
       Event.countDocuments(),
       Subscription.countDocuments({ status: 'active' }),
-      Order.find({ status: 'completed' }),
+      Order.find({ status: 'completed' }).sort({ createdAt: 1 }).lean(),
       User.countDocuments({ role: 'organizer', isVerified: false }),
       Exhibitor.countDocuments({ status: 'pending' }),
       Event.countDocuments({ isClaimed: true, status: 'draft' }),
       Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } }),
-      ContactMessage.countDocuments({ status: 'new' })
+      ContactMessage.countDocuments({ status: 'new' }),
+      EventEngagement.countDocuments(),
+      Visitor.countDocuments()
     ]);
 
-    // Sum revenue
-    const totalRevenue = completedOrders.reduce((sum, order) => sum + order.totalAmount, 0);
+    // Sum revenue from real completed orders
+    const totalRevenue = completedOrders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
+
+    // Group real monthly revenue
+    const monthsOrderMap = {};
+    completedOrders.forEach((o) => {
+      if (o.createdAt) {
+        const d = new Date(o.createdAt);
+        const key = d.toLocaleString('en-US', { month: 'short' });
+        monthsOrderMap[key] = (monthsOrderMap[key] || 0) + (o.totalAmount || 0);
+      }
+    });
+
+    const now = new Date();
+    const monthlyRevenue = [];
+    for (let i = 5; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const mName = d.toLocaleString('en-US', { month: 'short' });
+      monthlyRevenue.push({
+        month: mName,
+        revenue: monthsOrderMap[mName] || 0
+      });
+    }
+    // If all rolling months have 0 but orders exist in another month, include all active order months
+    if (monthlyRevenue.every(m => m.revenue === 0) && Object.keys(monthsOrderMap).length > 0) {
+      monthlyRevenue.length = 0;
+      Object.keys(monthsOrderMap).forEach(mName => {
+        monthlyRevenue.push({ month: mName, revenue: monthsOrderMap[mName] });
+      });
+    }
 
     // Get active subscription packages breakdown
-    const subscriptions = await Subscription.find({ status: 'active' });
+    const subscriptions = await Subscription.find({ status: 'active' }).lean();
     const packagesCount = {
       free: 0,
       growth: 0,
@@ -1070,20 +1294,85 @@ router.get('/dashboard', async (req, res, next) => {
       }
     });
 
+    // Real platform tenants on Free tier: all organizations not currently on paid growth/enterprise plan
+    const paidCount = packagesCount.growth + packagesCount.enterprise;
+    packagesCount.free = Math.max(totalOrganizations - paidCount, 0) + packagesCount.free;
+
     // Get recent contact form inquiries
     const recentInquiries = await ContactMessage.find()
       .sort({ createdAt: -1 })
       .limit(6)
       .lean();
 
-    // Sponsors count
+    // Sponsors
     let totalSponsors = await Sponsor.countDocuments();
     if (totalSponsors === 0) {
       totalSponsors = INITIAL_SPONSORS.length;
     }
 
+    let recentSponsors = await Sponsor.find()
+      .sort({ createdAt: -1 })
+      .limit(6)
+      .lean();
+    if (!recentSponsors || recentSponsors.length === 0) {
+      recentSponsors = INITIAL_SPONSORS.slice(0, 6);
+    }
+
+    // Recent real tenants / registered organizations & organizers
+    const [dbOrgs, orgUsers] = await Promise.all([
+      Organization.find()
+        .populate('teamMembers.user', 'name email phone')
+        .populate('subscription')
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean(),
+      User.find({ role: 'organizer' })
+        .sort({ createdAt: -1 })
+        .limit(10)
+        .lean()
+    ]);
+
+    const recentTenants = [];
+    const seenOrgNames = new Set();
+
+    dbOrgs.forEach((org) => {
+      const ownerUser = org.teamMembers?.[0]?.user;
+      const ownerName = ownerUser?.name || org.contact?.email?.split('@')[0] || 'Organization Admin';
+      const ownerContact = ownerUser?.email || org.contact?.email || 'N/A';
+      seenOrgNames.add(org.name.toLowerCase().trim());
+
+      recentTenants.push({
+        id: String(org._id),
+        name: org.name,
+        owner: `${ownerName} (${ownerContact})`,
+        org: org.address?.city ? `${org.address.city}, India` : 'Registered Tenant',
+        plan: org.subscription?.plan || 'free',
+        status: org.subscription?.status || 'active',
+        signed: org.createdAt ? new Date(org.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'
+      });
+    });
+
+    orgUsers.forEach((u) => {
+      const derivedOrgName = u.organization?.name || (u.email?.includes('@indiandjexpo.com') ? 'Indian DJ Expo' : u.email?.includes('@techhubexpo.com') ? 'TechHub Expo' : `${u.name}'s Events`);
+      if (!seenOrgNames.has(derivedOrgName.toLowerCase().trim())) {
+        seenOrgNames.add(derivedOrgName.toLowerCase().trim());
+        recentTenants.push({
+          id: String(u._id),
+          name: derivedOrgName,
+          owner: `${u.name} (${u.email})`,
+          org: 'Organizer Account',
+          plan: 'free',
+          status: u.isSuspended ? 'suspended' : 'active',
+          signed: u.createdAt ? new Date(u.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'
+        });
+      }
+    });
+
+    // Total Attendees & Followers KPI
+    const totalAttendees = totalEngagements + totalVisitors;
+
     // Categories summary
-    let categoriesSummary = { totalCategories: 11, totalEvents: 1918, categories: [] };
+    let categoriesSummary = { totalCategories: 11, totalEvents: 2660, categories: [] };
     try {
       categoriesSummary = await getAggregatedCategories();
     } catch (catErr) {
@@ -1105,7 +1394,8 @@ router.get('/dashboard', async (req, res, next) => {
           pendingEvents,
           newContactInquiries,
           totalCategories: categoriesSummary.totalCategories || 11,
-          totalSponsors: totalSponsors
+          totalSponsors: totalSponsors,
+          totalAttendees
         },
         packagesBreakdown: packagesCount,
         categoryBreakdown: (categoriesSummary.categories || []).map(c => ({
@@ -1115,6 +1405,17 @@ router.get('/dashboard', async (req, res, next) => {
           color: c.color,
           bg: c.bg,
           icon: c.icon
+        })),
+        monthlyRevenue,
+        recentTenants,
+        recentSponsors: recentSponsors.map(sp => ({
+          _id: sp._id,
+          name: sp.name,
+          tier: sp.tier,
+          expo: sp.eventTitle || sp.expo || 'Partner Trade Expo',
+          logo: sp.logo,
+          website: sp.website,
+          color: sp.tier === 'platinum' ? 'text-purple-500 bg-purple-500/10' : sp.tier === 'gold' ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 bg-slate-500/10'
         })),
         recentInquiries
       }
