@@ -1,6 +1,7 @@
 /**
  * @file server.js
- * @description Entry point for the REST API. Connects to database and starts listener.
+ * @description// Entry point for the REST API. Connects to database and starts listener.
+// Includes reviews and FAQ management routes.
  */
 
 import dotenv from 'dotenv';
