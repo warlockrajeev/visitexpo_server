@@ -118,10 +118,54 @@ router.get('/my-passes', protect, async (req, res, next) => {
   }
 });
 
+// @desc    Get visitor statistics (Super Admin & Organizers)
+// @route   GET /api/visitors/stats
+router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
+  try {
+    const { eventId } = req.query;
+    const query = {};
+
+    if (eventId) {
+      query.event = eventId;
+    } else if (req.user.role === 'organizer') {
+      const myEvents = await Event.find({
+        $or: [
+          { organizer: req.user.organization },
+          { claimedBy: req.user.id }
+        ]
+      });
+      query.event = { $in: myEvents.map(e => e._id) };
+    }
+
+    const [total, checkedIn, notCheckedIn, virtual, confirmed, pending] = await Promise.all([
+      Visitor.countDocuments(query),
+      Visitor.countDocuments({ ...query, checkInStatus: 'checked_in' }),
+      Visitor.countDocuments({ ...query, checkInStatus: 'not_checked_in' }),
+      Visitor.countDocuments({ ...query, attendanceType: 'virtual' }),
+      Visitor.countDocuments({ ...query, registrationStatus: 'confirmed' }),
+      Visitor.countDocuments({ ...query, registrationStatus: 'pending' })
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        total,
+        checkedIn,
+        notCheckedIn,
+        virtual,
+        confirmed,
+        pending
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get visitors list for organizer dashboard
 router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 'sales_team', 'support'), async (req, res, next) => {
   try {
-    const { eventId, page, limit, search } = req.query;
+    const { eventId, page, limit, search, status, checkInStatus } = req.query;
     
     const query = {};
 
@@ -167,6 +211,14 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
       }
     }
 
+    if (status && status !== 'all') {
+      query.registrationStatus = status;
+    }
+
+    if (checkInStatus && checkInStatus !== 'all') {
+      query.checkInStatus = checkInStatus;
+    }
+
     if (search) {
       query.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -180,7 +232,11 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
     const skip = (pgNum - 1) * pgLimit;
 
     const [docs, total] = await Promise.all([
-      Visitor.find(query).sort({ createdAt: -1 }).skip(skip).limit(pgLimit),
+      Visitor.find(query)
+        .populate('event', 'title city startDate venue slug banner logo')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(pgLimit),
       Visitor.countDocuments(query)
     ]);
 
@@ -312,6 +368,40 @@ router.delete('/clear-seed', protect, authorize('super_admin', 'organizer'), asy
       success: true,
       message: `Cleared ${result.deletedCount} seed dummy visitors successfully`,
       deletedCount: result.deletedCount
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Update visitor registration status or check-in status
+router.put('/:id/status', protect, authorize('super_admin', 'organizer'), async (req, res, next) => {
+  try {
+    const { registrationStatus, checkInStatus } = req.body;
+    const visitor = await Visitor.findById(req.params.id);
+    if (!visitor) {
+      return res.status(404).json({ success: false, error: 'Visitor not found' });
+    }
+
+    if (registrationStatus && ['confirmed', 'pending', 'cancelled'].includes(registrationStatus)) {
+      visitor.registrationStatus = registrationStatus;
+    }
+
+    if (checkInStatus && ['checked_in', 'not_checked_in'].includes(checkInStatus)) {
+      visitor.checkInStatus = checkInStatus;
+      if (checkInStatus === 'checked_in') {
+        visitor.checkInTime = new Date();
+      } else {
+        visitor.checkInTime = null;
+      }
+    }
+
+    await visitor.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Visitor status updated successfully',
+      visitor
     });
   } catch (error) {
     next(error);

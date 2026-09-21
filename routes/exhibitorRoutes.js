@@ -7,6 +7,7 @@ import express from 'express';
 import Event from '../models/Event.js';
 import Exhibitor from '../models/Exhibitor.js';
 import User from '../models/User.js';
+import Organization from '../models/Organization.js';
 import { protect, authorize } from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -101,16 +102,173 @@ router.post('/register', async (req, res, next) => {
 // @route   GET /api/exhibitors/profile
 router.get('/profile', protect, async (req, res, next) => {
   try {
-    const exhibitors = await Exhibitor.find({ contactEmail: req.user.email })
-      .populate('event', 'title city startDate venue description');
+    const userEmail = (req.user.email || '').toLowerCase().trim();
     
-    if (!exhibitors || exhibitors.length === 0) {
-      return res.status(200).json({ success: true, data: [] });
+    // Look up exhibitor by contactEmail or staff email (case-insensitive)
+    const orConditions = [
+      { contactEmail: { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } },
+      { 'staff.email': { $regex: new RegExp(`^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } }
+    ];
+
+    // Also match by organization name or user company name if available
+    if (req.user.organization) {
+      try {
+        const org = await Organization.findById(req.user.organization);
+        if (org && org.name) {
+          orConditions.push({ name: { $regex: new RegExp(`^${org.name.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
+        }
+      } catch (err) {
+        // Ignore organization lookup error
+      }
     }
+
+    if (req.user.company && req.user.company.trim()) {
+      orConditions.push({ name: { $regex: new RegExp(`^${req.user.company.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') } });
+    }
+
+    const exhibitors = await Exhibitor.find({ $or: orConditions })
+      .populate('event', 'title city startDate venue description slug');
+    
+    res.status(200).json({
+      success: true,
+      data: exhibitors || []
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Quick setup/activate booth for logged in exhibitor
+// @route   POST /api/exhibitors/quick-setup
+router.post('/quick-setup', protect, async (req, res, next) => {
+  try {
+    const { eventId, name, description, logo, website, contactPhone, boothNumber, attendanceType, staff } = req.body;
+
+    if (!eventId) {
+      return res.status(400).json({ success: false, error: 'Event selection is required' });
+    }
+
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Selected event not found' });
+    }
+
+    const companyName = name?.trim() || req.user.company || req.user.name || 'Exhibition Partner';
+    const contactEmail = req.user.email.toLowerCase().trim();
+
+    // Check if already registered for this event
+    let exhibitor = await Exhibitor.findOne({ event: eventId, contactEmail });
+    if (exhibitor) {
+      const populated = await Exhibitor.findById(exhibitor._id)
+        .populate('event', 'title city startDate venue description slug');
+      return res.status(200).json({ success: true, message: 'Booth already exists for this event', exhibitor: populated });
+    }
+
+    // Default staff representative to logged in user if none provided
+    const initialStaff = Array.isArray(staff) && staff.length > 0 
+      ? staff 
+      : [{ name: req.user.name || 'Primary Representative', email: contactEmail, phone: contactPhone || req.user.phone || '+91 98765 43210' }];
+
+    exhibitor = await Exhibitor.create({
+      name: companyName,
+      description: description || `${companyName} is an official exhibitor showcasing innovative products and services.`,
+      logo: logo || '',
+      website: website || '',
+      contactEmail,
+      contactPhone: contactPhone || req.user.phone || '+91 98765 43210',
+      boothNumber: boothNumber || 'TBD',
+      event: eventId,
+      attendanceType: attendanceType || 'in_person',
+      staff: initialStaff,
+      status: 'pending' // Submitted for Super Admin approval
+    });
+
+    const populated = await Exhibitor.findById(exhibitor._id)
+      .populate('event', 'title city startDate venue description slug');
+
+    res.status(201).json({
+      success: true,
+      message: 'Exhibitor booth request submitted successfully and sent to Admin for approval',
+      exhibitor: populated
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Claim an existing exhibitor listing in event catalogue
+// @route   POST /api/exhibitors/claim
+router.post('/claim', protect, async (req, res, next) => {
+  try {
+    const { exhibitorId } = req.body;
+    if (!exhibitorId) {
+      return res.status(400).json({ success: false, error: 'Exhibitor ID is required' });
+    }
+
+    const exhibitor = await Exhibitor.findById(exhibitorId);
+    if (!exhibitor) {
+      return res.status(404).json({ success: false, error: 'Exhibitor listing not found' });
+    }
+
+    // Link to logged in user's email
+    exhibitor.contactEmail = req.user.email.toLowerCase().trim();
+    if (!exhibitor.staff || exhibitor.staff.length === 0) {
+      exhibitor.staff = [{ name: req.user.name || 'Primary Representative', email: req.user.email.toLowerCase().trim(), phone: req.user.phone || '' }];
+    }
+    exhibitor.status = 'approved';
+    await exhibitor.save();
+
+    const populated = await Exhibitor.findById(exhibitor._id)
+      .populate('event', 'title city startDate venue description slug');
 
     res.status(200).json({
       success: true,
-      data: exhibitors
+      message: 'Exhibitor listing successfully linked to your account',
+      exhibitor: populated
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get exhibitor counts by status & attendance type (Super Admin & Organizers)
+// @route   GET /api/exhibitors/stats
+router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
+  try {
+    const { eventId } = req.query;
+    const query = {};
+
+    if (eventId) {
+      query.event = eventId;
+    } else if (req.user.role === 'organizer') {
+      const myEvents = await Event.find({
+        $or: [
+          { organizer: req.user.organization },
+          { claimedBy: req.user.id }
+        ]
+      });
+      query.event = { $in: myEvents.map(e => e._id) };
+    }
+
+    const [total, pending, approved, rejected, inPerson, virtual] = await Promise.all([
+      Exhibitor.countDocuments(query),
+      Exhibitor.countDocuments({ ...query, status: 'pending' }),
+      Exhibitor.countDocuments({ ...query, status: 'approved' }),
+      Exhibitor.countDocuments({ ...query, status: 'rejected' }),
+      Exhibitor.countDocuments({ ...query, attendanceType: 'in_person' }),
+      Exhibitor.countDocuments({ ...query, attendanceType: { $in: ['virtual', 'hybrid'] } })
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        total,
+        pending,
+        approved,
+        rejected,
+        inPerson,
+        virtual
+      }
     });
   } catch (error) {
     next(error);
@@ -183,7 +341,11 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
     const skip = (pgNum - 1) * pgLimit;
 
     const [docs, total] = await Promise.all([
-      Exhibitor.find(query).sort({ createdAt: -1 }).skip(skip).limit(pgLimit),
+      Exhibitor.find(query)
+        .populate('event', 'title city startDate venue slug banner logo')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(pgLimit),
       Exhibitor.countDocuments(query)
     ]);
 
@@ -195,6 +357,25 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
         page: pgNum,
         pages: Math.ceil(total / pgLimit)
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Get single Exhibitor details
+router.get('/:id', protect, async (req, res, next) => {
+  try {
+    const exhibitor = await Exhibitor.findById(req.params.id)
+      .populate('event', 'title city startDate endDate venue slug banner logo description organizer');
+
+    if (!exhibitor) {
+      return res.status(404).json({ success: false, error: 'Exhibitor not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      exhibitor
     });
   } catch (error) {
     next(error);
@@ -262,8 +443,8 @@ router.put('/:id', protect, async (req, res, next) => {
   }
 });
 
-// Approve/Reject Exhibitor
-router.put('/:id/status', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
+// Approve/Reject Exhibitor (Super Admin only)
+router.put('/:id/status', protect, authorize('super_admin'), async (req, res, next) => {
   try {
     const { status } = req.body;
 
@@ -280,7 +461,8 @@ router.put('/:id/status', protect, authorize('super_admin', 'organizer', 'event_
     await exhibitor.save();
 
     // Sync isVerified on User
-    const associatedUser = await User.findOne({ email: exhibitor.contactEmail });
+    const emailEscaped = (exhibitor.contactEmail || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const associatedUser = await User.findOne({ email: { $regex: new RegExp(`^${emailEscaped}$`, 'i') } });
     if (associatedUser && associatedUser.role === 'exhibitor') {
       if (status === 'approved') {
         associatedUser.isVerified = true;
@@ -288,7 +470,7 @@ router.put('/:id/status', protect, authorize('super_admin', 'organizer', 'event_
       } else {
         // Only mark unverified if they have NO other approved exhibitor accounts
         const otherApproved = await Exhibitor.findOne({
-          contactEmail: exhibitor.contactEmail,
+          contactEmail: { $regex: new RegExp(`^${emailEscaped}$`, 'i') },
           _id: { $ne: exhibitor._id },
           status: 'approved'
         });

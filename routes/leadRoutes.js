@@ -87,6 +87,106 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+// @desc    Create a new lead manually
+// @route   POST /api/leads
+router.post('/', async (req, res, next) => {
+  try {
+    const { name, email, phone, company, designation, country, leadScore, status, source, eventId, notes } = req.body;
+
+    if (!name || !email || !eventId) {
+      return res.status(400).json({ success: false, error: 'Name, email, and event ID are required' });
+    }
+
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Target event not found' });
+    }
+
+    const newLead = await Lead.create({
+      name,
+      email: email.toLowerCase(),
+      phone: phone || '',
+      company: company || '',
+      designation: designation || '',
+      country: country || 'India',
+      leadScore: leadScore !== undefined ? leadScore : 50,
+      status: status || 'new',
+      source: source || 'website',
+      event: eventId,
+      notes: notes || '',
+      activityTimeline: [
+        {
+          type: 'note',
+          content: 'Lead registered or added to the CRM hub.',
+          performedBy: req.user.id
+        }
+      ]
+    });
+
+    res.status(201).json({
+      success: true,
+      message: 'Lead created successfully',
+      lead: newLead
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Bulk import leads
+// @route   POST /api/leads/bulk
+router.post('/bulk', async (req, res, next) => {
+  try {
+    const { eventId, leads } = req.body;
+
+    if (!eventId || !Array.isArray(leads) || leads.length === 0) {
+      return res.status(400).json({ success: false, error: 'Valid eventId and leads array are required' });
+    }
+
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Target event not found' });
+    }
+
+    const preparedLeads = leads
+      .filter(l => l.name && l.email)
+      .map(l => ({
+        name: l.name.trim(),
+        email: l.email.toLowerCase().trim(),
+        phone: l.phone ? l.phone.trim() : '',
+        company: l.company ? l.company.trim() : '',
+        designation: l.designation ? l.designation.trim() : '',
+        country: l.country ? l.country.trim() : 'India',
+        leadScore: l.leadScore !== undefined ? Number(l.leadScore) : 40,
+        status: l.status || 'new',
+        source: l.source || 'walk_in',
+        event: eventId,
+        notes: l.notes || 'Bulk imported into CRM',
+        activityTimeline: [
+          {
+            type: 'note',
+            content: 'Bulk imported attendee record',
+            performedBy: req.user.id
+          }
+        ]
+      }));
+
+    if (preparedLeads.length === 0) {
+      return res.status(400).json({ success: false, error: 'No valid leads with name and email found' });
+    }
+
+    const inserted = await Lead.insertMany(preparedLeads);
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully imported ${inserted.length} leads`,
+      count: inserted.length
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @desc    Update lead details (score, pipeline status, assigned sales agent)
 // @route   PUT /api/leads/:id
 router.put('/:id', async (req, res, next) => {

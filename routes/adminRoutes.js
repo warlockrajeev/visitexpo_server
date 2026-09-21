@@ -2045,6 +2045,111 @@ router.get('/invoices', async (req, res, next) => {
   }
 });
 
+// @desc    Get summary count of all pending moderation items (Super Admin)
+// @route   GET /api/admin/pending-summary
+router.get('/pending-summary', async (req, res, next) => {
+  try {
+    const [pendingOrganizers, pendingExhibitors, pendingClaims, pendingEvents] = await Promise.all([
+      User.countDocuments({ role: 'organizer', isVerified: false }),
+      Exhibitor.countDocuments({ status: 'pending' }),
+      Event.countDocuments({ isClaimed: true, status: 'draft' }),
+      Event.countDocuments({ status: 'pending' })
+    ]);
+
+    const totalPending = pendingOrganizers + pendingExhibitors + pendingClaims + pendingEvents;
+
+    res.status(200).json({
+      success: true,
+      data: {
+        pendingOrganizers,
+        pendingExhibitors,
+        pendingClaims,
+        pendingEvents,
+        totalPending
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get complete detail dossier for a moderation item (Super Admin)
+// @route   GET /api/admin/moderation/:type/:id
+router.get('/moderation/:type/:id', async (req, res, next) => {
+  try {
+    const { type, id } = req.params;
+
+    if (type === 'exhibitors') {
+      const exhibitor = await Exhibitor.findById(id)
+        .populate('event', 'title city startDate endDate venue slug banner logo description organizer');
+
+      if (!exhibitor) {
+        return res.status(404).json({ success: false, error: 'Exhibitor application not found' });
+      }
+
+      // Find associated user login account
+      const emailEscaped = (exhibitor.contactEmail || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const associatedUser = await User.findOne({
+        email: { $regex: new RegExp(`^${emailEscaped}$`, 'i') }
+      }).select('name email role isVerified createdAt');
+
+      return res.status(200).json({
+        success: true,
+        type: 'exhibitor',
+        data: {
+          ...exhibitor.toObject(),
+          associatedUser
+        }
+      });
+    }
+
+    if (type === 'organizers') {
+      const user = await User.findById(id).populate('organization');
+      if (!user) {
+        return res.status(404).json({ success: false, error: 'Organizer user account not found' });
+      }
+
+      // Find any events associated with this organizer / organization
+      const orgId = user.organization?._id || user.organization;
+      const events = await Event.find({
+        $or: [
+          { organizer: orgId },
+          { claimedBy: user._id }
+        ]
+      }).select('title city startDate venue status slug');
+
+      return res.status(200).json({
+        success: true,
+        type: 'organizer',
+        data: {
+          ...user.toObject(),
+          events
+        }
+      });
+    }
+
+    if (type === 'events' || type === 'claims') {
+      const event = await Event.findById(id)
+        .populate('organizer', 'name email contact address')
+        .populate('claimedBy', 'name email role isVerified');
+
+      if (!event) {
+        return res.status(404).json({ success: false, error: 'Event record not found' });
+      }
+
+      return res.status(200).json({
+        success: true,
+        type: type === 'claims' ? 'claim' : 'event',
+        data: event
+      });
+    }
+
+    return res.status(400).json({ success: false, error: `Unsupported moderation type: ${type}` });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @desc    Get pending organizer account registrations
 // @route   GET /api/admin/pending-organizers
 router.get('/pending-organizers', async (req, res, next) => {
@@ -2151,7 +2256,8 @@ router.put('/exhibitors/:id/status', async (req, res, next) => {
     await exhibitor.save();
 
     // Sync isVerified on User
-    const associatedUser = await User.findOne({ email: exhibitor.contactEmail });
+    const emailEscaped = (exhibitor.contactEmail || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const associatedUser = await User.findOne({ email: { $regex: new RegExp(`^${emailEscaped}$`, 'i') } });
     if (associatedUser && associatedUser.role === 'exhibitor') {
       if (status === 'approved') {
         associatedUser.isVerified = true;
@@ -2159,7 +2265,7 @@ router.put('/exhibitors/:id/status', async (req, res, next) => {
       } else {
         // Only mark unverified if they have NO other approved exhibitor accounts
         const otherApproved = await Exhibitor.findOne({
-          contactEmail: exhibitor.contactEmail,
+          contactEmail: { $regex: new RegExp(`^${emailEscaped}$`, 'i') },
           _id: { $ne: exhibitor._id },
           status: 'approved'
         });
@@ -2512,6 +2618,102 @@ router.delete('/events/:id', async (req, res, next) => {
       success: true,
       message: `Event "${eventTitle}" permanently deleted successfully.`
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get detailed applicant dossier for approval inspection
+// @route   GET /api/admin/moderation/:type/:id
+router.get('/moderation/:type/:id', async (req, res, next) => {
+  try {
+    const { type, id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, error: 'Invalid applicant ID format' });
+    }
+
+    if (type === 'exhibitors') {
+      const exhibitor = await Exhibitor.findById(id)
+        .populate('event', 'title city startDate endDate venue slug banner logo description organizer')
+        .lean();
+
+      if (!exhibitor) {
+        return res.status(404).json({ success: false, error: 'Exhibitor application record not found' });
+      }
+
+      // Find associated login user account if exists
+      const emailEscaped = (exhibitor.contactEmail || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const associatedUser = await User.findOne({
+        email: { $regex: new RegExp(`^${emailEscaped}$`, 'i') }
+      }).select('name email role isVerified createdAt').lean();
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...exhibitor,
+          associatedUser: associatedUser || null
+        }
+      });
+    }
+
+    if (type === 'organizers') {
+      const user = await User.findById(id)
+        .populate('organization')
+        .select('-password')
+        .lean();
+
+      if (!user) {
+        return res.status(404).json({ success: false, error: 'Organizer account record not found' });
+      }
+
+      // Find events linked to this organizer
+      const events = await Event.find({ organizer: user._id })
+        .select('title city startDate endDate venue status banner slug')
+        .sort({ createdAt: -1 })
+        .lean();
+
+      return res.status(200).json({
+        success: true,
+        data: {
+          ...user,
+          events: events || []
+        }
+      });
+    }
+
+    if (type === 'events') {
+      const event = await Event.findById(id)
+        .populate('organizer', 'name contact email website phone')
+        .lean();
+
+      if (!event) {
+        return res.status(404).json({ success: false, error: 'Event onboarding record not found' });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: event
+      });
+    }
+
+    if (type === 'claims') {
+      const event = await Event.findById(id)
+        .populate('claimedBy', 'name email phone role isVerified')
+        .populate('organizer', 'name contact')
+        .lean();
+
+      if (!event) {
+        return res.status(404).json({ success: false, error: 'Event claim record not found' });
+      }
+
+      return res.status(200).json({
+        success: true,
+        data: event
+      });
+    }
+
+    return res.status(400).json({ success: false, error: `Unsupported moderation category: ${type}` });
   } catch (error) {
     next(error);
   }
