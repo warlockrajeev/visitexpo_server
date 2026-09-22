@@ -4,23 +4,84 @@
  */
 
 import EventRepository from '../repositories/EventRepository.js';
+import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
 
 class EventService {
   async createEvent(eventData, organizerId) {
+    const trimmedTitle = eventData.title?.trim();
+    if (!trimmedTitle) {
+      const err = new Error('Event title is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // Strict duplicate check: An event with the same title cannot be created
+    const escapedTitle = trimmedTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const existingTitleEvent = await EventRepository.findOne({
+      title: { $regex: new RegExp(`^${escapedTitle}$`, 'i') }
+    });
+
+    if (existingTitleEvent) {
+      const err = new Error(`An event titled "${existingTitleEvent.title}" already exists. Duplicate events cannot be created.`);
+      err.statusCode = 409;
+      err.existingEvent = {
+        _id: existingTitleEvent._id,
+        title: existingTitleEvent.title,
+        slug: existingTitleEvent.slug,
+        city: existingTitleEvent.city,
+        venue: existingTitleEvent.venue,
+        startDate: existingTitleEvent.startDate,
+        endDate: existingTitleEvent.endDate,
+        status: existingTitleEvent.status,
+        banner: existingTitleEvent.banner,
+        orgName: existingTitleEvent.orgName || existingTitleEvent.organizer?.name
+      };
+      throw err;
+    }
+
+    // Also check live WordPress directory events (e.g. Impressions Expo and others)
+    try {
+      const wpDocs = await fetchLiveWpDirectoryEvents();
+      if (Array.isArray(wpDocs)) {
+        const norm = (s) => (s || '').toLowerCase().trim().replace(/[^a-z0-9]/g, '');
+        const queryNorm = norm(trimmedTitle);
+        const wpExact = wpDocs.find(d => norm(d.title) === queryNorm || d.slug === trimmedTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-'));
+        if (wpExact) {
+          const err = new Error(`An event titled "${wpExact.title}" already exists in VisitExpo. Duplicate events cannot be created.`);
+          err.statusCode = 409;
+          err.existingEvent = {
+            _id: String(wpExact.id || wpExact._id),
+            title: wpExact.title,
+            slug: wpExact.slug,
+            city: wpExact.city,
+            venue: wpExact.venue,
+            startDate: wpExact.startDate,
+            endDate: wpExact.endDate,
+            status: 'published',
+            isClaimed: false
+          };
+          throw err;
+        }
+      }
+    } catch (e) {
+      if (e.statusCode === 409) throw e;
+    }
+
     // Generate unique slug if not present
-    let slug = eventData.slug || this._slugify(eventData.title);
+    let slug = eventData.slug || this._slugify(trimmedTitle);
     
     // Check if slug is unique
     let existing = await EventRepository.findOne({ slug });
     let counter = 1;
     while (existing) {
-      slug = `${this._slugify(eventData.title)}-${counter}`;
+      slug = `${this._slugify(trimmedTitle)}-${counter}`;
       existing = await EventRepository.findOne({ slug });
       counter++;
     }
 
     const payload = {
       ...eventData,
+      title: trimmedTitle,
       slug,
       organizer: organizerId
     };
@@ -37,10 +98,32 @@ class EventService {
       throw err;
     }
 
-    if (event.organizer.toString() !== organizerId.toString()) {
+    if (event.organizer && organizerId && event.organizer.toString() !== organizerId.toString()) {
       const err = new Error('Unauthorized to modify this event');
       err.statusCode = 403;
       throw err;
+    }
+
+    // Duplicate title check if title is changing
+    if (eventData.title && eventData.title.trim().toLowerCase() !== event.title.toLowerCase()) {
+      const trimmedTitle = eventData.title.trim();
+      const escapedTitle = trimmedTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const duplicateEvent = await EventRepository.findOne({
+        _id: { $ne: eventId },
+        title: { $regex: new RegExp(`^${escapedTitle}$`, 'i') }
+      });
+      if (duplicateEvent) {
+        const err = new Error(`An event titled "${duplicateEvent.title}" already exists. Duplicate events cannot be created.`);
+        err.statusCode = 409;
+        err.existingEvent = {
+          _id: duplicateEvent._id,
+          title: duplicateEvent.title,
+          slug: duplicateEvent.slug,
+          city: duplicateEvent.city,
+          venue: duplicateEvent.venue
+        };
+        throw err;
+      }
     }
 
     // Slug checks if title changes and user didn't supply custom slug

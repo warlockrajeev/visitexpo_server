@@ -46,6 +46,8 @@ app.use(
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:3001',
+  'http://127.0.0.1:3000',
+  'http://127.0.0.1:3001',
   'https://visitexpo-client.vercel.app',
   'https://visitexpo-admin.vercel.app',
   'https://visitexpo-server.onrender.com',
@@ -66,6 +68,8 @@ app.use(
       if (
         !origin ||
         allowedOrigins.indexOf(origin) !== -1 ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1') ||
         origin.endsWith('.vercel.app') ||
         origin.endsWith('.onrender.com') ||
         origin.endsWith('.visitexpo.in')

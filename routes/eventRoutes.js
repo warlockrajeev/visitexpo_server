@@ -13,6 +13,8 @@ import DeletedEvent from '../models/DeletedEvent.js';
 import { getAggregatedOrganizers } from './adminRoutes.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
+import { syncEventToWordPress } from '../services/WordPressSyncService.js';
+import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
 
 const router = express.Router();
 
@@ -179,6 +181,156 @@ router.get('/upcoming-events', wordpressLimiter, async (req, res, next) => {
   }
 });
 
+// Check if event title already exists across MongoDB and live WordPress directory
+router.get('/check-duplicate', async (req, res, next) => {
+  try {
+    const { title, excludeId } = req.query;
+    if (!title || !title.trim()) {
+      return res.status(200).json({
+        success: true,
+        isDuplicate: false,
+        existingEvent: null,
+        similarEvents: []
+      });
+    }
+
+    const cleanTitle = title.trim();
+    const queryNorm = normalizeTitle(cleanTitle);
+    const escapedTitle = cleanTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // 1. Exclude permanently deleted events if any
+    let deletedTitles = new Set();
+    let deletedSlugs = new Set();
+    let deletedIds = new Set();
+    try {
+      const deleted = await DeletedEvent.find().select('slug title eventId').lean();
+      deleted.forEach(d => {
+        if (d.title) deletedTitles.add(normalizeTitle(d.title));
+        if (d.slug) deletedSlugs.add(d.slug.toLowerCase().trim());
+        if (d.eventId) deletedIds.add(String(d.eventId).toLowerCase().trim());
+      });
+    } catch {}
+
+    // 2. Query MongoDB Event collection
+    const exactQuery = {
+      title: { $regex: new RegExp(`^${escapedTitle}$`, 'i') }
+    };
+    if (excludeId && mongoose.isValidObjectId(excludeId)) {
+      exactQuery._id = { $ne: excludeId };
+    }
+
+    let exactMatch = await Event.findOne(exactQuery)
+      .populate('organizer', 'name logo website email')
+      .lean();
+
+    if (exactMatch && (deletedTitles.has(normalizeTitle(exactMatch.title)) || deletedSlugs.has(exactMatch.slug))) {
+      exactMatch = null;
+    }
+
+    if (exactMatch) {
+      return res.status(200).json({
+        success: true,
+        isDuplicate: true,
+        existingEvent: {
+          _id: exactMatch._id,
+          title: exactMatch.title,
+          slug: exactMatch.slug,
+          city: exactMatch.city,
+          venue: exactMatch.venue,
+          startDate: exactMatch.startDate,
+          endDate: exactMatch.endDate,
+          status: exactMatch.status,
+          banner: exactMatch.banner,
+          organizer: exactMatch.organizer,
+          orgName: exactMatch.orgName || exactMatch.organizer?.name || 'VisitExpo Organizer',
+          isClaimed: exactMatch.isClaimed,
+          source: 'platform'
+        },
+        similarEvents: []
+      });
+    }
+
+    // 3. Query Live WordPress Directory (2000+ events including Impressions Expo)
+    const wpDocs = await fetchLiveWpDirectoryEvents();
+    if (Array.isArray(wpDocs) && wpDocs.length > 0) {
+      const wpExact = wpDocs.find(doc => {
+        if (deletedTitles.has(normalizeTitle(doc.title)) || deletedSlugs.has(doc.slug) || deletedIds.has(String(doc.id))) {
+          return false;
+        }
+        if (excludeId && (String(doc.id) === String(excludeId) || doc.slug === String(excludeId))) {
+          return false;
+        }
+        const docNorm = normalizeTitle(doc.title);
+        const docSlug = (doc.slug || '').toLowerCase().trim();
+        const generatedSlug = cleanTitle.toLowerCase().trim().replace(/[^a-z0-9]+/g, '-');
+        
+        return docNorm === queryNorm || docSlug === generatedSlug || doc.title.toLowerCase().trim() === cleanTitle.toLowerCase();
+      });
+
+      if (wpExact) {
+        return res.status(200).json({
+          success: true,
+          isDuplicate: true,
+          existingEvent: {
+            _id: String(wpExact.id || wpExact._id),
+            title: wpExact.title,
+            slug: wpExact.slug,
+            city: wpExact.city || 'India',
+            venue: wpExact.venue || 'Exhibition Center',
+            startDate: wpExact.startDate,
+            endDate: wpExact.endDate,
+            status: 'published',
+            banner: wpExact.banner || null,
+            organizer: null,
+            orgName: 'VisitExpo Live Directory',
+            isClaimed: false,
+            source: 'wordpress'
+          },
+          similarEvents: []
+        });
+      }
+    }
+
+    // 4. Find Similar Events (partial matches from MongoDB and WordPress)
+    let similarEvents = [];
+    if (cleanTitle.length >= 3) {
+      const similarQuery = {
+        title: { $regex: escapedTitle, $options: 'i' }
+      };
+      if (excludeId && mongoose.isValidObjectId(excludeId)) {
+        similarQuery._id = { $ne: excludeId };
+      }
+
+      const matches = await Event.find(similarQuery)
+        .select('title slug city venue startDate endDate status banner orgName isClaimed')
+        .limit(3)
+        .lean();
+
+      similarEvents = (matches || []).filter(m => !deletedTitles.has(normalizeTitle(m.title)));
+
+      if (similarEvents.length < 3 && Array.isArray(wpDocs)) {
+        const lowerClean = cleanTitle.toLowerCase();
+        const wpMatches = wpDocs.filter(d => 
+          d.title.toLowerCase().includes(lowerClean) &&
+          !deletedTitles.has(normalizeTitle(d.title)) &&
+          !similarEvents.some(se => normalizeTitle(se.title) === normalizeTitle(d.title))
+        ).slice(0, 3 - similarEvents.length);
+
+        similarEvents = [...similarEvents, ...wpMatches];
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      isDuplicate: false,
+      existingEvent: null,
+      similarEvents
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get single event by slug
 router.get('/:slug', wordpressLimiter, async (req, res, next) => {
   try {
@@ -192,8 +344,6 @@ router.get('/:slug', wordpressLimiter, async (req, res, next) => {
 // ==========================================
 // ORGANIZER PRIVATE MANAGEMENT APIS
 // ==========================================
-
-import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 
 // Create a new event
 router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
@@ -212,6 +362,13 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
 
     res.status(201).json({ success: true, message: 'Event created successfully', event });
   } catch (error) {
+    if (error.statusCode === 409) {
+      return res.status(409).json({
+        success: false,
+        error: error.message,
+        existingEvent: error.existingEvent
+      });
+    }
     next(error);
   }
 });

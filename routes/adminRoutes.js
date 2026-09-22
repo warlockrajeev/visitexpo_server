@@ -2483,6 +2483,236 @@ router.put('/claims/:id/status', async (req, res, next) => {
   }
 });
 
+// ========================================================
+// ORGANIZER EVENTS MANAGEMENT & WORDPRESS TWO-WAY SYNC
+// ========================================================
+
+// @desc    Get all events created by organizers with filtering & stats
+// @route   GET /api/admin/events
+router.get('/events', async (req, res, next) => {
+  try {
+    const { status, category, search, page = 1, limit = 50 } = req.query;
+    const pageNum = parseInt(page, 10) || 1;
+    const limitNum = parseInt(limit, 10) || 50;
+    const skip = (pageNum - 1) * limitNum;
+
+    // Base query
+    const query = {};
+
+    // Status filter
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+
+    // Category filter
+    if (category && category !== 'all') {
+      query.categories = category;
+    }
+
+    // Search query across title, venue, city, orgName, slug
+    if (search && search.trim()) {
+      const searchClean = search.trim();
+      const searchRegex = new RegExp(searchClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      query.$or = [
+        { title: searchRegex },
+        { venue: searchRegex },
+        { city: searchRegex },
+        { orgName: searchRegex },
+        { slug: searchRegex }
+      ];
+    }
+
+    // Exclude permanently deleted events if any
+    try {
+      const deletedDocs = await DeletedEvent.find().select('slug title eventId').lean();
+      if (deletedDocs && deletedDocs.length > 0) {
+        const delSlugs = deletedDocs.map(d => d.slug).filter(Boolean);
+        const delIds = deletedDocs.map(d => d.eventId).filter(Boolean);
+        if (delSlugs.length > 0 || delIds.length > 0) {
+          query._id = { $nin: delIds.filter(id => mongoose.isValidObjectId(id)) };
+          query.slug = { $nin: delSlugs };
+        }
+      }
+    } catch {}
+
+    const [events, totalEvents, publishedCount, draftCount, cancelledCount, wpSyncedCount, filteredTotal] = await Promise.all([
+      Event.find(query)
+        .populate('organizer', 'name logo website email contact')
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limitNum)
+        .lean(),
+      Event.countDocuments(),
+      Event.countDocuments({ status: 'published' }),
+      Event.countDocuments({ status: 'draft' }),
+      Event.countDocuments({ status: 'cancelled' }),
+      Event.countDocuments({ wpPostId: { $exists: true, $ne: '' } }),
+      Event.countDocuments(query)
+    ]);
+
+    // Enhance events with local images if missing
+    const enhancedEvents = events.map(e => ({
+      ...e,
+      banner: e.banner || getWpImage(e.slug, e._id, e.wpPostId, e.title) || null
+    }));
+
+    res.status(200).json({
+      success: true,
+      data: {
+        events: enhancedEvents,
+        stats: {
+          totalEvents,
+          publishedCount,
+          draftCount,
+          cancelledCount,
+          wpSyncedCount
+        },
+        pagination: {
+          page: pageNum,
+          limit: limitNum,
+          total: filteredTotal,
+          pages: Math.ceil(filteredTotal / limitNum) || 1
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get single event by ID for admin inspection/editing
+// @route   GET /api/admin/events/:id
+router.get('/events/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    let event = null;
+    if (mongoose.isValidObjectId(id)) {
+      event = await Event.findById(id).populate('organizer', 'name logo website email contact').lean();
+    }
+    if (!event) {
+      event = await Event.findOne({ slug: id }).populate('organizer', 'name logo website email contact').lean();
+    }
+
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    // Fallback banner image if missing
+    event.banner = event.banner || getWpImage(event.slug, event._id, event.wpPostId, event.title) || null;
+
+    res.status(200).json({
+      success: true,
+      data: event
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Admin edit event & real-time sync changes to WordPress
+// @route   PUT /api/admin/events/:id
+router.put('/events/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body || {};
+
+    let event = null;
+    if (mongoose.isValidObjectId(id)) {
+      event = await Event.findById(id);
+    }
+    if (!event) {
+      event = await Event.findOne({ slug: id });
+    }
+
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event record not found' });
+    }
+
+    // Editable fields
+    const allowedFields = [
+      'title', 'slug', 'description', 'banner', 'gallery',
+      'venue', 'city', 'state', 'country', 'startDate', 'endDate', 'timings',
+      'categories', 'status', 'orgName', 'orgEmail', 'orgPhone',
+      'orgWebsite', 'orgDesc', 'orgLogo', 'isFreeEvent', 'paidTicketPrice',
+      'schedules', 'faqsList', 'sponsorsList', 'contactShortcode', 'seo'
+    ];
+
+    allowedFields.forEach(field => {
+      if (updates[field] !== undefined) {
+        event[field] = updates[field];
+      }
+    });
+
+    await event.save();
+
+    // Real-time synchronization to WordPress!
+    let wpSyncSuccess = false;
+    let wpData = null;
+    try {
+      wpData = await syncEventToWordPress(event);
+      if (wpData) {
+        wpSyncSuccess = true;
+      }
+    } catch (wpErr) {
+      console.warn('[Admin] Automatic WordPress sync encountered warning:', wpErr.message);
+    }
+
+    // Re-fetch populated
+    const populated = await Event.findById(event._id)
+      .populate('organizer', 'name logo website email contact')
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      message: wpSyncSuccess 
+        ? 'Event updated successfully and synced to WordPress!'
+        : 'Event updated in database. WordPress sync queued.',
+      event: populated,
+      wpSynced: wpSyncSuccess || !!event.wpPostId,
+      wpPostId: event.wpPostId,
+      wpUrl: event.wpUrl
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Manually force-sync single event to WordPress
+// @route   POST /api/admin/events/:id/sync-wp
+router.post('/events/:id/sync-wp', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    let event = null;
+    if (mongoose.isValidObjectId(id)) {
+      event = await Event.findById(id);
+    }
+    if (!event) {
+      event = await Event.findOne({ slug: id });
+    }
+
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    const wpResult = await syncEventToWordPress(event);
+    if (!wpResult) {
+      return res.status(502).json({
+        success: false,
+        error: 'Failed to sync event to WordPress. Please check WordPress API credentials in environment configuration.'
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Event successfully synchronized to WordPress (Post ID #${event.wpPostId || wpResult.id})`,
+      wpPostId: event.wpPostId || wpResult.id,
+      wpUrl: event.wpUrl || wpResult.link
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @desc    Get pending event onboarding submissions
 // @route   GET /api/admin/pending-events
 router.get('/pending-events', async (req, res, next) => {
