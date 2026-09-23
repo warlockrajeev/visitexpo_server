@@ -7,6 +7,111 @@ import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import Ticket from '../models/Ticket.js';
 
+/**
+ * Clean inline markdown formatting into proper HTML
+ */
+export const cleanInlineMarkdown = (text) => {
+  if (!text) return '';
+  return text
+    // Replace ** 📅 Dates: ** or **Dates:** with <strong>
+    .replace(/\*\*\s*([^*]+?)\s*\*\*/g, '<strong>$1</strong>')
+    // Replace *italic* with <em>
+    .replace(/(?<!\*)\*([^*]+?)\*(?!\*)/g, '<em>$1</em>')
+    // Remove leftover raw hashtags
+    .replace(/#{1,6}\s*/g, '')
+    // Remove dangling unclosed asterisks
+    .replace(/\*{2,}/g, '')
+    .trim();
+};
+
+/**
+ * Converts rich markdown text into clean Gutenberg HTML blocks
+ * (wp:paragraph, wp:heading, wp:list, wp:quote)
+ */
+export const formatMarkdownToGutenbergBlocks = (rawContent, eventTitle = '') => {
+  if (!rawContent || typeof rawContent !== 'string') {
+    return '<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->';
+  }
+
+  const normalized = rawContent.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  const rawLines = normalized.split('\n');
+  const lines = [];
+  let isFirstLine = true;
+
+  for (let i = 0; i < rawLines.length; i++) {
+    let line = rawLines[i].trim();
+    if (lines.length === 0 && !line) continue;
+    if (isFirstLine && line) {
+      isFirstLine = false;
+      const strippedHeader = line.replace(/^#{1,6}\s*/, '').trim().toLowerCase();
+      const normTitle = (eventTitle || '').trim().toLowerCase();
+      if (normTitle && (strippedHeader === normTitle || strippedHeader.includes(normTitle))) {
+        continue;
+      }
+    }
+    // Skip stray lonely hashtag lines like "###" or "##"
+    if (/^#{1,6}$/.test(line)) continue;
+    lines.push(rawLines[i]);
+  }
+
+  const blocks = [];
+  let currentList = [];
+  let currentParagraphLines = [];
+
+  const flushParagraph = () => {
+    if (currentParagraphLines.length > 0) {
+      const combined = currentParagraphLines.join(' ').trim();
+      if (combined) {
+        const cleaned = cleanInlineMarkdown(combined);
+        if (cleaned) {
+          blocks.push(`<!-- wp:paragraph -->\n<p>${cleaned}</p>\n<!-- /wp:paragraph -->`);
+        }
+      }
+      currentParagraphLines = [];
+    }
+  };
+
+  const flushList = () => {
+    if (currentList.length > 0) {
+      const itemsHtml = currentList.map(item => `  <li>${cleanInlineMarkdown(item)}</li>`).join('\n');
+      blocks.push(`<!-- wp:list -->\n<ul>\n${itemsHtml}\n</ul>\n<!-- /wp:list -->`);
+      currentList = [];
+    }
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(Math.max(headingMatch[1].length, 2), 4);
+      const headingText = cleanInlineMarkdown(headingMatch[2]);
+      if (headingText) {
+        blocks.push(`<!-- wp:heading {"level":${level}} -->\n<h${level}>${headingText}</h${level}>\n<!-- /wp:heading -->`);
+      }
+      continue;
+    }
+    const listMatch = trimmed.match(/^([•\-\*]|\d+\.)\s+(.+)$/);
+    if (listMatch) {
+      flushParagraph();
+      currentList.push(listMatch[2]);
+      continue;
+    }
+    flushList();
+    currentParagraphLines.push(trimmed);
+  }
+  flushParagraph();
+  flushList();
+
+  return blocks.length > 0 ? blocks.join('\n\n') : '<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->';
+};
+
 export const syncEventToWordPress = async (eventInput) => {
   try {
     let event = null;
@@ -31,15 +136,17 @@ export const syncEventToWordPress = async (eventInput) => {
     const sponsorLevelMap = {};
     
     let logoCounter = 0;
-    if (Array.isArray(event.sponsorsList)) {
+    if (Array.isArray(event.sponsorsList) && event.sponsorsList.length > 0) {
       event.sponsorsList.forEach(sp => {
-        const tierName = sp.tier || 'Sponsors';
+        const tierName = sp.tier || 'Our Sponsors';
         if (!sponsorLevelMap[tierName]) {
           sponsorLevelMap[tierName] = [];
         }
         
         const logoIndex = 10 + logoCounter;
-        sponsorsLogos.push(sp.logo || '');
+        // Fallback logo if none provided: crisp branded sponsor logo
+        const logoUrl = sp.logo || `https://ui-avatars.com/api/?name=${encodeURIComponent(sp.name || 'Sponsor')}&background=0D8ABC&color=fff&size=200&bold=true`;
+        sponsorsLogos.push(logoUrl);
         
         sponsorLevelMap[tierName].push({
           link: sp.link || '',
@@ -76,9 +183,11 @@ export const syncEventToWordPress = async (eventInput) => {
       }];
     }
 
+    const formattedGutenbergContent = formatMarkdownToGutenbergBlocks(event.description, event.title);
+
     const wpPayload = {
       title: event.title,
-      content: `<!-- wp:paragraph -->\n<p>${event.description || ''}</p>\n<!-- /wp:paragraph -->`,
+      content: formattedGutenbergContent,
       slug: event.slug,
       wpPostId: event.wpPostId || '',
       startDate: event.startDate ? Math.floor(new Date(event.startDate).getTime() / 1000) : 0,
@@ -99,6 +208,7 @@ export const syncEventToWordPress = async (eventInput) => {
       // Contact
       contactShortcode: event.contactShortcode || '',
       // Sponsors
+      labelSponsor: 'Our Sponsors',
       sponsorsLogos,
       sponsorLevels: Object.keys(sponsorLevelMap),
       sponsorGroups: Object.values(sponsorLevelMap),
