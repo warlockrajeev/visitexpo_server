@@ -13,14 +13,17 @@ import { authLimiter } from '../middlewares/rateLimiter.js';
 
 const router = express.Router();
 
-// Helper to set refresh token cookie
-const setRefreshTokenCookie = (res, token) => {
-  const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
+// Helper to set refresh token cookie with environment & protocol detection
+const setRefreshTokenCookie = (res, token, req) => {
+  const origin = req?.get('origin') || '';
+  const host = req?.get('host') || '';
+  const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1') || origin.includes('localhost') || origin.includes('127.0.0.1');
+  const isProduction = !isLocalhost && (process.env.NODE_ENV === 'production' || process.env.RENDER === 'true');
   
   res.cookie('refreshToken', token, {
     httpOnly: true,
-    secure: isProduction, // Requires HTTPS in production (Vercel & Render)
-    sameSite: isProduction ? 'none' : 'lax', // 'none' required for cross-domain cookie sharing (vercel.app -> onrender.com)
+    secure: isProduction, // False on localhost HTTP so browser never rejects cookie; True on production HTTPS
+    sameSite: isProduction ? 'none' : 'lax', // 'none' for cross-domain production, 'lax' for local development
     maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
   });
 };
@@ -36,12 +39,13 @@ router.post('/signup', authLimiter, async (req, res, next) => {
     const data = await AuthService.signup(name, email, password, organizationName, role);
     
     // Set refresh token cookie
-    setRefreshTokenCookie(res, data.refreshToken);
+    setRefreshTokenCookie(res, data.refreshToken, req);
 
     res.status(201).json({
       success: true,
       message: 'Registration successful',
       accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
       user: data.user
     });
   } catch (error) {
@@ -51,21 +55,22 @@ router.post('/signup', authLimiter, async (req, res, next) => {
 
 router.post('/login', authLimiter, async (req, res, next) => {
   try {
-    const { email, password } = req.body;
+    const { email, password, role } = req.body;
 
     if (!email || !password) {
       return res.status(400).json({ success: false, error: 'Email and password are required' });
     }
 
-    const data = await AuthService.login(email, password);
+    const data = await AuthService.login(email, password, role);
 
     // Set refresh token cookie
-    setRefreshTokenCookie(res, data.refreshToken);
+    setRefreshTokenCookie(res, data.refreshToken, req);
 
     res.status(200).json({
       success: true,
       message: 'Login successful',
       accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
       user: data.user
     });
   } catch (error) {
@@ -76,7 +81,7 @@ router.post('/login', authLimiter, async (req, res, next) => {
 // Check if user exists and whether they have completed organizer/exhibitor profile
 router.post('/google/check', authLimiter, async (req, res, next) => {
   try {
-    const { email } = req.body;
+    const { email, role } = req.body;
     if (!email) {
       return res.status(400).json({ success: false, error: 'Google email is required' });
     }
@@ -85,6 +90,29 @@ router.post('/google/check', authLimiter, async (req, res, next) => {
     const user = await User.findOne({ email: normalizedEmail }).populate('organization');
     if (!user) {
       return res.status(200).json({ success: true, exists: false, hasDetails: false });
+    }
+
+    // Role mismatch check for Google pre-check
+    const assignedRole = role === 'visitor' ? 'visitor' : role === 'exhibitor' ? 'exhibitor' : 'organizer';
+    const existingRole = user.role || 'organizer';
+
+    if (role && existingRole !== assignedRole) {
+      const getRoleLabel = (r) => {
+        if (!r) return 'User';
+        const str = r.toLowerCase();
+        if (str === 'organizer') return 'Organizer';
+        if (str === 'exhibitor') return 'Exhibitor';
+        if (str === 'visitor') return 'Visitor';
+        if (str === 'super_admin' || str === 'admin') return 'Administrator';
+        return r.charAt(0).toUpperCase() + r.slice(1);
+      };
+      const existingLabel = getRoleLabel(existingRole);
+      return res.status(409).json({
+        success: false,
+        error: `This Google account (${normalizedEmail}) is already registered as an ${existingLabel}. Please switch to the ${existingLabel} tab to sign in.`,
+        registeredRole: existingRole,
+        exists: true
+      });
     }
 
     // A user has details if:
@@ -152,12 +180,13 @@ router.post('/google', authLimiter, async (req, res, next) => {
     });
 
     // Set refresh token cookie
-    setRefreshTokenCookie(res, data.refreshToken);
+    setRefreshTokenCookie(res, data.refreshToken, req);
 
     res.status(200).json({
       success: true,
       message: 'Google login successful',
       accessToken: data.accessToken,
+      refreshToken: data.refreshToken,
       user: data.user
     });
   } catch (error) {
@@ -177,11 +206,12 @@ router.post('/refresh', async (req, res, next) => {
     const data = await AuthService.refresh(token);
 
     // Set new refresh token cookie
-    setRefreshTokenCookie(res, data.refreshToken);
+    setRefreshTokenCookie(res, data.refreshToken, req);
 
     res.status(200).json({
       success: true,
-      accessToken: data.accessToken
+      accessToken: data.accessToken,
+      refreshToken: data.refreshToken
     });
   } catch (error) {
     next(error);
@@ -196,7 +226,10 @@ router.post('/logout', protect, async (req, res, next) => {
       await AuthService.logout(req.user.id, token);
     }
 
-    const isProduction = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
+    const origin = req?.get('origin') || '';
+    const host = req?.get('host') || '';
+    const isLocalhost = host.includes('localhost') || host.includes('127.0.0.1') || origin.includes('localhost') || origin.includes('127.0.0.1');
+    const isProduction = !isLocalhost && (process.env.NODE_ENV === 'production' || process.env.RENDER === 'true');
     res.clearCookie('refreshToken', {
       httpOnly: true,
       secure: isProduction,

@@ -37,6 +37,7 @@ const errorHandler = (err, req, res, next) => {
   res.status(statusCode).json({
     success: false,
     error: responseMessage,
+    registeredRole: err.registeredRole || undefined,
     // Provide stack trace in non-production mode
     stack: process.env.NODE_ENV === 'production' ? null : err.stack
   });

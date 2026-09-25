@@ -8,13 +8,26 @@ import UserRepository from '../repositories/UserRepository.js';
 import Organization from '../models/Organization.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
 
+export const getRoleLabel = (role) => {
+  if (!role) return 'User';
+  const r = role.toLowerCase();
+  if (r === 'organizer') return 'Organizer';
+  if (r === 'exhibitor') return 'Exhibitor';
+  if (r === 'visitor') return 'Visitor';
+  if (r === 'super_admin' || r === 'admin') return 'Administrator';
+  return role.charAt(0).toUpperCase() + role.slice(1);
+};
+
 class AuthService {
   async signup(name, email, password, orgName = '', role = 'organizer') {
     // 1. Check if email already registered
-    const existingUser = await UserRepository.findOne({ email });
+    const normalizedEmail = (email || '').toLowerCase().trim();
+    const existingUser = await UserRepository.findOne({ email: normalizedEmail });
     if (existingUser) {
-      const err = new Error('Email address already registered');
-      err.statusCode = 400;
+      const existingLabel = getRoleLabel(existingUser.role);
+      const err = new Error(`This email address is already registered as an ${existingLabel}. Please switch to the ${existingLabel} tab to sign in.`);
+      err.statusCode = 409;
+      err.registeredRole = existingUser.role;
       throw err;
     }
 
@@ -66,12 +79,24 @@ class AuthService {
     };
   }
 
-  async login(email, password) {
+  async login(email, password, expectedRole = null) {
+    const normalizedEmail = (email || '').toLowerCase().trim();
     // 1. Find user with password field
-    const user = await UserRepository.findByEmailWithPassword(email);
+    const user = await UserRepository.findByEmailWithPassword(normalizedEmail);
     if (!user) {
       const err = new Error('Invalid email or password credentials');
       err.statusCode = 401;
+      throw err;
+    }
+
+    // Role mismatch check if expectedRole is passed
+    if (expectedRole && user.role && user.role !== expectedRole) {
+      const existingLabel = getRoleLabel(user.role);
+      const err = new Error(
+        `This account is registered as an ${existingLabel}. Please switch to the ${existingLabel} tab to sign in.`
+      );
+      err.statusCode = 409;
+      err.registeredRole = user.role;
       throw err;
     }
 
@@ -188,6 +213,20 @@ class AuthService {
     const assignedRole = role === 'visitor' ? 'visitor' : role === 'exhibitor' ? 'exhibitor' : 'organizer';
     const finalOrgName = organizationName || company || `${name || normalizedEmail.split('@')[0]}'s ${assignedRole === 'exhibitor' ? 'Exhibition Enterprise' : 'Organization'}`;
 
+    if (user) {
+      // Check if user is registered with a different role
+      const existingRole = user.role || 'organizer';
+      if (assignedRole && existingRole !== assignedRole) {
+        const existingLabel = getRoleLabel(existingRole);
+        const err = new Error(
+          `This Google account (${normalizedEmail}) is already registered as an ${existingLabel}. Please switch to the ${existingLabel} tab to sign in.`
+        );
+        err.statusCode = 409;
+        err.registeredRole = existingRole;
+        throw err;
+      }
+    }
+
     if (!user) {
       // Auto-register new user authenticated via Google
       const randomPassword = crypto.randomBytes(24).toString('hex');
@@ -223,11 +262,6 @@ class AuthService {
       // If user exists, ensure they are verified since Google verified their email
       if (!user.isVerified) {
         user.isVerified = true;
-      }
-
-      // If user is explicitly registering/switching to organizer or exhibitor
-      if (assignedRole !== 'visitor' && user.role === 'visitor') {
-        user.role = assignedRole;
       }
 
       if (phone && !user.phone) user.phone = phone;
