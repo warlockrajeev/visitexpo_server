@@ -6,6 +6,7 @@
 import crypto from 'crypto';
 import UserRepository from '../repositories/UserRepository.js';
 import Organization from '../models/Organization.js';
+import TwoFactorService from './twoFactorService.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
 
 export const getRoleLabel = (role) => {
@@ -19,7 +20,7 @@ export const getRoleLabel = (role) => {
 };
 
 class AuthService {
-  async signup(name, email, password, orgName = '', role = 'organizer') {
+  async signup(name, email, password, orgName = '', role = 'organizer', phone = '', city = '', phoneVerificationToken = '', otpSessionId = '', otp = '') {
     // 1. Check if email already registered
     const normalizedEmail = (email || '').toLowerCase().trim();
     const existingUser = await UserRepository.findOne({ email: normalizedEmail });
@@ -31,16 +32,47 @@ class AuthService {
       throw err;
     }
 
+    // 2. Mandatory Mobile OTP Verification Check
+    const cleanPhone = TwoFactorService.cleanPhoneNumber(phone);
+    if (!cleanPhone || cleanPhone.length < 10) {
+      const err = new Error('A valid 10-digit mobile number is mandatory for registration.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    let isPhoneValid = false;
+    if (phoneVerificationToken && TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
+      isPhoneValid = true;
+    } else if (otpSessionId && otp) {
+      const verifyRes = await TwoFactorService.verifyOtp(otpSessionId, otp, cleanPhone);
+      if (verifyRes.success) {
+        isPhoneValid = true;
+      } else {
+        const err = new Error(verifyRes.error || 'Invalid or expired mobile OTP.');
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+
+    if (!isPhoneValid) {
+      const err = new Error('Mandatory mobile number verification failed. Please verify your phone number via OTP.');
+      err.statusCode = 400;
+      throw err;
+    }
+
     const assignedRole = ['visitor', 'organizer', 'exhibitor'].includes(role) ? role : 'organizer';
     const isVerified = assignedRole === 'visitor'; // Visitors are auto-verified
 
-    // 2. Create the User (password hashing handled by Mongoose pre-save hook)
+    // 3. Create the User (password hashing handled by Mongoose pre-save hook)
     const user = await UserRepository.create({
       name,
-      email,
+      email: normalizedEmail,
       password,
       role: assignedRole,
-      isVerified
+      phone: cleanPhone,
+      city: (city || '').trim(),
+      isVerified,
+      isPhoneVerified: true
     });
 
     // 3. Create default Organization if name is specified
@@ -193,7 +225,7 @@ class AuthService {
     return true;
   }
 
-  async googleAuth({ email, name, role = 'organizer', organizationName, phone, city, website, company, designation, industry }) {
+  async googleAuth({ email, name, role = 'organizer', organizationName, phone, city, website, company, designation, industry, phoneVerificationToken, otpSessionId, otp }) {
     if (!email) {
       const err = new Error('Email is required for Google authentication');
       err.statusCode = 400;
@@ -228,6 +260,34 @@ class AuthService {
     }
 
     if (!user) {
+      // Mandatory Mobile OTP verification for new Google registration
+      const cleanPhone = TwoFactorService.cleanPhoneNumber(phone);
+      if (!cleanPhone || cleanPhone.length < 10) {
+        const err = new Error('A valid 10-digit mobile number is mandatory to complete Google registration.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      let isPhoneValid = false;
+      if (phoneVerificationToken && TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
+        isPhoneValid = true;
+      } else if (otpSessionId && otp) {
+        const verifyRes = await TwoFactorService.verifyOtp(otpSessionId, otp, cleanPhone);
+        if (verifyRes.success) {
+          isPhoneValid = true;
+        } else {
+          const err = new Error(verifyRes.error || 'Invalid or expired mobile OTP.');
+          err.statusCode = 400;
+          throw err;
+        }
+      }
+
+      if (!isPhoneValid) {
+        const err = new Error('Mobile number OTP verification is required to complete Google registration.');
+        err.statusCode = 400;
+        throw err;
+      }
+
       // Auto-register new user authenticated via Google
       const randomPassword = crypto.randomBytes(24).toString('hex');
       const userName = name || normalizedEmail.split('@')[0];
@@ -237,11 +297,12 @@ class AuthService {
         email: normalizedEmail,
         password: randomPassword,
         role: assignedRole,
-        phone: phone || '',
+        phone: cleanPhone,
         company: company || organizationName || '',
         designation: designation || '',
         city: city || '',
-        isVerified: true
+        isVerified: true,
+        isPhoneVerified: true
       });
 
       // Create organization if registering as organizer or exhibitor
@@ -249,7 +310,7 @@ class AuthService {
         const organization = await Organization.create({
           name: finalOrgName,
           website: website || '',
-          contact: { email: normalizedEmail, phone: phone || '' },
+          contact: { email: normalizedEmail, phone: cleanPhone },
           address: { city: city || '' },
           description: industry ? `Industry Sector: ${industry}` : '',
           teamMembers: [{ user: user._id, role: 'organizer' }]
@@ -264,7 +325,24 @@ class AuthService {
         user.isVerified = true;
       }
 
-      if (phone && !user.phone) user.phone = phone;
+      // If user provided a phone and it's verified, update it
+      if (phone) {
+        const cleanPhone = TwoFactorService.cleanPhoneNumber(phone);
+        if (cleanPhone && cleanPhone.length >= 10) {
+          let isPhoneValid = false;
+          if (phoneVerificationToken && TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
+            isPhoneValid = true;
+          } else if (otpSessionId && otp) {
+            const verifyRes = await TwoFactorService.verifyOtp(otpSessionId, otp, cleanPhone);
+            if (verifyRes.success) isPhoneValid = true;
+          }
+          if (isPhoneValid) {
+            user.phone = cleanPhone;
+            user.isPhoneVerified = true;
+          }
+        }
+      }
+
       if (company && !user.company) user.company = company;
       if (city && !user.city) user.city = city;
       if (designation && !user.designation) user.designation = designation;
@@ -274,7 +352,7 @@ class AuthService {
         const organization = await Organization.create({
           name: finalOrgName,
           website: website || '',
-          contact: { email: normalizedEmail, phone: phone || '' },
+          contact: { email: normalizedEmail, phone: user.phone || '' },
           address: { city: city || '' },
           description: industry ? `Industry Sector: ${industry}` : '',
           teamMembers: [{ user: user._id, role: 'organizer' }]

@@ -58,6 +58,10 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    isPhoneVerified: {
+      type: Boolean,
+      default: false
+    },
     isSuspended: {
       type: Boolean,
       default: false

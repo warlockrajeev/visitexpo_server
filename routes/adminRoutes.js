@@ -1695,7 +1695,7 @@ router.get('/users', async (req, res, next) => {
 
     const [docs, total, totalActive, totalSuspended] = await Promise.all([
       User.find(query)
-        .populate('organization', 'name')
+        .populate('organization', 'name logo website address contact gst description')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pgLimit),
@@ -1720,11 +1720,99 @@ router.get('/users', async (req, res, next) => {
   }
 });
 
+// @desc    Get complete details of a specific user including related events, passes, registrations, orders
+// @route   GET /api/admin/users/:id
+router.get('/users/:id', async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id)
+      .populate('organization', 'name logo website address contact gst description social');
+
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const email = (user.email || '').toLowerCase();
+
+    // Parallel fetch of user-related activities
+    const [events, eventsCount, visitorPasses, visitorPassesCount, exhibitorStalls, exhibitorStallsCount, orders, ordersCount] = await Promise.all([
+      // Events hosted by this user or their organization
+      Event.find({
+        $or: [
+          { organizer: user._id },
+          ...(user.organization ? [{ organization: user.organization._id || user.organization }] : [])
+        ]
+      })
+        .select('title slug startDate endDate city venue status isFeatured banner')
+        .sort({ createdAt: -1 })
+        .limit(10),
+      Event.countDocuments({
+        $or: [
+          { organizer: user._id },
+          ...(user.organization ? [{ organization: user.organization._id || user.organization }] : [])
+        ]
+      }),
+      // Visitor passes registered
+      email ? Visitor.find({ email })
+        .populate('event', 'title slug startDate endDate venue city banner')
+        .sort({ createdAt: -1 })
+        .limit(10) : Promise.resolve([]),
+      email ? Visitor.countDocuments({ email }) : Promise.resolve(0),
+      // Exhibitor stalls
+      email ? Exhibitor.find({ contactEmail: email })
+        .populate('event', 'title slug startDate endDate venue city banner')
+        .sort({ createdAt: -1 })
+        .limit(10) : Promise.resolve([]),
+      email ? Exhibitor.countDocuments({ contactEmail: email }) : Promise.resolve(0),
+      // Ticket orders
+      email ? Order.find({ 'buyer.email': email })
+        .populate('event', 'title slug startDate endDate venue city')
+        .sort({ createdAt: -1 })
+        .limit(10) : Promise.resolve([]),
+      email ? Order.countDocuments({ 'buyer.email': email }) : Promise.resolve(0)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        user,
+        stats: {
+          eventsCount,
+          visitorPassesCount,
+          exhibitorStallsCount,
+          ordersCount,
+          activeTokensCount: Array.isArray(user.refreshTokens) ? user.refreshTokens.length : 0
+        },
+        activity: {
+          events,
+          visitorPasses,
+          exhibitorStalls,
+          orders
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @desc    Update user details or role / verification / suspension status
 // @route   PUT /api/admin/users/:id
 router.put('/users/:id', async (req, res, next) => {
   try {
-    const { name, email, role, isVerified, isSuspended, status, suspendReason } = req.body;
+    const {
+      name,
+      email,
+      role,
+      isVerified,
+      isPhoneVerified,
+      isSuspended,
+      status,
+      suspendReason,
+      phone,
+      city,
+      company,
+      designation
+    } = req.body;
     const user = await User.findById(req.params.id);
 
     if (!user) {
@@ -1734,7 +1822,12 @@ router.put('/users/:id', async (req, res, next) => {
     if (name) user.name = name;
     if (email) user.email = email.toLowerCase();
     if (role) user.role = role;
-    if (isVerified !== undefined) user.isVerified = isVerified;
+    if (isVerified !== undefined) user.isVerified = Boolean(isVerified);
+    if (isPhoneVerified !== undefined) user.isPhoneVerified = Boolean(isPhoneVerified);
+    if (phone !== undefined) user.phone = phone;
+    if (city !== undefined) user.city = city;
+    if (company !== undefined) user.company = company;
+    if (designation !== undefined) user.designation = designation;
 
     if (isSuspended !== undefined) {
       user.isSuspended = Boolean(isSuspended);
@@ -2773,6 +2866,61 @@ router.put('/events/:id/status', async (req, res, next) => {
       success: true,
       message: `Event onboarding request set to ${action}d successfully`,
       event
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Bulk Approve or Reject Event Onboarding Submissions
+// @route   POST /api/admin/events/bulk-status
+router.post('/events/bulk-status', async (req, res, next) => {
+  try {
+    const { eventIds, action } = req.body; // 'approve' or 'reject'
+    if (!Array.isArray(eventIds) || eventIds.length === 0) {
+      return res.status(400).json({ success: false, error: 'eventIds array is required' });
+    }
+
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ success: false, error: 'action must be approve or reject' });
+    }
+
+    const events = await Event.find({ _id: { $in: eventIds } });
+    if (!events || events.length === 0) {
+      return res.status(404).json({ success: false, error: 'No matching events found' });
+    }
+
+    let processedCount = 0;
+    let failedCount = 0;
+
+    for (const event of events) {
+      try {
+        if (action === 'approve') {
+          event.status = 'published';
+          await event.save();
+          // Real-time sync to WordPress Pages in background
+          syncEventToWordPress(event).catch(wpErr => {
+            console.warn(`[Bulk Sync] WP Sync note for event ${event._id}:`, wpErr.message);
+          });
+        } else if (action === 'reject') {
+          event.status = 'cancelled';
+          await event.save();
+        }
+        processedCount++;
+      } catch (err) {
+        console.error(`[Bulk Event Status] Failed to process event ${event._id}:`, err);
+        failedCount++;
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully ${action}d ${processedCount} event${processedCount !== 1 ? 's' : ''}${failedCount > 0 ? ` (${failedCount} failed)` : ''}!`,
+      data: {
+        processedCount,
+        failedCount,
+        action
+      }
     });
   } catch (error) {
     next(error);

@@ -8,6 +8,7 @@ import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
 import AuthService from '../services/AuthService.js';
+import TwoFactorService from '../services/twoFactorService.js';
 import { protect } from '../middlewares/auth.js';
 import { authLimiter } from '../middlewares/rateLimiter.js';
 
@@ -28,15 +29,55 @@ const setRefreshTokenCookie = (res, token, req) => {
   });
 };
 
+// ============================================================================
+// MOBILE OTP VERIFICATION ENDPOINTS (2Factor.in)
+// ============================================================================
+
+router.post('/otp/send', authLimiter, async (req, res, next) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) {
+      return res.status(400).json({ success: false, error: 'Mobile number is required' });
+    }
+
+    const result = await TwoFactorService.sendOtp(phone);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/otp/verify', authLimiter, async (req, res, next) => {
+  try {
+    const { sessionId, otp, phone } = req.body;
+    if (!sessionId || !otp) {
+      return res.status(400).json({ success: false, error: 'Session ID and OTP code are required' });
+    }
+
+    const result = await TwoFactorService.verifyOtp(sessionId, otp, phone);
+    if (!result.success) {
+      return res.status(400).json(result);
+    }
+
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/signup', authLimiter, async (req, res, next) => {
   try {
-    const { name, email, password, organizationName, role } = req.body;
+    const { name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp } = req.body;
     
     if (!name || !email || !password) {
       return res.status(400).json({ success: false, error: 'Name, email, and password are required' });
     }
 
-    const data = await AuthService.signup(name, email, password, organizationName, role);
+    const data = await AuthService.signup(name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp);
     
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);
@@ -115,12 +156,14 @@ router.post('/google/check', authLimiter, async (req, res, next) => {
       });
     }
 
-    // A user has details if:
-    // - For visitor: always ready
-    // - For organizer: has an organization with an explicit name
-    // - For exhibitor: has company or organization set
+    // A user has complete details if:
+    // - Has phone registered and verified (mandatory for all roles)
+    // - For visitor: has verified phone
+    // - For organizer: has verified phone and an explicit organization
+    // - For exhibitor: has verified phone and company/organization set
     const hasOrg = !!(user.organization && user.organization.name && !user.organization.name.includes("'s Organization"));
-    const hasDetails = user.role === 'visitor' || hasOrg || !!(user.company && user.phone);
+    const hasPhone = !!user.phone && user.isPhoneVerified !== false;
+    const hasDetails = user.role === 'visitor' ? hasPhone : (hasPhone && (hasOrg || !!user.company));
 
     return res.status(200).json({
       success: true,
@@ -156,7 +199,10 @@ router.post('/google', authLimiter, async (req, res, next) => {
       website,
       company,
       designation,
-      industry
+      industry,
+      phoneVerificationToken,
+      otpSessionId,
+      otp
     } = req.body;
 
     if (!email) {
@@ -176,7 +222,10 @@ router.post('/google', authLimiter, async (req, res, next) => {
       website,
       company,
       designation,
-      industry
+      industry,
+      phoneVerificationToken,
+      otpSessionId,
+      otp
     });
 
     // Set refresh token cookie
