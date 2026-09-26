@@ -62,6 +62,15 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    authProvider: {
+      type: String,
+      enum: ['local', 'google'],
+      default: 'local'
+    },
+    hasCustomPassword: {
+      type: Boolean,
+      default: false
+    },
     credits: {
       type: Number,
       default: 100

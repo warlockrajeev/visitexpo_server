@@ -327,7 +327,9 @@ router.get('/me', protect, async (req, res, next) => {
         role: userDoc.role,
         isVerified: userDoc.isVerified,
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,
-        organization: userDoc.organization
+        organization: userDoc.organization,
+        authProvider: userDoc.authProvider || 'local',
+        hasCustomPassword: userDoc.hasCustomPassword !== undefined ? userDoc.hasCustomPassword : (userDoc.authProvider !== 'google')
       }
     });
   } catch (error) {
@@ -355,7 +357,26 @@ router.put('/organization', protect, async (req, res, next) => {
       await userDoc.save();
     }
 
-    const { name, logo, website, phone, email, address, gst, description, socialLinkedIn, socialFacebook, socialInstagram, socialX } = req.body;
+    const { name, logo, website, phone, email, address, gst, description, socialLinkedIn, socialFacebook, socialInstagram, socialX, phoneVerificationToken } = req.body;
+
+    // Mobile Number Change Check with OTP Verification
+    if (phone !== undefined) {
+      const cleanNewPhone = TwoFactorService.cleanPhoneNumber(phone);
+      const currentOrgPhone = TwoFactorService.cleanPhoneNumber(org.contact?.phone || '');
+      const currentUserPhone = TwoFactorService.cleanPhoneNumber(userDoc.phone || '');
+
+      if (cleanNewPhone && (cleanNewPhone !== currentOrgPhone || cleanNewPhone !== currentUserPhone)) {
+        if (!phoneVerificationToken || !TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanNewPhone)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Mobile number was modified. Please verify with OTP before saving.'
+          });
+        }
+        userDoc.phone = cleanNewPhone;
+        userDoc.isPhoneVerified = true;
+        await userDoc.save();
+      }
+    }
 
     if (name) org.name = name;
     if (logo !== undefined) org.logo = logo;
@@ -363,9 +384,10 @@ router.put('/organization', protect, async (req, res, next) => {
     if (gst !== undefined) org.gst = gst;
     if (description !== undefined) org.description = description;
     if (phone !== undefined || email !== undefined) {
+      const cleanPhone = phone !== undefined ? TwoFactorService.cleanPhoneNumber(phone) : org.contact?.phone;
       org.contact = {
         ...org.contact,
-        phone: phone !== undefined ? phone : org.contact?.phone,
+        phone: cleanPhone,
         email: email !== undefined ? email : org.contact?.email
       };
     }
@@ -397,9 +419,13 @@ router.put('/organization', protect, async (req, res, next) => {
         id: updatedUser._id,
         name: updatedUser.name,
         email: updatedUser.email,
+        phone: updatedUser.phone || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
-        organization: updatedUser.organization
+        credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
+        organization: updatedUser.organization,
+        authProvider: updatedUser.authProvider || 'local',
+        hasCustomPassword: updatedUser.hasCustomPassword !== undefined ? updatedUser.hasCustomPassword : (updatedUser.authProvider !== 'google')
       }
     });
   } catch (error) {
@@ -410,14 +436,37 @@ router.put('/organization', protect, async (req, res, next) => {
 // Update Account Profile details (name, email, phone, company, designation, city)
 router.put('/profile', protect, async (req, res, next) => {
   try {
-    const { name, email, phone, company, designation, city } = req.body;
+    const { name, email, phone, company, designation, city, phoneVerificationToken } = req.body;
     const userDoc = await User.findById(req.user.id);
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'User account not found' });
     }
 
+    // Mobile Number Change Check with OTP Verification
+    if (phone !== undefined) {
+      const cleanNewPhone = TwoFactorService.cleanPhoneNumber(phone);
+      const currentUserPhone = TwoFactorService.cleanPhoneNumber(userDoc.phone || '');
+
+      if (cleanNewPhone && cleanNewPhone !== currentUserPhone) {
+        if (!phoneVerificationToken || !TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanNewPhone)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Mobile number was modified. Please verify with OTP before saving.'
+          });
+        }
+        userDoc.phone = cleanNewPhone;
+        userDoc.isPhoneVerified = true;
+
+        // Also synchronize with organization contact if present
+        if (userDoc.organization) {
+          await Organization.findByIdAndUpdate(userDoc.organization, {
+            'contact.phone': cleanNewPhone
+          });
+        }
+      }
+    }
+
     if (name) userDoc.name = name;
-    if (phone !== undefined) userDoc.phone = phone;
     if (company !== undefined) userDoc.company = company;
     if (designation !== undefined) userDoc.designation = designation;
     if (city !== undefined) userDoc.city = city;
@@ -447,7 +496,10 @@ router.put('/profile', protect, async (req, res, next) => {
         city: updatedUser.city || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
-        organization: updatedUser.organization
+        credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
+        organization: updatedUser.organization,
+        authProvider: updatedUser.authProvider || 'local',
+        hasCustomPassword: updatedUser.hasCustomPassword !== undefined ? updatedUser.hasCustomPassword : (updatedUser.authProvider !== 'google')
       }
     });
   } catch (error) {
@@ -459,11 +511,8 @@ router.put('/profile', protect, async (req, res, next) => {
 router.put('/change-password', protect, async (req, res, next) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    if (!currentPassword || !newPassword) {
-      return res.status(400).json({ success: false, error: 'Current password and new password are required' });
-    }
 
-    if (newPassword.length < 6) {
+    if (!newPassword || newPassword.length < 6) {
       return res.status(400).json({ success: false, error: 'New password must be at least 6 characters long' });
     }
 
@@ -472,17 +521,51 @@ router.put('/change-password', protect, async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'User account not found' });
     }
 
-    const isMatch = await bcrypt.compare(currentPassword, userDoc.password);
-    if (!isMatch) {
-      return res.status(400).json({ success: false, error: 'Current password does not match' });
+    const isGoogleWithoutPassword = (userDoc.authProvider === 'google' && !userDoc.hasCustomPassword);
+
+    if (!isGoogleWithoutPassword) {
+      if (!currentPassword) {
+        return res.status(400).json({ success: false, error: 'Current password is required to change password' });
+      }
+
+      const isMatch = await bcrypt.compare(currentPassword, userDoc.password);
+      if (!isMatch) {
+        return res.status(400).json({ success: false, error: 'Current password does not match' });
+      }
+
+      if (currentPassword === newPassword) {
+        return res.status(400).json({ success: false, error: 'New password cannot be the same as current password' });
+      }
     }
 
+    // Set new password (will be automatically hashed by UserSchema pre-save hook)
     userDoc.password = newPassword;
+    userDoc.hasCustomPassword = true;
     await userDoc.save();
+
+    const updatedUser = await User.findById(userDoc._id).select('-password').populate('organization');
 
     res.status(200).json({
       success: true,
-      message: 'Password changed successfully!'
+      message: isGoogleWithoutPassword
+        ? 'Password set successfully! You can now log in using your email and password as well as Google.'
+        : 'Password changed successfully!',
+      hasCustomPassword: true,
+      user: {
+        id: updatedUser._id,
+        name: updatedUser.name,
+        email: updatedUser.email,
+        phone: updatedUser.phone || '',
+        company: updatedUser.company || '',
+        designation: updatedUser.designation || '',
+        city: updatedUser.city || '',
+        role: updatedUser.role,
+        isVerified: updatedUser.isVerified,
+        credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
+        organization: updatedUser.organization,
+        authProvider: updatedUser.authProvider || 'local',
+        hasCustomPassword: true
+      }
     });
   } catch (error) {
     next(error);

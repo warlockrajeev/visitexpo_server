@@ -95,7 +95,9 @@ class AuthService {
       phone: cleanPhone,
       city: city.trim(),
       isVerified,
-      isPhoneVerified: true
+      isPhoneVerified: true,
+      authProvider: 'local',
+      hasCustomPassword: true
     });
 
     // 5. Create default Organization if name is specified
@@ -129,7 +131,10 @@ class AuthService {
         role: user.role,
         isVerified: user.isVerified,
         credits: user.credits !== undefined ? user.credits : 100,
-        organization: user.organization
+        organization: user.organization,
+        phone: user.phone || '',
+        authProvider: 'local',
+        hasCustomPassword: true
       },
       accessToken,
       refreshToken
@@ -202,7 +207,10 @@ class AuthService {
         role: user.role,
         isVerified: user.isVerified,
         credits: user.credits !== undefined ? user.credits : 100,
-        organization: user.organization
+        organization: user.organization,
+        phone: user.phone || '',
+        authProvider: user.authProvider || 'local',
+        hasCustomPassword: user.hasCustomPassword !== undefined ? user.hasCustomPassword : (user.authProvider !== 'google')
       },
       accessToken,
       refreshToken
@@ -349,7 +357,9 @@ class AuthService {
         designation: designation || '',
         city: city || '',
         isVerified: true,
-        isPhoneVerified: true
+        isPhoneVerified: true,
+        authProvider: 'google',
+        hasCustomPassword: false
       });
 
       // Create organization if registering as organizer or exhibitor
@@ -370,6 +380,12 @@ class AuthService {
       // If user exists, ensure they are verified since Google verified their email
       if (!user.isVerified) {
         user.isVerified = true;
+      }
+      if (!user.authProvider) {
+        user.authProvider = 'google';
+      }
+      if (user.hasCustomPassword === undefined) {
+        user.hasCustomPassword = false;
       }
 
       // If user provided a phone and it's verified, update it
@@ -443,7 +459,10 @@ class AuthService {
         city: user.city || '',
         role: user.role,
         isVerified: user.isVerified,
-        organization: user.organization
+        credits: user.credits !== undefined ? user.credits : 100,
+        organization: user.organization,
+        authProvider: user.authProvider || 'google',
+        hasCustomPassword: user.hasCustomPassword || false
       },
       accessToken,
       refreshToken
