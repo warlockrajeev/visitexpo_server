@@ -17,6 +17,8 @@ import Visitor from '../models/Visitor.js';
 import EventEngagement from '../models/EventEngagement.js';
 import DeletedOrganizer from '../models/DeletedOrganizer.js';
 import DeletedEvent from '../models/DeletedEvent.js';
+import Category from '../models/Category.js';
+import Ticket from '../models/Ticket.js';
 import mongoose from 'mongoose';
 import { protect, authorize } from '../middlewares/auth.js';
 import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
@@ -287,9 +289,10 @@ async function getAggregatedCategories() {
     console.warn('[Admin] inspect-event-meta fetch failed, falling back to MongoDB:', err.message);
   }
 
-  const [mongoEvents, deletedEvents] = await Promise.all([
+  const [mongoEvents, deletedEvents, customCategories] = await Promise.all([
     Event.find().lean(),
-    DeletedEvent.find().lean()
+    DeletedEvent.find().lean(),
+    Category.find().lean()
   ]);
 
   const deletedEventIds = new Set((deletedEvents || []).map(d => String(d.eventId || '').trim().toLowerCase()));
@@ -314,6 +317,23 @@ async function getAggregatedCategories() {
   CATEGORIES_META.forEach(c => {
     catMap[c.name] = {
       ...c,
+      isCustom: false,
+      events: []
+    };
+  });
+
+  (customCategories || []).forEach(c => {
+    catMap[c.name] = {
+      _id: String(c._id),
+      name: c.name,
+      slug: c.slug,
+      description: c.description || `Expos and conventions focused on ${c.name}.`,
+      scope: c.scope || c.description || `Events and exhibitions specializing in ${c.name}.`,
+      subSectors: c.subSectors || [],
+      icon: c.icon || 'Tag',
+      color: c.color || '#f59e0b',
+      bg: 'bg-amber-500/10',
+      isCustom: true,
       events: []
     };
   });
@@ -362,7 +382,25 @@ async function getAggregatedCategories() {
 
   mongoEvents.forEach(me => {
     if (isEventDeleted(me._id, me.slug, me.title, me.wpPostId)) return;
-    const catName = Array.isArray(me.categories) ? me.categories[0] : (me.categories || 'Trade & Industry');
+    const catName = Array.isArray(me.categories) && me.categories[0]
+      ? me.categories[0]
+      : (me.category || (Array.isArray(me.categories) ? me.categories[0] : me.categories) || 'Trade & Industry');
+    
+    if (catName && !catMap[catName]) {
+      catMap[catName] = {
+        name: catName,
+        slug: catName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''),
+        description: `Expos and conventions focused on ${catName}.`,
+        scope: `Events and exhibitions specializing in ${catName}.`,
+        subSectors: ['General ' + catName],
+        icon: 'Tag',
+        color: '#f59e0b',
+        bg: 'bg-amber-500/10',
+        isCustom: true,
+        events: []
+      };
+    }
+
     const matchedCat = catMap[catName] ? catName : inferCategory(me.title, me.description);
     
     const alreadyExists = catMap[matchedCat]?.events.some(e => e.slug === me.slug);
@@ -389,12 +427,16 @@ async function getAggregatedCategories() {
   });
 
   const categories = Object.values(catMap).map(c => ({
+    _id: c._id,
     name: c.name,
     slug: c.slug,
     description: c.description,
+    scope: c.scope,
+    subSectors: c.subSectors,
     icon: c.icon,
     color: c.color,
     bg: c.bg,
+    isCustom: !!c.isCustom,
     count: c.events.length,
     events: c.events
   }));
@@ -1437,6 +1479,74 @@ router.get('/categories', async (req, res, next) => {
     });
   } catch (error) {
     next(error);
+  }
+});
+
+// @desc    Delete a custom category
+// @route   DELETE /api/admin/categories/:identifier
+router.delete('/categories/:identifier', async (req, res) => {
+  try {
+    const { identifier } = req.params;
+    let category = null;
+    if (identifier.match(/^[0-9a-fA-F]{24}$/)) {
+      category = await Category.findById(identifier);
+    }
+    if (!category) {
+      category = await Category.findOne({
+        $or: [
+          { slug: identifier.toLowerCase() },
+          { name: { $regex: new RegExp(`^${identifier}$`, 'i') } }
+        ]
+      });
+    }
+
+    const catName = category ? category.name : identifier;
+    const isDefault = CATEGORIES_META.some(
+      c => c.name.toLowerCase() === catName.toLowerCase() || c.slug === identifier.toLowerCase()
+    );
+    if (isDefault) {
+      return res.status(400).json({
+        success: false,
+        error: `Cannot delete standard core category "${catName}". Only custom categories can be deleted.`
+      });
+    }
+
+    if (category) {
+      await Category.findByIdAndDelete(category._id);
+    }
+
+    // Reassign any MongoDB events in this deleted custom category to fallback 'Trade & Industry'
+    await Event.updateMany(
+      {
+        $or: [
+          { category: catName },
+          { categories: catName }
+        ]
+      },
+      {
+        $pull: { categories: catName },
+        $set: { category: 'Trade & Industry' }
+      }
+    );
+    await Event.updateMany(
+      {
+        category: 'Trade & Industry',
+        categories: { $nin: ['Trade & Industry'] }
+      },
+      {
+        $push: { categories: 'Trade & Industry' }
+      }
+    );
+
+    categoriesCache = { data: null, timestamp: 0, ttl: 0 };
+
+    return res.json({
+      success: true,
+      message: `Custom category "${catName}" was deleted and its events were reassigned to Trade & Industry.`
+    });
+  } catch (err) {
+    console.error('Delete custom category error:', err);
+    return res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -2703,7 +2813,7 @@ router.put('/events/:id', async (req, res, next) => {
       'title', 'slug', 'description', 'banner', 'gallery',
       'venue', 'city', 'state', 'country', 'startDate', 'endDate', 'timings',
       'categories', 'status', 'orgName', 'orgEmail', 'orgPhone',
-      'orgWebsite', 'orgDesc', 'orgLogo', 'isFreeEvent', 'paidTicketPrice',
+      'orgWebsite', 'orgDesc', 'orgLogo', 'isFreeEvent', 'paidTicketPrice', 'currency',
       'schedules', 'faqsList', 'sponsorsList', 'contactShortcode', 'seo'
     ];
 
@@ -2714,6 +2824,38 @@ router.put('/events/:id', async (req, res, next) => {
     });
 
     await event.save();
+
+    // Sync default ticket tier if ticketing fields were updated
+    if (updates.isFreeEvent !== undefined || updates.paidTicketPrice !== undefined || updates.currency !== undefined) {
+      try {
+        const isFree = event.isFreeEvent;
+        const price = isFree ? 0 : (event.paidTicketPrice || 0);
+        const type = isFree ? 'free' : (price > 0 ? 'paid' : 'free');
+        const currency = event.currency || 'INR';
+
+        let ticket = await Ticket.findOne({ event: event._id, title: { $in: ['Default Entry Pass', 'General Admission', 'Visitor Pass'] } });
+        if (ticket) {
+          ticket.type = type;
+          ticket.price = price;
+          ticket.currency = currency;
+          ticket.title = isFree ? 'Visitor Pass' : 'General Admission';
+          ticket.description = isFree ? 'Complimentary visitor registration pass' : `Standard paid entry ticket — ${currency} ${price}`;
+          await ticket.save();
+        } else {
+          await Ticket.create({
+            title: isFree ? 'Visitor Pass' : 'General Admission',
+            description: isFree ? 'Complimentary visitor registration pass' : `Standard paid entry ticket — ${currency} ${price}`,
+            type,
+            price,
+            currency,
+            capacity: 1000,
+            event: event._id
+          });
+        }
+      } catch (tierErr) {
+        console.warn('Failed to sync ticket tier during admin update:', tierErr);
+      }
+    }
 
     // Real-time synchronization to WordPress!
     let wpSyncSuccess = false;

@@ -32,7 +32,31 @@ class AuthService {
       throw err;
     }
 
-    // 2. Mandatory Mobile OTP Verification Check
+    // 2. Validate mandatory name and city
+    if (!name || name.trim().length < 2) {
+      const err = new Error('Full Name is required (minimum 2 characters).');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!city || city.trim().length < 2) {
+      const err = new Error('City / Location is mandatory (minimum 2 characters).');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const assignedRole = ['visitor', 'organizer', 'exhibitor'].includes(role) ? role : 'organizer';
+    if (assignedRole !== 'visitor' && (!orgName || orgName.trim().length < 2)) {
+      const err = new Error(
+        assignedRole === 'exhibitor'
+          ? 'Company / Exhibitor Name is required (minimum 2 characters).'
+          : 'Organization Name is required (minimum 2 characters).'
+      );
+      err.statusCode = 400;
+      throw err;
+    }
+
+    // 3. Mandatory Mobile OTP Verification Check
     const cleanPhone = TwoFactorService.cleanPhoneNumber(phone);
     if (!cleanPhone || cleanPhone.length < 10) {
       const err = new Error('A valid 10-digit mobile number is mandatory for registration.');
@@ -60,26 +84,26 @@ class AuthService {
       throw err;
     }
 
-    const assignedRole = ['visitor', 'organizer', 'exhibitor'].includes(role) ? role : 'organizer';
     const isVerified = assignedRole === 'visitor'; // Visitors are auto-verified
 
-    // 3. Create the User (password hashing handled by Mongoose pre-save hook)
+    // 4. Create the User (password hashing handled by Mongoose pre-save hook)
     const user = await UserRepository.create({
-      name,
+      name: name.trim(),
       email: normalizedEmail,
       password,
       role: assignedRole,
       phone: cleanPhone,
-      city: (city || '').trim(),
+      city: city.trim(),
       isVerified,
       isPhoneVerified: true
     });
 
-    // 3. Create default Organization if name is specified
+    // 5. Create default Organization if name is specified
     if (orgName) {
       const organization = await Organization.create({
-        name: orgName,
-        contact: { email },
+        name: orgName.trim(),
+        contact: { email: normalizedEmail, phone: cleanPhone },
+        address: { city: city.trim() },
         teamMembers: [{ user: user._id, role: assignedRole }]
       });
 
@@ -286,6 +310,27 @@ class AuthService {
 
       if (!isPhoneValid) {
         const err = new Error('Mobile number OTP verification is required to complete Google registration.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Mandatory Organization Name check for Organizer/Exhibitor
+      if (assignedRole !== 'visitor' && (!organizationName || !organizationName.trim())) {
+        const err = new Error(assignedRole === 'exhibitor' ? 'Company / Brand Name is required.' : 'Organization Name is required.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Mandatory City / Location check
+      if (!city || !city.trim() || city.trim().length < 2) {
+        const err = new Error('City / Location is mandatory to complete registration.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Mandatory Industry Sector for Exhibitors
+      if (assignedRole === 'exhibitor' && (!industry || !industry.trim())) {
+        const err = new Error('Industry Sector / Product Category is required.');
         err.statusCode = 400;
         throw err;
       }

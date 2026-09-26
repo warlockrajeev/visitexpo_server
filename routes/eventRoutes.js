@@ -29,6 +29,7 @@ async function syncDefaultTicketTier(eventId, body) {
   const isFree = body.isFreeEvent === true || body.isFreeEvent === 'true';
   const price = isFree ? 0 : (parseInt(body.paidTicketPrice, 10) || 0);
   const type = isFree ? 'free' : (price > 0 ? 'paid' : 'free');
+  const currency = body.currency || 'INR';
 
   // Look for an existing default ticket for this event
   let ticket = await Ticket.findOne({ event: eventId, title: { $in: ['Default Entry Pass', 'General Admission', 'Visitor Pass'] } });
@@ -37,10 +38,11 @@ async function syncDefaultTicketTier(eventId, body) {
     // Update existing default tier
     ticket.type = type;
     ticket.price = price;
+    ticket.currency = currency;
     ticket.title = isFree ? 'Visitor Pass' : 'General Admission';
     ticket.description = isFree
       ? 'Complimentary visitor registration pass'
-      : `Standard paid entry ticket — ₹${price}`;
+      : `Standard paid entry ticket — ${currency} ${price}`;
     await ticket.save();
   } else {
     // Create new default tier
@@ -48,10 +50,10 @@ async function syncDefaultTicketTier(eventId, body) {
       title: isFree ? 'Visitor Pass' : 'General Admission',
       description: isFree
         ? 'Complimentary visitor registration pass'
-        : `Standard paid entry ticket — ₹${price}`,
+        : `Standard paid entry ticket — ${currency} ${price}`,
       type,
       price,
-      currency: body.currency || 'INR',
+      currency,
       capacity: body.ticketCapacity || 1000,
       event: eventId
     });

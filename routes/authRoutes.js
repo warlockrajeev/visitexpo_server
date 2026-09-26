@@ -73,8 +73,23 @@ router.post('/signup', authLimiter, async (req, res, next) => {
   try {
     const { name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp } = req.body;
     
-    if (!name || !email || !password) {
-      return res.status(400).json({ success: false, error: 'Name, email, and password are required' });
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, error: 'Full Name is required' });
+    }
+    if (!email || !email.trim()) {
+      return res.status(400).json({ success: false, error: 'Email address is required' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters long' });
+    }
+    if (!city || !city.trim()) {
+      return res.status(400).json({ success: false, error: 'City / Location is required' });
+    }
+    if (role !== 'visitor' && (!organizationName || !organizationName.trim())) {
+      return res.status(400).json({
+        success: false,
+        error: role === 'exhibitor' ? 'Company / Exhibitor Name is required' : 'Organization Name is required'
+      });
     }
 
     const data = await AuthService.signup(name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp);

@@ -4,6 +4,7 @@
  */
 
 import EventRepository from '../repositories/EventRepository.js';
+import Category from '../models/Category.js';
 import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
 
 class EventService {
@@ -84,6 +85,20 @@ class EventService {
         const err = new Error('Organizer phone number must include a country code starting with + (e.g. +91)');
         err.statusCode = 400;
         throw err;
+      }
+      const match = trimmedPhone.match(/^(\+\d{1,4})\s*(.*)$/);
+      if (match && match[1] === '+91') {
+        const indianNumberDigits = match[2].replace(/\D/g, '');
+        if (!/^[789]/.test(indianNumberDigits)) {
+          const err = new Error('Indian mobile number must start with 9, 8, or 7');
+          err.statusCode = 400;
+          throw err;
+        }
+        if (indianNumberDigits.length !== 10) {
+          const err = new Error('Indian mobile number must be exactly 10 digits');
+          err.statusCode = 400;
+          throw err;
+        }
       }
       const digitsOnly = trimmedPhone.replace(/\D/g, '');
       if (digitsOnly.length < 7) {
@@ -168,6 +183,32 @@ class EventService {
       slug,
       organizer: organizerId
     };
+
+    // Auto-register category if not existing
+    const rawCat = (eventData.category || '').trim();
+    if (rawCat) {
+      try {
+        const catSlug = rawCat.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        await Category.findOneAndUpdate(
+          { $or: [{ name: { $regex: new RegExp(`^${rawCat}$`, 'i') } }, { slug: catSlug }] },
+          {
+            $setOnInsert: {
+              name: rawCat,
+              slug: catSlug,
+              isCustom: true,
+              description: `Expos and conventions focused on ${rawCat}.`,
+              scope: `Events and exhibitions specializing in ${rawCat}.`,
+              subSectors: eventData.industry ? [eventData.industry] : ['General ' + rawCat],
+              icon: 'Tag',
+              color: '#f59e0b'
+            }
+          },
+          { upsert: true, new: true }
+        );
+      } catch (catErr) {
+        // Ignore duplicate index errors
+      }
+    }
 
     return await EventRepository.create(payload);
   }
