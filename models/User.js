@@ -62,6 +62,10 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    credits: {
+      type: Number,
+      default: 100
+    },
     isSuspended: {
       type: Boolean,
       default: false

@@ -9,10 +9,93 @@ import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEv
 class EventService {
   async createEvent(eventData, organizerId) {
     const trimmedTitle = eventData.title?.trim();
-    if (!trimmedTitle) {
-      const err = new Error('Event title is required');
+    if (!trimmedTitle || trimmedTitle.length < 3) {
+      const err = new Error('Event title is required and must be at least 3 characters');
       err.statusCode = 400;
       throw err;
+    }
+
+    if (!eventData.venue || !eventData.venue.trim()) {
+      const err = new Error('Event venue is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!eventData.city || !eventData.city.trim()) {
+      const err = new Error('Event city is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (/\d/.test(eventData.city)) {
+      const err = new Error('City name cannot contain numbers');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!eventData.country || !eventData.country.trim()) {
+      const err = new Error('Event country is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (/\d/.test(eventData.country)) {
+      const err = new Error('Country name cannot contain numbers');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!eventData.startDate || isNaN(new Date(eventData.startDate).getTime())) {
+      const err = new Error('Valid event start date is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!eventData.endDate || isNaN(new Date(eventData.endDate).getTime())) {
+      const err = new Error('Valid event end date is required');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (new Date(eventData.endDate) < new Date(eventData.startDate)) {
+      const err = new Error('Event end date cannot be earlier than start date');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (!eventData.description || eventData.description.trim().length < 20) {
+      const err = new Error('Event description is required and must be at least 20 characters');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (eventData.orgEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(eventData.orgEmail.trim())) {
+        const err = new Error('Please enter a valid organizer contact email');
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+
+    if (eventData.orgPhone) {
+      const trimmedPhone = eventData.orgPhone.trim();
+      if (!/^\+\d{1,4}/.test(trimmedPhone)) {
+        const err = new Error('Organizer phone number must include a country code starting with + (e.g. +91)');
+        err.statusCode = 400;
+        throw err;
+      }
+      const digitsOnly = trimmedPhone.replace(/\D/g, '');
+      if (digitsOnly.length < 7) {
+        const err = new Error('Organizer phone number must contain at least 7 digits');
+        err.statusCode = 400;
+        throw err;
+      }
+      if (digitsOnly.length > 15) {
+        const err = new Error('Organizer phone number cannot exceed 15 digits');
+        err.statusCode = 400;
+        throw err;
+      }
     }
 
     // Strict duplicate check: An event with the same title cannot be created

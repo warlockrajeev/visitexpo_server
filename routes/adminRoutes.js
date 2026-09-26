@@ -19,6 +19,7 @@ import DeletedOrganizer from '../models/DeletedOrganizer.js';
 import DeletedEvent from '../models/DeletedEvent.js';
 import mongoose from 'mongoose';
 import { protect, authorize } from '../middlewares/auth.js';
+import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
 import {
   sendEmail,
   sendOrganizerApprovalNotification,
@@ -1923,49 +1924,25 @@ router.put('/users/:id/suspend', async (req, res, next) => {
   }
 });
 
-// @desc    Delete user permanently
+// @desc    Delete user permanently and cascade all associated platform data
 // @route   DELETE /api/admin/users/:id
 router.delete('/users/:id', async (req, res, next) => {
   try {
     const targetUserId = req.params.id;
-
-    const user = await User.findById(targetUserId);
-    if (!user) {
-      return res.status(404).json({ success: false, error: 'User not found' });
-    }
-
-    // Safety check 1: Prevent self-deletion
     const callerId = req.user?.id || getCallerId(req);
-    if (callerId && callerId.toString() === targetUserId.toString()) {
-      return res.status(400).json({
-        success: false,
-        error: 'You cannot delete your own super admin account.'
-      });
-    }
 
-    // Safety check 2: Prevent root admin account deletion
-    if (user.email === 'admin@visitexpo.in') {
-      return res.status(400).json({
-        success: false,
-        error: 'The root super admin account cannot be deleted.'
-      });
-    }
-
-    // Clean up references in Organization team members
-    await Organization.updateMany(
-      {},
-      { $pull: { teamMembers: { user: targetUserId } } }
-    );
-
-    // Delete user document
-    await User.findByIdAndDelete(targetUserId);
+    const result = await deleteUserAndAllPlatformData(targetUserId, callerId);
 
     res.status(200).json({
       success: true,
-      message: `User account ${user.name} (${user.email}) deleted permanently.`,
-      deletedUserId: targetUserId
+      message: result.message,
+      deletedUserId: targetUserId,
+      stats: result.stats
     });
   } catch (error) {
+    if (error.statusCode) {
+      return res.status(error.statusCode).json({ success: false, error: error.message });
+    }
     next(error);
   }
 });

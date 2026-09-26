@@ -9,7 +9,8 @@ import {
   getEventEngagements,
   getUserEngagements,
   getOrganizerEngagements,
-  getAllEngagements
+  getAllEngagements,
+  deleteEngagement
 } from '../controllers/engagementController.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 
@@ -55,5 +56,8 @@ router.get('/organizer/:orgIdOrUserId', optionalAuth, getOrganizerEngagements);
 
 // Super admin platform-wide directory
 router.get('/all', optionalAuth, getAllEngagements);
+
+// Delete attendee / engagement (with optional user cascade delete)
+router.delete('/:id', optionalAuth, deleteEngagement);
 
 export default router;

@@ -3,9 +3,12 @@
  * @description Controller methods for Event Interest & Follower engagement system.
  */
 
+import mongoose from 'mongoose';
 import EventEngagement from '../models/EventEngagement.js';
 import User from '../models/User.js';
 import Event from '../models/Event.js';
+import Visitor from '../models/Visitor.js';
+import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
 
 /**
  * @desc Toggle interest or follow for a user on a specific event
@@ -466,3 +469,75 @@ export const getAllEngagements = async (req, res) => {
     return res.status(500).json({ success: false, error: error.message });
   }
 };
+
+/**
+ * @desc Delete attendee engagement record and optionally cascade delete user & all platform data
+ * @route DELETE /api/engagements/:id
+ */
+export const deleteEngagement = async (req, res) => {
+  try {
+    const engagementId = req.params.id;
+    const shouldDeleteUser = req.query.deleteUser === 'true' || req.body?.deleteUser === true;
+    const callerId = req.user?.id || req.user?._id || null;
+
+    if (!engagementId) {
+      return res.status(400).json({ success: false, message: 'Attendee / Engagement ID is required' });
+    }
+
+    // 1. Find engagement record
+    let engagement = null;
+    if (mongoose.isValidObjectId(engagementId)) {
+      engagement = await EventEngagement.findById(engagementId);
+    }
+    if (!engagement) {
+      engagement = await EventEngagement.findOne({
+        $or: [
+          { _id: mongoose.isValidObjectId(engagementId) ? engagementId : null },
+          { userEmail: engagementId.toLowerCase() }
+        ]
+      });
+    }
+
+    if (!engagement) {
+      return res.status(404).json({ success: false, message: 'Attendee engagement record not found' });
+    }
+
+    const userEmail = (engagement.userEmail || '').toLowerCase().trim();
+    const eventSlug = engagement.eventSlug;
+    const targetUserId = engagement.user || engagement.userId;
+
+    let userCascadeResult = null;
+
+    if (shouldDeleteUser) {
+      // Admin requested to delete this attendee AND their user account with all platform data
+      const idOrEmail = targetUserId || userEmail;
+      userCascadeResult = await deleteUserAndAllPlatformData(idOrEmail, callerId);
+    } else {
+      // Only delete this engagement record and any matching visitor registration for this event
+      await EventEngagement.findByIdAndDelete(engagement._id);
+
+      // Clean up matching visitor registration for this event if exists
+      if (userEmail && eventSlug) {
+        const ev = await Event.findOne({ slug: eventSlug }).select('_id');
+        if (ev) {
+          await Visitor.deleteMany({ email: userEmail, event: ev._id });
+        }
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: shouldDeleteUser
+        ? `Attendee and user account "${userEmail}" along with all platform data have been permanently deleted.`
+        : `Attendee "${engagement.userName}" (${userEmail}) removed successfully.`,
+      deletedId: engagementId,
+      userDeleted: shouldDeleteUser,
+      stats: userCascadeResult?.stats || null
+    });
+  } catch (error) {
+    console.error('Error in deleteEngagement:', error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({ success: false, error: error.message, message: error.message });
+  }
+};
+

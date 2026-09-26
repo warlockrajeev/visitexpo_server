@@ -104,6 +104,7 @@ class AuthService {
         email: user.email,
         role: user.role,
         isVerified: user.isVerified,
+        credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization
       },
       accessToken,
@@ -176,6 +177,7 @@ class AuthService {
         email: user.email,
         role: user.role,
         isVerified: user.isVerified,
+        credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization
       },
       accessToken,

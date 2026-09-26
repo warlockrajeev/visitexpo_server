@@ -4,13 +4,36 @@
  */
 
 import express from 'express';
+import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import Exhibitor from '../models/Exhibitor.js';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
+import ContactMessage from '../models/ContactMessage.js';
 import { protect, authorize } from '../middlewares/auth.js';
+import { verifyAccessToken } from '../utils/jwt.js';
+import { CURATED_DISCOVERY_EXHIBITORS } from '../data/curatedDiscoveryExhibitors.js';
 
 const router = express.Router();
+
+// Optional JWT authentication helper for discovery endpoints
+const optionalAuth = (req, res, next) => {
+  let token;
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    token = req.headers.authorization.split(' ')[1];
+  } else if (req.cookies && req.cookies.token) {
+    token = req.cookies.token;
+  }
+  if (token) {
+    try {
+      const decoded = verifyAccessToken(token);
+      if (decoded) {
+        req.user = decoded;
+      }
+    } catch (_) {}
+  }
+  next();
+};
 
 // ==========================================
 // PUBLIC EXHIBITOR REGISTRATION API
@@ -363,8 +386,230 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
   }
 });
 
+// ==========================================
+// EXHIBITOR DISCOVERY & B2B INQUIRY (Virtual & Hybrid Platform)
+// ==========================================
+
+// @desc    Get exhibitors for Virtual & Hybrid Discovery with search and filters
+// @route   GET /api/exhibitors/discovery
+router.get('/discovery', optionalAuth, async (req, res, next) => {
+  try {
+    const { industry, product, country, origin, search } = req.query;
+
+    // 1. Fetch any approved MongoDB exhibitors to merge seamlessly
+    let dbExhibitors = [];
+    try {
+      const dbDocs = await Exhibitor.find({ status: 'approved' })
+        .populate('event', 'title city venue startDate slug')
+        .lean();
+
+      dbExhibitors = dbDocs.map(doc => ({
+        _id: String(doc._id),
+        name: doc.name,
+        origin: 'india',
+        country: 'India',
+        countryFlag: '🇮🇳',
+        city: doc.event?.city || 'India',
+        industry: doc.productCategories?.[0] || 'General Industry',
+        logo: doc.logo || 'https://images.unsplash.com/photo-1560179707-f14e90ef3623?w=150&auto=format&fit=crop&q=80',
+        description: doc.description || 'Verified registered trade exhibitor.',
+        products: doc.productCategories && doc.productCategories.length > 0 ? doc.productCategories : ['Exhibition Stall', 'B2B Trade Solutions'],
+        attendanceType: doc.attendanceType || 'hybrid',
+        boothNumber: doc.boothNumber || 'Hall 1 - Stand Assigned',
+        eventTitle: doc.event?.title || 'National Exhibition',
+        contactPerson: doc.staff?.[0]?.name || doc.name + ' Representative',
+        contactDesignation: 'Exhibitor Contact',
+        contactEmail: doc.contactEmail,
+        contactPhone: doc.contactPhone,
+        verified: true,
+        rating: 4.8,
+        virtualBoothUrl: `https://visitexpo.in/virtual-booth/${doc._id}`,
+        creditsRequired: 10
+      }));
+    } catch (e) {
+      console.warn('[Exhibitor Discovery] MongoDB query note:', e.message);
+    }
+
+    let allExhibitors = [...CURATED_DISCOVERY_EXHIBITORS, ...dbExhibitors];
+
+    // Filter by Origin (all | india | global)
+    if (origin && origin !== 'all') {
+      allExhibitors = allExhibitors.filter(ex => ex.origin === origin.toLowerCase());
+    }
+
+    // Filter by Preferred Country
+    if (country && country !== 'all') {
+      const cleanCountry = country.toLowerCase().trim();
+      allExhibitors = allExhibitors.filter(ex =>
+        ex.country.toLowerCase().includes(cleanCountry) || cleanCountry.includes(ex.country.toLowerCase())
+      );
+    }
+
+    // Filter by Preferred Industry
+    if (industry && industry !== 'all') {
+      const cleanInd = industry.toLowerCase().trim();
+      allExhibitors = allExhibitors.filter(ex =>
+        ex.industry.toLowerCase().includes(cleanInd) || cleanInd.includes(ex.industry.toLowerCase())
+      );
+    }
+
+    // Filter by Search Products
+    if (product && product.trim()) {
+      const prodTerm = product.trim().toLowerCase();
+      allExhibitors = allExhibitors.filter(ex =>
+        ex.products.some(p => p.toLowerCase().includes(prodTerm)) ||
+        ex.name.toLowerCase().includes(prodTerm) ||
+        ex.description.toLowerCase().includes(prodTerm)
+      );
+    }
+
+    // Generic search query
+    if (search && search.trim()) {
+      const sTerm = search.trim().toLowerCase();
+      allExhibitors = allExhibitors.filter(ex =>
+        ex.name.toLowerCase().includes(sTerm) ||
+        ex.country.toLowerCase().includes(sTerm) ||
+        ex.industry.toLowerCase().includes(sTerm) ||
+        ex.products.some(p => p.toLowerCase().includes(sTerm))
+      );
+    }
+
+    // User credit balance if user is logged in
+    let userCredits = 100;
+    if (req.user?.id) {
+      const user = await User.findById(req.user.id).select('credits');
+      if (user) {
+        userCredits = user.credits !== undefined ? user.credits : 100;
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        total: allExhibitors.length,
+        userCredits,
+        exhibitors: allExhibitors
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Connect & Send B2B Inquiry to an Exhibitor (Charges 10 Credits)
+// @route   POST /api/exhibitors/inquiry
+router.post('/inquiry', optionalAuth, async (req, res, next) => {
+  try {
+    const {
+      exhibitorId,
+      exhibitorName,
+      exhibitorEmail,
+      country,
+      industry,
+      products,
+      message,
+      senderName,
+      senderEmail,
+      senderPhone,
+      senderCompany,
+      inquiryType
+    } = req.body;
+
+    // 1. Mandatory message length validation: min 100 characters, max 300 characters
+    if (!message || typeof message !== 'string') {
+      return res.status(400).json({
+        success: false,
+        error: 'Inquiry message is required.'
+      });
+    }
+
+    const trimmedMsg = message.trim();
+    if (trimmedMsg.length < 100) {
+      return res.status(400).json({
+        success: false,
+        error: `The message must contain a minimum of 100 characters. Currently has ${trimmedMsg.length} characters.`
+      });
+    }
+
+    if (trimmedMsg.length > 300) {
+      return res.status(400).json({
+        success: false,
+        error: `The message cannot exceed 300 characters. Currently has ${trimmedMsg.length} characters.`
+      });
+    }
+
+    // 2. Resolve User & Charge 10 Credits
+    const userId = req.user?.id || req.user?._id;
+    let user = null;
+    if (userId) {
+      user = await User.findById(userId);
+    } else if (senderEmail) {
+      user = await User.findOne({ email: senderEmail.toLowerCase().trim() });
+    }
+
+    const CREDITS_TO_CHARGE = 10;
+    let finalCredits = 90;
+
+    if (user) {
+      const currentCredits = user.credits !== undefined ? user.credits : 100;
+      if (currentCredits < CREDITS_TO_CHARGE) {
+        return res.status(400).json({
+          success: false,
+          error: `Insufficient credits. 10 credits are required to connect with this exhibitor. Your current balance is ${currentCredits} credits.`
+        });
+      }
+
+      user.credits = currentCredits - CREDITS_TO_CHARGE;
+      await user.save();
+      finalCredits = user.credits;
+    }
+
+    // 3. Save Inquiry record in ContactMessage
+    const inquiryRecord = await ContactMessage.create({
+      role: 'Organizer',
+      source: 'exhibitor_discovery',
+      name: senderName || user?.name || 'Verified Event Organizer',
+      email: (senderEmail || user?.email || 'organizer@visitexpo.in').toLowerCase().trim(),
+      phone: senderPhone || user?.phone || '',
+      message: trimmedMsg,
+      status: 'new',
+      meta: {
+        exhibitorId: exhibitorId || 'unknown',
+        exhibitorName: exhibitorName || 'Trade Exhibitor',
+        exhibitorEmail: exhibitorEmail || '',
+        country: country || 'Global',
+        industry: industry || 'Trade Exhibition',
+        products: Array.isArray(products) ? products.join(', ') : products || '',
+        inquiryType: inquiryType || 'B2B Trade Partnership',
+        senderCompany: senderCompany || user?.company || '',
+        creditsCharged: CREDITS_TO_CHARGE,
+        remainingCredits: finalCredits,
+        platform: 'Exhibitor Discovery',
+        timestamp: new Date()
+      }
+    });
+
+    res.status(201).json({
+      success: true,
+      message: `Enquiry sent successfully to "${exhibitorName || 'Exhibitor'}". 10 credits have been charged.`,
+      data: {
+        inquiryId: inquiryRecord._id,
+        creditsCharged: CREDITS_TO_CHARGE,
+        remainingCredits: finalCredits,
+        exhibitorName,
+        exhibitorEmail
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get single Exhibitor details
 router.get('/:id', protect, async (req, res, next) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return next();
+  }
   try {
     const exhibitor = await Exhibitor.findById(req.params.id)
       .populate('event', 'title city startDate endDate venue slug banner logo description organizer');

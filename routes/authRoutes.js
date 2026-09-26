@@ -311,6 +311,7 @@ router.get('/me', protect, async (req, res, next) => {
         city: userDoc.city || '',
         role: userDoc.role,
         isVerified: userDoc.isVerified,
+        credits: userDoc.credits !== undefined ? userDoc.credits : 100,
         organization: userDoc.organization
       }
     });
