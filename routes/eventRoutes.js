@@ -213,12 +213,22 @@ router.get('/check-duplicate', async (req, res, next) => {
       });
     } catch {}
 
+    // Look up the event being excluded to also exclude its WordPress mirror
+    let excludedEvent = null;
+    if (excludeId && mongoose.isValidObjectId(excludeId)) {
+      try {
+        excludedEvent = await Event.findById(excludeId).select('title slug wpPostId').lean();
+      } catch (err) {
+        console.warn('Error fetching excluded event for duplicate check:', err);
+      }
+    }
+
     // 2. Query MongoDB Event collection
     const exactQuery = {
       title: { $regex: new RegExp(`^${escapedTitle}$`, 'i') }
     };
     if (excludeId && mongoose.isValidObjectId(excludeId)) {
-      exactQuery._id = { $ne: excludeId };
+      exactQuery._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
     }
 
     let exactMatch = await Event.findOne(exactQuery)
@@ -259,8 +269,21 @@ router.get('/check-duplicate', async (req, res, next) => {
         if (deletedTitles.has(normalizeTitle(doc.title)) || deletedSlugs.has(doc.slug) || deletedIds.has(String(doc.id))) {
           return false;
         }
-        if (excludeId && (String(doc.id) === String(excludeId) || doc.slug === String(excludeId))) {
-          return false;
+        if (excludeId) {
+          if (String(doc.id) === String(excludeId) || doc.slug === String(excludeId)) {
+            return false;
+          }
+          if (excludedEvent) {
+            if (excludedEvent.wpPostId && String(doc.id) === String(excludedEvent.wpPostId)) {
+              return false;
+            }
+            if (excludedEvent.slug && (doc.slug || '').toLowerCase().trim() === excludedEvent.slug.toLowerCase().trim()) {
+              return false;
+            }
+            if (excludedEvent.title && normalizeTitle(doc.title) === normalizeTitle(excludedEvent.title)) {
+              return false;
+            }
+          }
         }
         const docNorm = normalizeTitle(doc.title);
         const docSlug = (doc.slug || '').toLowerCase().trim();
@@ -300,7 +323,7 @@ router.get('/check-duplicate', async (req, res, next) => {
         title: { $regex: escapedTitle, $options: 'i' }
       };
       if (excludeId && mongoose.isValidObjectId(excludeId)) {
-        similarQuery._id = { $ne: excludeId };
+        similarQuery._id = { $ne: new mongoose.Types.ObjectId(excludeId) };
       }
 
       const matches = await Event.find(similarQuery)
@@ -312,11 +335,31 @@ router.get('/check-duplicate', async (req, res, next) => {
 
       if (similarEvents.length < 3 && Array.isArray(wpDocs)) {
         const lowerClean = cleanTitle.toLowerCase();
-        const wpMatches = wpDocs.filter(d => 
-          d.title.toLowerCase().includes(lowerClean) &&
-          !deletedTitles.has(normalizeTitle(d.title)) &&
-          !similarEvents.some(se => normalizeTitle(se.title) === normalizeTitle(d.title))
-        ).slice(0, 3 - similarEvents.length);
+        const wpMatches = wpDocs.filter(d => {
+          if (deletedTitles.has(normalizeTitle(d.title)) || deletedSlugs.has(d.slug) || deletedIds.has(String(d.id))) {
+            return false;
+          }
+          if (excludeId) {
+            if (String(d.id) === String(excludeId) || d.slug === String(excludeId)) {
+              return false;
+            }
+            if (excludedEvent) {
+              if (excludedEvent.wpPostId && String(d.id) === String(excludedEvent.wpPostId)) {
+                return false;
+              }
+              if (excludedEvent.slug && (d.slug || '').toLowerCase().trim() === excludedEvent.slug.toLowerCase().trim()) {
+                return false;
+              }
+              if (excludedEvent.title && normalizeTitle(d.title) === normalizeTitle(excludedEvent.title)) {
+                return false;
+              }
+            }
+          }
+          return (
+            d.title.toLowerCase().includes(lowerClean) &&
+            !similarEvents.some(se => normalizeTitle(se.title) === normalizeTitle(d.title))
+          );
+        }).slice(0, 3 - similarEvents.length);
 
         similarEvents = [...similarEvents, ...wpMatches];
       }
