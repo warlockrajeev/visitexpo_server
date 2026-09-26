@@ -170,7 +170,7 @@ router.post('/bulk', async (req, res, next) => {
       .map(l => ({
         name: l.name.trim(),
         email: l.email.toLowerCase().trim(),
-        phone: l.phone ? l.phone.trim() : '',
+        phone: l.phone ? String(l.phone).replace(/[a-zA-Z]/g, '').trim() : '',
         company: l.company ? l.company.trim() : '',
         designation: l.designation ? l.designation.trim() : '',
         country: l.country ? l.country.trim() : 'India',
