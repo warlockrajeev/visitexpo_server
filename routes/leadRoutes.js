@@ -93,8 +93,25 @@ router.post('/', async (req, res, next) => {
   try {
     const { name, email, phone, company, designation, country, leadScore, status, source, eventId, notes } = req.body;
 
-    if (!name || !email || !eventId) {
-      return res.status(400).json({ success: false, error: 'Name, email, and event ID are required' });
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, error: 'Full name is required' });
+    }
+
+    if (!email || !email.trim()) {
+      return res.status(400).json({ success: false, error: 'Work email is required' });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email.trim())) {
+      return res.status(400).json({ success: false, error: 'Invalid email address format' });
+    }
+
+    if (!eventId) {
+      return res.status(400).json({ success: false, error: 'Target event ID is required' });
+    }
+
+    if (phone && /[a-zA-Z]/.test(phone)) {
+      return res.status(400).json({ success: false, error: 'Phone number cannot contain alphabetic characters. Only numbers and valid phone symbols (+, -, space) are allowed.' });
     }
 
     const event = await Event.findById(eventId);
@@ -103,13 +120,13 @@ router.post('/', async (req, res, next) => {
     }
 
     const newLead = await Lead.create({
-      name,
-      email: email.toLowerCase(),
-      phone: phone || '',
-      company: company || '',
-      designation: designation || '',
-      country: country || 'India',
-      leadScore: leadScore !== undefined ? leadScore : 50,
+      name: name.trim(),
+      email: email.toLowerCase().trim(),
+      phone: phone ? phone.trim() : '',
+      company: company ? company.trim() : '',
+      designation: designation ? designation.trim() : '',
+      country: country ? country.trim() : 'India',
+      leadScore: leadScore !== undefined ? Number(leadScore) : 50,
       status: status || 'new',
       source: source || 'website',
       event: eventId,
@@ -201,16 +218,32 @@ router.put('/:id', async (req, res, next) => {
     const previousStatus = lead.status;
 
     // Apply updates
-    if (name) lead.name = name;
-    if (email) lead.email = email.toLowerCase();
-    if (phone !== undefined) lead.phone = phone;
-    if (company !== undefined) lead.company = company;
-    if (designation !== undefined) lead.designation = designation;
-    if (country !== undefined) lead.country = country;
-    if (leadScore !== undefined) lead.leadScore = leadScore;
+    if (name !== undefined) {
+      if (!name.trim()) {
+        return res.status(400).json({ success: false, error: 'Full name cannot be empty' });
+      }
+      lead.name = name.trim();
+    }
+    if (email !== undefined) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email.trim())) {
+        return res.status(400).json({ success: false, error: 'Invalid email address format' });
+      }
+      lead.email = email.toLowerCase().trim();
+    }
+    if (phone !== undefined) {
+      if (phone && /[a-zA-Z]/.test(phone)) {
+        return res.status(400).json({ success: false, error: 'Phone number cannot contain alphabetic characters. Only numbers and valid phone symbols (+, -, space) are allowed.' });
+      }
+      lead.phone = phone ? phone.trim() : '';
+    }
+    if (company !== undefined) lead.company = company.trim();
+    if (designation !== undefined) lead.designation = designation.trim();
+    if (country !== undefined) lead.country = country.trim();
+    if (leadScore !== undefined) lead.leadScore = Number(leadScore);
     if (status) lead.status = status;
     if (assignedSales !== undefined) lead.assignedSales = assignedSales || null;
-    if (notes !== undefined) lead.notes = notes;
+    if (notes !== undefined) lead.notes = notes.trim();
 
     // Log status change activity
     if (status && status !== previousStatus) {
