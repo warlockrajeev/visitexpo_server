@@ -10,6 +10,8 @@ import Payment from '../models/Payment.js';
 import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
 import Lead from '../models/Lead.js';
+import Organization from '../models/Organization.js';
+import User from '../models/User.js';
 import { protect, authorize } from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -21,22 +23,28 @@ router.post('/checkout', async (req, res, next) => {
   try {
     const { eventId, ticketId, quantity, buyer, attendanceType } = req.body;
 
-    if (!eventId || !ticketId || !quantity || !buyer || !buyer.name || !buyer.email) {
+    if (!ticketId || !quantity || !buyer || !buyer.name || !buyer.email) {
       return res.status(400).json({
         success: false,
-        error: 'Event ID, Ticket ID, Quantity, and Buyer Details (name, email) are required'
+        error: 'Ticket ID, Quantity, and Buyer Details (name, email) are required'
       });
     }
 
-    // 1. Verify Event and Ticket Tier exists
-    const event = await Event.findById(eventId);
-    if (!event) {
-      return res.status(404).json({ success: false, error: 'Target event not found' });
-    }
-
+    // 1. Verify Ticket Tier exists
     const ticket = await Ticket.findById(ticketId);
     if (!ticket) {
       return res.status(404).json({ success: false, error: 'Ticket tier not found' });
+    }
+
+    // Determine target event
+    const targetEventId = eventId || ticket.event;
+    if (!targetEventId) {
+      return res.status(400).json({ success: false, error: 'Target Event ID is required' });
+    }
+
+    const event = await Event.findById(targetEventId);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Target event not found' });
     }
 
     // Check capacity if limited
@@ -44,10 +52,25 @@ router.post('/checkout', async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Selected ticket tier has insufficient capacity remaining' });
     }
 
+    // Resolve organizer if available
+    let organizerId = event.organizer || undefined;
+    if (!organizerId && event.claimedBy) {
+      const claimingUser = await User.findById(event.claimedBy).lean();
+      if (claimingUser?.organization) {
+        organizerId = claimingUser.organization;
+      }
+    }
+    if (!organizerId) {
+      const defaultOrg = await Organization.findOne().lean();
+      if (defaultOrg) {
+        organizerId = defaultOrg._id;
+      }
+    }
+
     // 2. Ensure Visitor is registered for this event
-    let visitor = await Visitor.findOne({ event: eventId, email: buyer.email.toLowerCase() });
+    let visitor = await Visitor.findOne({ event: targetEventId, email: buyer.email.toLowerCase() });
     if (!visitor) {
-      const mockQRCode = `visitexpo-${eventId}-${buyer.email.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
+      const mockQRCode = `visitexpo-${targetEventId}-${buyer.email.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
       visitor = await Visitor.create({
         name: buyer.name,
         email: buyer.email.toLowerCase(),
@@ -57,7 +80,7 @@ router.post('/checkout', async (req, res, next) => {
         country: buyer.country || 'India',
         qrCode: mockQRCode,
         attendanceType: attendanceType || (ticket.type === 'vip' || ticket.price > 0 ? 'in_person' : 'virtual'),
-        event: eventId
+        event: targetEventId
       });
 
       // Auto create a Lead
@@ -71,7 +94,7 @@ router.post('/checkout', async (req, res, next) => {
         leadScore: ticket.type === 'vip' ? 70 : 40,
         source: 'website',
         status: 'new',
-        event: eventId,
+        event: targetEventId,
         notes: `Registered via ticket checkout (${ticket.title} tier).`,
         activityTimeline: [
           {
@@ -88,12 +111,12 @@ router.post('/checkout', async (req, res, next) => {
 
     const order = await Order.create({
       orderNumber,
-      event: eventId,
-      organizer: event.organizer,
+      event: targetEventId,
+      organizer: organizerId || undefined,
       buyer: {
         name: buyer.name,
         email: buyer.email.toLowerCase(),
-        phone: buyer.phone
+        phone: buyer.phone || '9999900000'
       },
       items: [
         {
@@ -104,6 +127,7 @@ router.post('/checkout', async (req, res, next) => {
         }
       ],
       totalAmount,
+      currency: ticket.currency || 'INR',
       status: totalAmount > 0 ? 'pending' : 'completed', // Free tickets are completed immediately
       paymentMethod: totalAmount > 0 ? 'credit_card' : 'free_pass',
       paymentId: totalAmount > 0 ? '' : 'FREE_PASS'

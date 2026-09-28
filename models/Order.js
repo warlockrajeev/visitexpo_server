@@ -33,7 +33,7 @@ const OrderSchema = new mongoose.Schema(
     organizer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Organization',
-      required: true,
+      required: false,
       index: true
     },
     buyer: {
@@ -46,6 +46,10 @@ const OrderSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0
+    },
+    currency: {
+      type: String,
+      default: 'INR'
     },
     status: {
       type: String,
