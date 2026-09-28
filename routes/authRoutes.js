@@ -11,6 +11,9 @@ import AuthService from '../services/AuthService.js';
 import TwoFactorService from '../services/twoFactorService.js';
 import { protect } from '../middlewares/auth.js';
 import { authLimiter } from '../middlewares/rateLimiter.js';
+import jwt from 'jsonwebtoken';
+import UserRepository from '../repositories/UserRepository.js';
+import { generateAccessToken, generateRefreshToken } from '../utils/jwt.js';
 
 const router = express.Router();
 
@@ -565,6 +568,72 @@ router.put('/change-password', protect, async (req, res, next) => {
         organization: updatedUser.organization,
         authProvider: updatedUser.authProvider || 'local',
         hasCustomPassword: true
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Exchange one-time impersonation token for user session
+// @route   POST /api/auth/impersonate-exchange
+router.post('/impersonate-exchange', async (req, res, next) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ success: false, error: 'Exchange token is required' });
+    }
+
+    const secret = process.env.JWT_SECRET || 'visitexpo_access_key_super_secret_change_me_in_production';
+    let decoded;
+    try {
+      decoded = jwt.verify(token, secret);
+    } catch (err) {
+      return res.status(401).json({ success: false, error: 'Impersonation link is expired or invalid. Please request a new one.' });
+    }
+
+    if (decoded.type !== 'impersonate_exchange') {
+      return res.status(401).json({ success: false, error: 'Invalid exchange token type' });
+    }
+
+    const userDoc = await User.findById(decoded.userId).populate('organization');
+    if (!userDoc) {
+      return res.status(404).json({ success: false, error: 'Target user account not found' });
+    }
+
+    if (userDoc.isSuspended || userDoc.status === 'suspended') {
+      return res.status(403).json({ success: false, error: 'Target user account is suspended' });
+    }
+
+    const accessToken = generateAccessToken(userDoc);
+    const refreshToken = generateRefreshToken(userDoc);
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+    await UserRepository.addRefreshToken(userDoc._id, refreshToken, expiresAt);
+
+    // Set refresh token cookie
+    setRefreshTokenCookie(res, refreshToken, req);
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully authenticated as ${userDoc.name}`,
+      accessToken,
+      refreshToken,
+      user: {
+        id: userDoc._id,
+        name: userDoc.name,
+        email: userDoc.email,
+        phone: userDoc.phone || '',
+        company: userDoc.company || '',
+        designation: userDoc.designation || '',
+        city: userDoc.city || '',
+        role: userDoc.role,
+        isVerified: userDoc.isVerified,
+        credits: userDoc.credits !== undefined ? userDoc.credits : 100,
+        organization: userDoc.organization,
+        authProvider: userDoc.authProvider || 'local',
+        hasCustomPassword: userDoc.hasCustomPassword !== undefined ? userDoc.hasCustomPassword : true
       }
     });
   } catch (error) {

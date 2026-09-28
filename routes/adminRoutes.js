@@ -29,6 +29,7 @@ import {
 } from '../services/emailService.js';
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
+import jwt from 'jsonwebtoken';
 
 import fs from 'fs';
 import path from 'path';
@@ -2053,6 +2054,270 @@ router.delete('/users/:id', async (req, res, next) => {
     if (error.statusCode) {
       return res.status(error.statusCode).json({ success: false, error: error.message });
     }
+    next(error);
+  }
+});
+
+// ============================================================================
+// RAPID DUMMY USER CREATION & DASHBOARD IMPERSONATION
+// ============================================================================
+
+const RANDOM_FIRST_NAMES = [
+  'Aarav', 'Vivaan', 'Aditya', 'Vihaan', 'Arjun', 'Sai', 'Reyansh', 'Ayaan', 'Krishna', 'Ishaan',
+  'Shaurya', 'Ananya', 'Diya', 'Saanvi', 'Aadhya', 'Pari', 'Anika', 'Navya', 'Myra', 'Ira',
+  'Rohit', 'Vikram', 'Pooja', 'Neha', 'Sunil', 'Kavita', 'Sanjay', 'Deepak', 'Meera', 'Ritu',
+  'Amit', 'Rahul', 'Rohan', 'Sneha', 'Tanvi', 'Karan', 'Manish', 'Alok', 'Preeti', 'Swati'
+];
+
+const RANDOM_LAST_NAMES = [
+  'Sharma', 'Verma', 'Patel', 'Mehta', 'Reddy', 'Nair', 'Iyer', 'Singhania', 'Gupta', 'Malhotra',
+  'Chopra', 'Joshi', 'Bose', 'Deshmukh', 'Kulkarni', 'Agarwal', 'Bhatia', 'Kapoor', 'Rao', 'Das',
+  'Sen', 'Mishra', 'Pandey', 'Saxena', 'Choudhary', 'Ghosh', 'Chatterjee', 'Banerjee', 'Pillai', 'Menon'
+];
+
+const RANDOM_CITIES = [
+  'New Delhi', 'Mumbai', 'Bengaluru', 'Hyderabad', 'Chennai', 'Ahmedabad', 'Pune', 'Kolkata', 'Jaipur', 'Noida', 'Gurugram'
+];
+
+const RANDOM_ORGANIZER_COMPANIES = [
+  'Apex Global Expos Pvt Ltd', 'Prime Trade Exhibitions Ltd', 'Horizon World Conventions',
+  'Vanguard Expo Networks', 'Pinnacle Trade Fairs India', 'Zenith Trade Fairs & Media',
+  'Spectrum Expo International', 'Nexus Global Summits Pvt Ltd', 'Quantum Trade Platforms', 'Imperial Exhibition Group',
+  'Starlight Conventions India', 'Matrix Trade Fair Organizers'
+];
+
+const RANDOM_EXHIBITOR_COMPANIES = [
+  'Tata Advanced Technologies', 'Godrej Precision Systems', 'Bharat Clean Energy Corp',
+  'Infosys Digital Solutions', 'Reliance Industrial Automation', 'L&T Smart Infrastructure',
+  'Mahindra Heavy Power', 'Sun Pharma Biosystems', 'Havells Electric Dynamics', 'Titan Engineering Solutions',
+  'Wipro Enterprise Networks', 'Blue Star Precision Cooling'
+];
+
+const RANDOM_DESIGNATIONS = [
+  'Managing Director', 'Chief Executive Officer', 'Vice President - Business Development',
+  'Chief Technology Officer', 'Head of Procurement', 'Global Exhibition Manager',
+  'Lead Architect', 'Senior Marketing Director', 'Operations Lead', 'Chief Strategy Officer'
+];
+
+const RANDOM_INDUSTRIES = [
+  'Information Technology & Software', 'Industrial & Manufacturing', 'Automotive, EV & Clean Energy',
+  'Healthcare, Pharma & Biotech', 'Building, Architecture & Real Estate', 'Food, Beverage & Hospitality',
+  'Consumer Electronics & Retail', 'Textile, Apparel & Fashion'
+];
+
+const generateDummyUserObj = (role, customFields = {}) => {
+  const randFirst = RANDOM_FIRST_NAMES[Math.floor(Math.random() * RANDOM_FIRST_NAMES.length)];
+  const randLast = RANDOM_LAST_NAMES[Math.floor(Math.random() * RANDOM_LAST_NAMES.length)];
+  const randCity = RANDOM_CITIES[Math.floor(Math.random() * RANDOM_CITIES.length)];
+  const randSuffix = Math.floor(1000 + Math.random() * 9000);
+  const cleanFirst = randFirst.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const cleanLast = randLast.toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  const name = customFields.name?.trim() || `${randFirst} ${randLast}`;
+  const email = customFields.email?.trim()?.toLowerCase() || `${cleanFirst}.${cleanLast}.${randSuffix}@testexpo.in`;
+  const password = customFields.password || 'Test@1234';
+  const phone = customFields.phone?.trim() || `9${Math.floor(100000000 + Math.random() * 900000000)}`;
+  const city = customFields.city?.trim() || randCity;
+  const designation = customFields.designation?.trim() || RANDOM_DESIGNATIONS[Math.floor(Math.random() * RANDOM_DESIGNATIONS.length)];
+  const industry = customFields.industry?.trim() || RANDOM_INDUSTRIES[Math.floor(Math.random() * RANDOM_INDUSTRIES.length)];
+
+  let company = customFields.company?.trim();
+  if (!company) {
+    if (role === 'organizer') {
+      company = RANDOM_ORGANIZER_COMPANIES[Math.floor(Math.random() * RANDOM_ORGANIZER_COMPANIES.length)];
+    } else if (role === 'exhibitor') {
+      company = RANDOM_EXHIBITOR_COMPANIES[Math.floor(Math.random() * RANDOM_EXHIBITOR_COMPANIES.length)];
+    } else {
+      company = `${randLast} Enterprises Ltd`;
+    }
+  }
+
+  return {
+    name,
+    email,
+    password,
+    phone,
+    city,
+    company,
+    designation,
+    industry,
+    role
+  };
+};
+
+// @desc    Rapid dummy user creation for organizers, exhibitors, and visitors
+// @route   POST /api/admin/rapid-create
+router.post('/rapid-create', async (req, res, next) => {
+  try {
+    const { role = 'organizer', count = 1, ...customFields } = req.body;
+    const assignedRole = ['organizer', 'exhibitor', 'visitor'].includes(role) ? role : 'organizer';
+    const numToCreate = Math.min(Math.max(parseInt(count, 10) || 1, 1), 25);
+
+    const createdUsers = [];
+
+    for (let i = 0; i < numToCreate; i++) {
+      const data = numToCreate === 1 ? generateDummyUserObj(assignedRole, customFields) : generateDummyUserObj(assignedRole);
+
+      // Ensure unique email
+      let finalEmail = data.email;
+      let existingUser = await User.findOne({ email: finalEmail });
+      while (existingUser) {
+        const extraRand = Math.floor(1000 + Math.random() * 9000);
+        finalEmail = `${finalEmail.split('@')[0]}_${extraRand}@testexpo.in`;
+        existingUser = await User.findOne({ email: finalEmail });
+      }
+
+      // 1. Create User (password hashed via Mongoose pre-save hook)
+      const user = await User.create({
+        name: data.name,
+        email: finalEmail,
+        password: data.password,
+        role: assignedRole,
+        phone: data.phone,
+        company: data.company,
+        designation: data.designation,
+        city: data.city,
+        isVerified: true,
+        isPhoneVerified: true,
+        status: 'active',
+        authProvider: 'local',
+        hasCustomPassword: true
+      });
+
+      // 2. Role-specific organization & exhibitor records
+      if (assignedRole === 'organizer' || assignedRole === 'exhibitor') {
+        const org = await Organization.create({
+          name: data.company,
+          contact: { email: finalEmail, phone: data.phone },
+          address: { city: data.city, street: 'Business & Expo Pavillion' },
+          description: assignedRole === 'exhibitor'
+            ? `Industry Sector: ${data.industry}`
+            : 'Premier exhibition organizers managing international expos and conventions.',
+          teamMembers: [{ user: user._id, role: assignedRole }],
+          isVerified: true
+        });
+
+        user.organization = org._id;
+        await user.save();
+
+        if (assignedRole === 'exhibitor') {
+          await Exhibitor.create({
+            user: user._id,
+            name: user.name,
+            company: data.company,
+            email: user.email,
+            phone: user.phone,
+            city: data.city,
+            designation: data.designation,
+            status: 'approved',
+            isApproved: true,
+            approvedAt: new Date()
+          }).catch(() => null);
+        }
+      }
+
+      const populatedUser = await User.findById(user._id).select('-password').populate('organization');
+
+      createdUsers.push({
+        ...populatedUser.toObject(),
+        plainPassword: data.password
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      message: `Successfully created ${createdUsers.length} dummy ${assignedRole}${createdUsers.length > 1 ? 's' : ''}!`,
+      count: createdUsers.length,
+      users: createdUsers
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get dummy and recent users for Rapid Creation table
+// @route   GET /api/admin/rapid-users
+router.get('/rapid-users', async (req, res, next) => {
+  try {
+    const { role } = req.query;
+    const query = {};
+    if (role && role !== 'all') {
+      query.role = role;
+    } else {
+      query.role = { $in: ['organizer', 'exhibitor', 'visitor'] };
+    }
+
+    const [users, orgCount, exhCount, visCount, dummyCount] = await Promise.all([
+      User.find(query)
+        .populate('organization', 'name logo address contact gst description')
+        .sort({ createdAt: -1 })
+        .limit(60)
+        .lean(),
+      User.countDocuments({ role: 'organizer' }),
+      User.countDocuments({ role: 'exhibitor' }),
+      User.countDocuments({ role: 'visitor' }),
+      User.countDocuments({ email: { $regex: '@testexpo\\.in$', $options: 'i' } })
+    ]);
+
+    res.status(200).json({
+      success: true,
+      users,
+      counts: {
+        organizers: orgCount,
+        exhibitors: exhCount,
+        visitors: visCount,
+        dummyUsers: dummyCount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Generate impersonation exchange token to log in as user directly on client dashboard
+// @route   POST /api/admin/impersonate
+router.post('/impersonate', async (req, res, next) => {
+  try {
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ success: false, error: 'User ID is required' });
+    }
+
+    const user = await User.findById(userId).populate('organization');
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const secret = process.env.JWT_SECRET || 'visitexpo_access_key_super_secret_change_me_in_production';
+    const exchangeToken = jwt.sign(
+      {
+        userId: user._id,
+        role: user.role,
+        type: 'impersonate_exchange',
+        adminId: req.user?.id
+      },
+      secret,
+      { expiresIn: '5m' }
+    );
+
+    const origin = req.get('origin') || '';
+    const isLocal = origin.includes('localhost') || origin.includes('127.0.0.1');
+    const clientUrl = isLocal ? 'http://localhost:3000' : (process.env.CLIENT_URL || 'https://client.visitexpo.in');
+
+    res.status(200).json({
+      success: true,
+      message: `Impersonation link generated for ${user.name}`,
+      exchangeToken,
+      clientUrl,
+      redirectUrl: `${clientUrl}/auth/impersonate?token=${exchangeToken}`,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role
+      }
+    });
+  } catch (error) {
     next(error);
   }
 });
