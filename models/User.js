@@ -30,8 +30,16 @@ const UserSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ['super_admin', 'organizer', 'exhibitor', 'visitor', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
+      enum: ['super_admin', 'sub_admin', 'admin', 'organizer', 'exhibitor', 'visitor', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
       default: 'organizer'
+    },
+    adminRole: {
+      type: String,
+      default: ''
+    },
+    permissions: {
+      type: [String],
+      default: []
     },
     organization: {
       type: mongoose.Schema.Types.ObjectId,

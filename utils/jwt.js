@@ -14,6 +14,8 @@ export const generateAccessToken = (user) => {
       id: user._id,
       email: user.email,
       role: user.role,
+      adminRole: user.adminRole || '',
+      permissions: user.permissions || [],
       organization: user.organization
     },
     ACCESS_SECRET,

@@ -38,6 +38,8 @@ export const protect = async (req, res, next) => {
       id: decoded.id,
       email: decoded.email,
       role: decoded.role,
+      adminRole: decoded.adminRole || '',
+      permissions: decoded.permissions || [],
       organization: decoded.organization
     };
 
@@ -58,5 +60,33 @@ export const authorize = (...roles) => {
       return next(err);
     }
     next();
+  };
+};
+
+// Granular permission check for admin / subadmin operations
+export const requirePermission = (permission) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      const err = new Error('Access denied. Authentication required.');
+      err.statusCode = 401;
+      return next(err);
+    }
+
+    // Super admin has full unconstrained access
+    if (req.user.role === 'super_admin') {
+      return next();
+    }
+
+    // Subadmin or admin with granular permissions
+    if (req.user.role === 'sub_admin' || req.user.role === 'admin') {
+      const userPerms = Array.isArray(req.user.permissions) ? req.user.permissions : [];
+      if (userPerms.includes('*') || userPerms.includes(permission)) {
+        return next();
+      }
+    }
+
+    const err = new Error(`Access forbidden. Missing required permission: '${permission}'`);
+    err.statusCode = 403;
+    return next(err);
   };
 };

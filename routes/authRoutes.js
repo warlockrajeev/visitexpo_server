@@ -328,6 +328,8 @@ router.get('/me', protect, async (req, res, next) => {
         designation: userDoc.designation || '',
         city: userDoc.city || '',
         role: userDoc.role,
+        adminRole: userDoc.adminRole || '',
+        permissions: userDoc.permissions || [],
         isVerified: userDoc.isVerified,
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,
         organization: userDoc.organization,

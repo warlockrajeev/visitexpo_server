@@ -1257,9 +1257,9 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
 
 const router = express.Router();
 
-// Wrap all admin routes in protect and super_admin authorize
+// Wrap all admin routes in protect and authorize platform administrators and subadmins
 router.use(protect);
-router.use(authorize('super_admin'));
+router.use(authorize('super_admin', 'sub_admin', 'admin'));
 
 // @desc    Get admin dashboard summary KPIs
 // @route   GET /api/admin/dashboard
@@ -3476,6 +3476,327 @@ router.get('/moderation/:type/:id', async (req, res, next) => {
     }
 
     return res.status(400).json({ success: false, error: `Unsupported moderation category: ${type}` });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============================================================================
+// SUBADMIN & RBAC PERMISSION MANAGEMENT
+// ============================================================================
+
+export const ADMIN_PERMISSION_MODULES = [
+  {
+    category: 'Core & Moderation',
+    icon: 'ShieldCheck',
+    permissions: [
+      { id: 'dashboard.view', label: 'Dashboard & Metrics', description: 'View high-level platform health, revenue metrics, and KPIs' },
+      { id: 'moderation.view', label: 'View Moderation Queue', description: 'Inspect pending organizer and exhibitor onboarding applications' },
+      { id: 'moderation.manage', label: 'Approve & Reject Moderation', description: 'Approve, reject, or assign booth numbers to applicants' },
+    ]
+  },
+  {
+    category: 'Events & Content',
+    icon: 'Calendar',
+    permissions: [
+      { id: 'events.view', label: 'View Events Directory', description: 'View all organizer events, dates, and sync status' },
+      { id: 'events.manage', label: 'Manage Events', description: 'Create, edit, delete events and push updates to WordPress' },
+      { id: 'categories.view', label: 'View Categories', description: 'Inspect category taxonomies and subsectors' },
+      { id: 'categories.manage', label: 'Manage Categories', description: 'Create and edit event category groupings and tags' },
+      { id: 'sponsors.manage', label: 'Manage Sponsors & Partners', description: 'Add, edit, and organize tier sponsor showcases' },
+      { id: 'faqs.manage', label: 'Manage FAQs', description: 'Create, edit, and reorder public FAQs' },
+      { id: 'reviews.manage', label: 'Moderate Reviews', description: 'Approve, moderate, or remove public visitor & exhibitor reviews' },
+    ]
+  },
+  {
+    category: 'Directory & User Entities',
+    icon: 'Users',
+    permissions: [
+      { id: 'organizers.view', label: 'View Organizers', description: 'Browse registered expo organizers and their events' },
+      { id: 'organizers.manage', label: 'Manage Organizers', description: 'Edit organizer profiles and manage status' },
+      { id: 'exhibitors.view', label: 'View Exhibitors', description: 'Browse exhibitors, booths, and stalls' },
+      { id: 'exhibitors.manage', label: 'Manage Exhibitors', description: 'Update booth allocation and exhibitor status' },
+      { id: 'visitors.view', label: 'View Visitors', description: 'View attendee passholders and registration lists' },
+      { id: 'attendees.view', label: 'View Followers & Attendees', description: 'Browse event bookmarks and followers' },
+      { id: 'users.view', label: 'View Platform Users', description: 'Search and inspect user dossiers across all roles' },
+      { id: 'users.manage', label: 'Manage Platform Users', description: 'Edit user metadata, suspend/reactivate, and delete users' },
+      { id: 'rapid_creation.access', label: 'Rapid Creation Tools', description: 'Use 1-click test user generator and impersonation tools' },
+    ]
+  },
+  {
+    category: 'Finance, Billing & Communications',
+    icon: 'CreditCard',
+    permissions: [
+      { id: 'subscriptions.view', label: 'View Subscriptions', description: 'Inspect active SaaS subscription tiers and recurring billing' },
+      { id: 'subscriptions.manage', label: 'Manage Subscriptions', description: 'Upgrade, cancel, or manually provision plan tiers' },
+      { id: 'invoices.view', label: 'View Invoices & Sales', description: 'Inspect GST tax invoices and payment receipts' },
+      { id: 'tickets.manage', label: 'Support Tickets', description: 'Respond to and close customer support tickets' },
+      { id: 'contacts.manage', label: 'Contact Inquiries', description: 'View and reply to public contact form submissions' },
+    ]
+  },
+  {
+    category: 'Administration & Security',
+    icon: 'Lock',
+    permissions: [
+      { id: 'subadmins.manage', label: 'Manage Subadmins & Roles', description: 'Provision new subadmins, assign permissions, and revoke access' },
+      { id: 'settings.manage', label: 'CMS & Global Settings', description: 'Configure SEO metadata, system toggles, and platform branding' },
+    ]
+  }
+];
+
+export const ADMIN_ROLE_PRESETS = [
+  {
+    id: 'operations_manager',
+    name: 'Event Operations Manager',
+    badge: 'Operations',
+    badgeColor: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/30',
+    description: 'Full control over events, organizers, exhibitors, categories, and sponsors',
+    permissions: [
+      'dashboard.view',
+      'events.view',
+      'events.manage',
+      'categories.view',
+      'categories.manage',
+      'organizers.view',
+      'organizers.manage',
+      'exhibitors.view',
+      'exhibitors.manage',
+      'visitors.view',
+      'attendees.view',
+      'sponsors.manage'
+    ]
+  },
+  {
+    id: 'content_moderator',
+    name: 'Content & Moderation Officer',
+    badge: 'Moderation',
+    badgeColor: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30',
+    description: 'Reviews and approves pending applications, reviews, FAQs, and contact inquiries',
+    permissions: [
+      'dashboard.view',
+      'moderation.view',
+      'moderation.manage',
+      'reviews.manage',
+      'faqs.manage',
+      'contacts.manage'
+    ]
+  },
+  {
+    id: 'finance_admin',
+    name: 'Billing & Financial Controller',
+    badge: 'Finance',
+    badgeColor: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30',
+    description: 'Inspects and manages invoices, subscriptions, orders, and commercial data',
+    permissions: [
+      'dashboard.view',
+      'subscriptions.view',
+      'subscriptions.manage',
+      'invoices.view',
+      'tickets.manage'
+    ]
+  },
+  {
+    id: 'full_admin',
+    name: 'Executive Administrator',
+    badge: 'Full Access',
+    badgeColor: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/30',
+    description: 'All permissions across the entire platform except subadmin provisioning',
+    permissions: [
+      'dashboard.view',
+      'moderation.view',
+      'moderation.manage',
+      'events.view',
+      'events.manage',
+      'categories.view',
+      'categories.manage',
+      'organizers.view',
+      'organizers.manage',
+      'exhibitors.view',
+      'exhibitors.manage',
+      'visitors.view',
+      'attendees.view',
+      'sponsors.manage',
+      'faqs.manage',
+      'reviews.manage',
+      'users.view',
+      'users.manage',
+      'rapid_creation.access',
+      'subscriptions.view',
+      'subscriptions.manage',
+      'invoices.view',
+      'tickets.manage',
+      'contacts.manage',
+      'settings.manage'
+    ]
+  }
+];
+
+// @desc    Get permissions registry and preset role templates
+// @route   GET /api/admin/subadmins/permissions-schema
+router.get('/subadmins/permissions-schema', async (req, res) => {
+  res.status(200).json({
+    success: true,
+    modules: ADMIN_PERMISSION_MODULES,
+    presets: ADMIN_ROLE_PRESETS
+  });
+});
+
+// @desc    Get all subadmins and super admins
+// @route   GET /api/admin/subadmins
+router.get('/subadmins', async (req, res, next) => {
+  try {
+    const subadmins = await User.find({
+      role: { $in: ['sub_admin', 'super_admin'] }
+    })
+      .select('-password')
+      .sort({ role: -1, createdAt: -1 })
+      .lean();
+
+    const totalSubadmins = subadmins.filter(u => u.role === 'sub_admin').length;
+    const activeSubadmins = subadmins.filter(u => u.role === 'sub_admin' && u.status === 'active' && !u.isSuspended).length;
+    const suspendedSubadmins = subadmins.filter(u => u.role === 'sub_admin' && (u.status === 'suspended' || u.isSuspended)).length;
+    const superAdmins = subadmins.filter(u => u.role === 'super_admin').length;
+
+    res.status(200).json({
+      success: true,
+      subadmins,
+      counts: {
+        total: totalSubadmins,
+        active: activeSubadmins,
+        suspended: suspendedSubadmins,
+        superAdmins
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Create a new subadmin account
+// @route   POST /api/admin/subadmins
+router.post('/subadmins', async (req, res, next) => {
+  try {
+    const { name, email, password, adminRole, permissions, phone, status } = req.body;
+
+    if (!name || !name.trim()) {
+      return res.status(400).json({ success: false, error: 'Subadmin full name is required' });
+    }
+    if (!email || !email.trim()) {
+      return res.status(400).json({ success: false, error: 'Subadmin email address is required' });
+    }
+    if (!password || password.length < 6) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters' });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const existing = await User.findOne({ email: normalizedEmail });
+    if (existing) {
+      return res.status(409).json({ success: false, error: `A user with email "${normalizedEmail}" already exists (Role: ${existing.role}).` });
+    }
+
+    const assignedPermissions = Array.isArray(permissions) ? permissions : [];
+    const assignedRoleTitle = (adminRole || 'Sub Administrator').trim();
+
+    const subadmin = await User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      password: password,
+      role: 'sub_admin',
+      adminRole: assignedRoleTitle,
+      permissions: assignedPermissions,
+      phone: phone || '',
+      isVerified: true,
+      isPhoneVerified: true,
+      status: status === 'suspended' ? 'suspended' : 'active',
+      isSuspended: status === 'suspended',
+      authProvider: 'local',
+      hasCustomPassword: true
+    });
+
+    const responseUser = await User.findById(subadmin._id).select('-password').lean();
+
+    res.status(201).json({
+      success: true,
+      message: `Subadmin "${name}" created successfully with ${assignedPermissions.length} permissions!`,
+      subadmin: responseUser
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Update a subadmin's permissions, role, status, or credentials
+// @route   PUT /api/admin/subadmins/:id
+router.put('/subadmins/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, adminRole, permissions, status, phone, password } = req.body;
+
+    const subadmin = await User.findById(id);
+    if (!subadmin) {
+      return res.status(404).json({ success: false, error: 'Subadmin account not found' });
+    }
+
+    if (name && name.trim()) subadmin.name = name.trim();
+    if (adminRole !== undefined) subadmin.adminRole = adminRole.trim();
+    if (Array.isArray(permissions)) subadmin.permissions = permissions;
+    if (phone !== undefined) subadmin.phone = phone.trim();
+
+    if (status !== undefined) {
+      subadmin.status = status;
+      subadmin.isSuspended = status === 'suspended';
+      if (status === 'suspended') {
+        subadmin.suspendedAt = new Date();
+      } else {
+        subadmin.suspendedAt = null;
+      }
+    }
+
+    if (password && password.trim().length >= 6) {
+      subadmin.password = password.trim();
+    }
+
+    await subadmin.save();
+
+    const updatedUser = await User.findById(subadmin._id).select('-password').lean();
+
+    res.status(200).json({
+      success: true,
+      message: `Subadmin "${subadmin.name}" updated successfully!`,
+      subadmin: updatedUser
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Delete or revoke a subadmin account
+// @route   DELETE /api/admin/subadmins/:id
+router.delete('/subadmins/:id', async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const targetUser = await User.findById(id);
+    if (!targetUser) {
+      return res.status(404).json({ success: false, error: 'Subadmin account not found' });
+    }
+
+    // Protect Super Admin from deletion through this route
+    if (targetUser.role === 'super_admin') {
+      return res.status(403).json({ success: false, error: 'Cannot delete a Super Admin account.' });
+    }
+
+    // Prevent user deleting themselves
+    if (req.user && req.user.id && req.user.id.toString() === id.toString()) {
+      return res.status(400).json({ success: false, error: 'You cannot delete your own administrative account.' });
+    }
+
+    await User.findByIdAndDelete(id);
+
+    res.status(200).json({
+      success: true,
+      message: `Subadmin account "${targetUser.name}" (${targetUser.email}) has been permanently deleted.`
+    });
   } catch (error) {
     next(error);
   }
