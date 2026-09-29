@@ -27,6 +27,7 @@ import engagementRoutes from './routes/engagementRoutes.js';
 import reviewRoutes from './routes/reviewRoutes.js';
 import faqRoutes from './routes/faqRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
+import venueRoutes from './routes/venueRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -121,6 +122,7 @@ app.use('/api/engagements', engagementRoutes);
 app.use('/api/reviews', reviewRoutes);
 app.use('/api/faqs', faqRoutes);
 app.use('/api/categories', categoryRoutes);
+app.use('/api/venues', venueRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
