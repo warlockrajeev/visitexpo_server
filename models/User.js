@@ -62,6 +62,14 @@ const UserSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
+    interests: {
+      type: [String],
+      default: []
+    },
+    preferredLocations: {
+      type: [String],
+      default: []
+    },
     isVerified: {
       type: Boolean,
       default: false

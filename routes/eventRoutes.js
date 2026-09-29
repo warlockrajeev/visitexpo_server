@@ -15,6 +15,8 @@ import { protect, authorize } from '../middlewares/auth.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
+import RecommendationService from '../services/RecommendationService.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 
 const router = express.Router();
 
@@ -121,6 +123,63 @@ router.get('/venues', wordpressLimiter, async (req, res, next) => {
   try {
     const venues = await EventService.getVenues();
     res.status(200).json({ success: true, venues });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==========================================
+// RECOMMENDATION ENGINE ENDPOINTS
+// ==========================================
+
+// Get personalized or criteria-based event recommendations
+router.get('/recommendations', async (req, res, next) => {
+  try {
+    const { location, interests, lat, lng, exclude, limit, timeframe } = req.query;
+
+    let userId = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const decoded = verifyAccessToken(authHeader.split(' ')[1]);
+      if (decoded?.id) userId = decoded.id;
+    }
+
+    const result = await RecommendationService.getRecommendations({
+      location,
+      interests,
+      lat,
+      lng,
+      userId,
+      excludeEventId: exclude,
+      limit: parseInt(limit, 10) || 10,
+      timeframe: timeframe || 'upcoming'
+    });
+
+    res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Metadata endpoint for recommendation filters (cities, categories, curated interest sectors)
+router.get('/recommendations/meta', async (req, res, next) => {
+  try {
+    const meta = await RecommendationService.getRecommendationMeta();
+    res.status(200).json(meta);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Save user recommendation preferences (cities & interests)
+router.post('/recommendations/preferences', protect, async (req, res, next) => {
+  try {
+    const { interests, preferredLocations } = req.body;
+    const updated = await RecommendationService.saveUserPreferences(req.user._id, {
+      interests,
+      preferredLocations
+    });
+    res.status(200).json({ success: true, message: 'Recommendation preferences updated', data: updated });
   } catch (error) {
     next(error);
   }
