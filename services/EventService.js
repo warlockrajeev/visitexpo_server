@@ -318,6 +318,10 @@ class EventService {
     return await EventRepository.getOrganizers();
   }
 
+  async getVenues() {
+    return await EventRepository.getVenues();
+  }
+
   _slugify(text) {
     return text
       .toString()

@@ -67,9 +67,9 @@ async function syncDefaultTicketTier(eventId, body) {
 // Get events list with pagination, search, sorting and filtering
 router.get('/', wordpressLimiter, async (req, res, next) => {
   try {
-    const { search, category, city, page, limit, sort, organizerId, status, all } = req.query;
+    const { search, category, city, venue, page, limit, sort, organizerId, status, all } = req.query;
     
-    const filters = { search, category, city, organizerId, status, all };
+    const filters = { search, category, city, venue, organizerId, status, all };
     
     // Default options
     const options = {
@@ -111,6 +111,16 @@ router.get('/organizers', wordpressLimiter, async (req, res, next) => {
   try {
     const organizers = await EventService.getOrganizers();
     res.status(200).json({ success: true, organizers });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Distinct list of venues with total and upcoming event counts
+router.get('/venues', wordpressLimiter, async (req, res, next) => {
+  try {
+    const venues = await EventService.getVenues();
+    res.status(200).json({ success: true, venues });
   } catch (error) {
     next(error);
   }

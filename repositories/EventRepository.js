@@ -72,6 +72,38 @@ class EventRepository extends BaseRepository {
     ]);
   }
 
+  async getVenues() {
+    const now = new Date();
+    return await this.model.aggregate([
+      { $match: { venue: { $exists: true, $ne: '' } } },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$venue' } } },
+          venueName: { $first: '$venue' },
+          city: { $first: '$city' },
+          country: { $first: '$country' },
+          totalEvents: { $sum: 1 },
+          upcomingEvents: {
+            $sum: {
+              $cond: [
+                {
+                  $or: [
+                    { $gte: ['$endDate', now] },
+                    { $gte: ['$startDate', now] }
+                  ]
+                },
+                1,
+                0
+              ]
+            }
+          },
+          sampleEventImage: { $first: '$banner' }
+        }
+      },
+      { $sort: { upcomingEvents: -1, totalEvents: -1 } }
+    ]);
+  }
+
   async searchAndPaginate(filters = {}, options = {}) {
     const filter = {};
 
@@ -97,6 +129,10 @@ class EventRepository extends BaseRepository {
 
     if (filters.city) {
       filter.city = { $regex: filters.city, $options: 'i' };
+    }
+
+    if (filters.venue) {
+      filter.venue = { $regex: filters.venue, $options: 'i' };
     }
 
     if (filters.organizerId) {
