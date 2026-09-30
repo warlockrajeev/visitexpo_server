@@ -6,6 +6,12 @@
 import express from 'express';
 import EventService from '../services/EventService.js';
 import Ticket from '../models/Ticket.js';
+import Visitor from '../models/Visitor.js';
+import Exhibitor from '../models/Exhibitor.js';
+import Lead from '../models/Lead.js';
+import Campaign from '../models/Campaign.js';
+import Session from '../models/Session.js';
+import EventEngagement from '../models/EventEngagement.js';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import DeletedOrganizer from '../models/DeletedOrganizer.js';
@@ -505,11 +511,12 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
 });
 
 // Delete event
-router.delete('/:id', protect, authorize('super_admin', 'organizer'), async (req, res, next) => {
+router.delete('/:id', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
   try {
     const targetId = req.params.id;
     const isSuperAdmin = req.user.role === 'super_admin';
-    const callerOrg = req.user.organization;
+    const callerOrg = req.user.organization?._id || req.user.organization;
+    const callerId = req.user.id;
 
     let event = null;
     try {
@@ -526,10 +533,35 @@ router.delete('/:id', protect, authorize('super_admin', 'organizer'), async (req
     }
 
     if (event) {
-      if (!isSuperAdmin && String(event.organizer) !== String(callerOrg)) {
+      const isOwner =
+        isSuperAdmin ||
+        (event.organizer && callerOrg && String(event.organizer) === String(callerOrg)) ||
+        (event.claimedBy && callerId && String(event.claimedBy) === String(callerId));
+
+      if (!isOwner) {
         return res.status(403).json({ success: false, error: 'Unauthorized to delete this event' });
       }
-      await Event.findByIdAndDelete(event._id);
+
+      const eventIdentifiers = [String(event._id), event.wpPostId].filter(Boolean);
+      const eventSlugs = [event.slug].filter(Boolean);
+
+      await Promise.all([
+        Ticket.deleteMany({ event: event._id }),
+        Visitor.deleteMany({ event: event._id }),
+        Exhibitor.deleteMany({ event: event._id }),
+        Lead.deleteMany({ event: event._id }),
+        Campaign.deleteMany({ event: event._id }),
+        Session.deleteMany({ event: event._id }),
+        EventEngagement.deleteMany({
+          $or: [
+            { eventId: { $in: eventIdentifiers } },
+            { eventSlug: { $in: eventSlugs } }
+          ]
+        }),
+        Event.findByIdAndDelete(event._id)
+      ]);
+    } else if (!isSuperAdmin) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
     }
 
     // Record in DeletedEvent for permanent exclusion across WordPress and aggregated directory
