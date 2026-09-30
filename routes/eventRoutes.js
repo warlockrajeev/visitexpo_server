@@ -533,10 +533,16 @@ router.delete('/:id', protect, authorize('super_admin', 'organizer', 'event_mana
     }
 
     if (event) {
+      const userEmail = (req.user.email || '').toLowerCase().trim();
+      const eventOrgEmail = (event.organizerEmail || event.orgEmail || '').toLowerCase().trim();
+
       const isOwner =
         isSuperAdmin ||
         (event.organizer && callerOrg && String(event.organizer) === String(callerOrg)) ||
-        (event.claimedBy && callerId && String(event.claimedBy) === String(callerId));
+        (event.organizer && callerId && String(event.organizer) === String(callerId)) ||
+        (event.claimedBy && callerId && String(event.claimedBy) === String(callerId)) ||
+        (event.claimedBy && callerOrg && String(event.claimedBy) === String(callerOrg)) ||
+        (userEmail && eventOrgEmail && userEmail === eventOrgEmail);
 
       if (!isOwner) {
         return res.status(403).json({ success: false, error: 'Unauthorized to delete this event' });

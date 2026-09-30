@@ -4,12 +4,9 @@
 // Includes reviews and FAQ management routes.
  */
 
-import dotenv from 'dotenv';
+import 'dotenv/config';
 import app from './app.js';
 import connectDB from './config/db.js';
-
-// Load Env variables
-dotenv.config();
 
 const PORT = process.env.PORT || 5000;
 
