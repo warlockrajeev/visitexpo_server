@@ -27,8 +27,14 @@ router.get('/', async (req, res, next) => {
         const event = await Event.findById(eventId);
         const orgId = req.user.organization;
         const userId = req.user.id;
+        const userEmail = (req.user.email || '').toLowerCase().trim();
+        const eventOrgEmail = (event?.organizerEmail || event?.orgEmail || '').toLowerCase().trim();
+
         const isOwner = (event?.organizer && orgId && event.organizer.toString() === orgId.toString()) ||
-                        (event?.claimedBy && userId && event.claimedBy.toString() === userId.toString());
+                        (event?.organizer && userId && event.organizer.toString() === userId.toString()) ||
+                        (event?.claimedBy && userId && event.claimedBy.toString() === userId.toString()) ||
+                        (event?.claimedBy && orgId && event.claimedBy.toString() === orgId.toString()) ||
+                        (eventOrgEmail && userEmail && eventOrgEmail === userEmail);
         if (!event || !isOwner) {
           return res.status(403).json({ success: false, error: 'Not authorized to access leads for this event' });
         }
@@ -36,12 +42,25 @@ router.get('/', async (req, res, next) => {
       query.event = eventId;
     } else {
       if (req.user.role === 'organizer') {
-        const myEvents = await Event.find({
-          $or: [
-            { organizer: req.user.organization },
-            { claimedBy: req.user.id }
-          ]
-        });
+        const orgId = req.user.organization;
+        const userId = req.user.id;
+        const userEmail = (req.user.email || '').toLowerCase().trim();
+
+        const orConditions = [];
+        if (orgId) {
+          orConditions.push({ organizer: orgId });
+          orConditions.push({ claimedBy: orgId });
+        }
+        if (userId) {
+          orConditions.push({ organizer: userId });
+          orConditions.push({ claimedBy: userId });
+        }
+        if (userEmail) {
+          orConditions.push({ orgEmail: userEmail });
+          orConditions.push({ organizerEmail: userEmail });
+        }
+
+        const myEvents = await Event.find(orConditions.length > 0 ? { $or: orConditions } : {});
         const myEventIds = myEvents.map(e => e._id);
         query.event = { $in: myEventIds };
       }
@@ -119,6 +138,23 @@ router.post('/', async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Target event not found' });
     }
 
+    if (req.user.role === 'organizer') {
+      const orgId = req.user.organization;
+      const userId = req.user.id;
+      const userEmail = (req.user.email || '').toLowerCase().trim();
+      const eventOrgEmail = (event.organizerEmail || event.orgEmail || '').toLowerCase().trim();
+
+      const isOwner = (event.organizer && orgId && event.organizer.toString() === orgId.toString()) ||
+                      (event.organizer && userId && event.organizer.toString() === userId.toString()) ||
+                      (event.claimedBy && userId && event.claimedBy.toString() === userId.toString()) ||
+                      (event.claimedBy && orgId && event.claimedBy.toString() === orgId.toString()) ||
+                      (eventOrgEmail && userEmail && eventOrgEmail === userEmail);
+
+      if (!isOwner) {
+        return res.status(403).json({ success: false, error: 'You can only add leads to events you organize or manage.' });
+      }
+    }
+
     const newLead = await Lead.create({
       name: name.trim(),
       email: email.toLowerCase().trim(),
@@ -163,6 +199,23 @@ router.post('/bulk', async (req, res, next) => {
     const event = await Event.findById(eventId);
     if (!event) {
       return res.status(404).json({ success: false, error: 'Target event not found' });
+    }
+
+    if (req.user.role === 'organizer') {
+      const orgId = req.user.organization;
+      const userId = req.user.id;
+      const userEmail = (req.user.email || '').toLowerCase().trim();
+      const eventOrgEmail = (event.organizerEmail || event.orgEmail || '').toLowerCase().trim();
+
+      const isOwner = (event.organizer && orgId && event.organizer.toString() === orgId.toString()) ||
+                      (event.organizer && userId && event.organizer.toString() === userId.toString()) ||
+                      (event.claimedBy && userId && event.claimedBy.toString() === userId.toString()) ||
+                      (event.claimedBy && orgId && event.claimedBy.toString() === orgId.toString()) ||
+                      (eventOrgEmail && userEmail && eventOrgEmail === userEmail);
+
+      if (!isOwner) {
+        return res.status(403).json({ success: false, error: 'You can only import leads to events you organize or manage.' });
+      }
     }
 
     const preparedLeads = leads

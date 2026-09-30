@@ -136,9 +136,13 @@ class EventRepository extends BaseRepository {
     }
 
     if (filters.organizerId) {
+      const rawIds = Array.isArray(filters.organizerId)
+        ? filters.organizerId
+        : String(filters.organizerId).split(',').map(s => s.trim()).filter(Boolean);
+      const ids = rawIds.map(id => (mongoose.isValidObjectId(id) ? new mongoose.Types.ObjectId(id) : id));
       filter.$or = [
-        { organizer: filters.organizerId },
-        { claimedBy: filters.organizerId }
+        { organizer: { $in: ids } },
+        { claimedBy: { $in: ids } }
       ];
       // Organizers should be able to view draft events too
       delete filter.status;
