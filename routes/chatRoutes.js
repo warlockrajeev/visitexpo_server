@@ -87,16 +87,16 @@ router.get('/conversations', protect, authorize('organizer', 'super_admin', 'eve
 router.patch('/conversations/:id/status', protect, authorize('organizer', 'super_admin', 'event_manager'), updateConversationStatus);
 
 // ==========================================
-// SUPER ADMIN ORGANIZER CHAT MANAGEMENT ROUTES
+// SUPER ADMIN & SUBADMIN ORGANIZER CHAT MANAGEMENT ROUTES
 // ==========================================
 
 // Get all organizers with chat feature status, conversations count, metrics
-router.get('/admin/organizers', protect, authorize('super_admin'), getAdminChatOrganizers);
+router.get('/admin/organizers', protect, authorize('super_admin', 'sub_admin', 'admin'), getAdminChatOrganizers);
 
 // Toggle or update chat settings for any organizer
-router.patch('/admin/organizers/:id/toggle', protect, authorize('super_admin'), adminToggleOrganizerChat);
+router.patch('/admin/organizers/:id/toggle', protect, authorize('super_admin', 'sub_admin', 'admin'), adminToggleOrganizerChat);
 
 // Inspect conversations for a specific organizer
-router.get('/admin/organizers/:id/conversations', protect, authorize('super_admin'), getAdminOrganizerConversations);
+router.get('/admin/organizers/:id/conversations', protect, authorize('super_admin', 'sub_admin', 'admin'), getAdminOrganizerConversations);
 
 export default router;

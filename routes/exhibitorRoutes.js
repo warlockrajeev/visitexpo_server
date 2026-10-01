@@ -254,9 +254,9 @@ router.post('/claim', protect, async (req, res, next) => {
   }
 });
 
-// @desc    Get exhibitor counts by status & attendance type (Super Admin & Organizers)
+// @desc    Get exhibitor counts by status & attendance type (Super Admin, Subadmin & Organizers)
 // @route   GET /api/exhibitors/stats
-router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
+router.get('/stats', protect, authorize('super_admin', 'sub_admin', 'admin', 'organizer', 'event_manager'), async (req, res, next) => {
   try {
     const { eventId } = req.query;
     const query = {};
@@ -299,7 +299,7 @@ router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manag
 });
 
 // Get exhibitors list
-router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 'sales_team', 'support'), async (req, res, next) => {
+router.get('/', protect, authorize('super_admin', 'sub_admin', 'admin', 'organizer', 'event_manager', 'sales_team', 'support'), async (req, res, next) => {
   try {
     const { eventId, status, search, page, limit } = req.query;
 
@@ -635,8 +635,8 @@ router.put('/:id', protect, async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Exhibitor not found' });
     }
 
-    // Authorization check: either super_admin/organizer/event_manager OR the exhibitor themselves editing their own profile
-    const isMgmt = ['super_admin', 'organizer', 'event_manager'].includes(req.user.role);
+    // Authorization check: either super_admin/sub_admin/admin/organizer/event_manager OR the exhibitor themselves editing their own profile
+    const isMgmt = ['super_admin', 'sub_admin', 'admin', 'organizer', 'event_manager'].includes(req.user.role);
     const isSelf = req.user.role === 'exhibitor' && exhibitor.contactEmail === req.user.email;
 
     if (!isMgmt && !isSelf) {
@@ -688,8 +688,8 @@ router.put('/:id', protect, async (req, res, next) => {
   }
 });
 
-// Approve/Reject Exhibitor (Super Admin only)
-router.put('/:id/status', protect, authorize('super_admin'), async (req, res, next) => {
+// Approve/Reject Exhibitor (Super Admin & Subadmins)
+router.put('/:id/status', protect, authorize('super_admin', 'sub_admin', 'admin'), async (req, res, next) => {
   try {
     const { status } = req.body;
 
@@ -763,7 +763,7 @@ router.put('/:id/status', protect, authorize('super_admin'), async (req, res, ne
 });
 
 // Delete Exhibitor
-router.delete('/:id', protect, authorize('super_admin', 'organizer'), async (req, res, next) => {
+router.delete('/:id', protect, authorize('super_admin', 'sub_admin', 'admin', 'organizer'), async (req, res, next) => {
   try {
     const exhibitor = await Exhibitor.findById(req.params.id);
     if (!exhibitor) {
