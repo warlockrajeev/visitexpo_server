@@ -87,11 +87,19 @@ router.get('/', async (req, res) => {
   try {
     await seedDefaultFaqsIfNeeded();
 
-    const { category } = req.query;
+    const { category, contentType, includeGuides } = req.query;
     const filter = { isActive: true };
 
     if (category && category !== 'All' && category !== 'all') {
       filter.category = new RegExp(`^${category.trim()}$`, 'i');
+    }
+    if (contentType && ['faq', 'guide'].includes(contentType)) {
+      filter.contentType = contentType;
+    } else if (includeGuides !== 'true') {
+      filter.$or = [
+        { contentType: 'faq' },
+        { contentType: { $exists: false } }
+      ];
     }
 
     const faqs = await Faq.find(filter)
@@ -187,7 +195,7 @@ router.get('/admin/all', protect, authorize('super_admin'), async (req, res) => 
  */
 router.post('/admin', protect, authorize('super_admin'), async (req, res) => {
   try {
-    const { question, answer, category, order, isActive } = req.body;
+    const { question, answer, category, contentType, images, order, isActive } = req.body;
 
     if (!question || !answer) {
       return res.status(400).json({
@@ -200,6 +208,8 @@ router.post('/admin', protect, authorize('super_admin'), async (req, res) => {
       question: question.trim(),
       answer: answer.trim(),
       category: (category || 'General').trim(),
+      contentType: ['faq', 'guide'].includes(contentType) ? contentType : 'faq',
+      images: Array.isArray(images) ? images.filter((image) => typeof image === 'string' && image.trim()).map((image) => image.trim()).slice(0, 8) : [],
       order: Number(order) || 0,
       isActive: isActive !== undefined ? Boolean(isActive) : true,
       createdBy: req.user?._id || null
@@ -222,12 +232,18 @@ router.post('/admin', protect, authorize('super_admin'), async (req, res) => {
  */
 router.put('/admin/:id', protect, authorize('super_admin'), async (req, res) => {
   try {
-    const { question, answer, category, order, isActive } = req.body;
+    const { question, answer, category, contentType, images, order, isActive } = req.body;
 
     const update = {};
     if (question !== undefined) update.question = question.trim();
     if (answer !== undefined) update.answer = answer.trim();
     if (category !== undefined) update.category = category.trim();
+    if (contentType !== undefined && ['faq', 'guide'].includes(contentType)) update.contentType = contentType;
+    if (images !== undefined) {
+      update.images = Array.isArray(images)
+        ? images.filter((image) => typeof image === 'string' && image.trim()).map((image) => image.trim()).slice(0, 8)
+        : [];
+    }
     if (order !== undefined) update.order = Number(order);
     if (isActive !== undefined) update.isActive = Boolean(isActive);
 

@@ -20,6 +20,16 @@ const FaqSchema = new mongoose.Schema(
       required: [true, 'FAQ answer is required'],
       trim: true
     },
+    contentType: {
+      type: String,
+      enum: ['faq', 'guide'],
+      default: 'faq',
+      index: true
+    },
+    images: {
+      type: [String],
+      default: []
+    },
     category: {
       type: String,
       default: 'General',
