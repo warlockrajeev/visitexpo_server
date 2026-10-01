@@ -61,6 +61,19 @@ const OrganizationSchema = new mongoose.Schema(
       instagram: { type: String, default: '' },
       x: { type: String, default: '' }
     },
+    isChatEnabled: {
+      type: Boolean,
+      default: false
+    },
+    chatStatus: {
+      type: String,
+      enum: ['online', 'offline', 'away'],
+      default: 'offline'
+    },
+    chatWelcomeMessage: {
+      type: String,
+      default: 'Hello! Welcome to our exhibition desk. How can we assist you today?'
+    },
     subscription: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Subscription',

@@ -17,7 +17,10 @@ class EventRepository extends BaseRepository {
     const query = isId
       ? { $or: [{ slug }, { _id: slug }] }
       : { slug };
-    return await this.model.findOne(query).populate('organizer', 'name logo website description email phone');
+    return await this.model
+      .findOne(query)
+      .populate('organizer', 'name logo website description email phone isChatEnabled chatWelcomeMessage chatStatus')
+      .populate('claimedBy', 'name email role isVerified isChatEnabled chatWelcomeMessage chatStatus');
   }
 
   async findUpcoming(limit = 5) {

@@ -987,12 +987,14 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     return false;
   };
 
+  const getOrgKey = (name) => (name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
   const orgMap = {};
 
   // Initialize known organizers
   ORGANIZERS_KNOWN_METADATA.forEach(ko => {
-    orgMap[ko.name] = {
-      id: ko.id,
+    const kKey = ko.id || getOrgKey(ko.name);
+    orgMap[kKey] = {
+      id: ko.id || kKey,
       name: ko.name,
       shortName: ko.shortName,
       brandColor: ko.brandColor,
@@ -1011,7 +1013,8 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
 
   // Merge registered MongoDB Organizations
   mongoOrgs.forEach(mo => {
-    const matchedKnown = Object.values(orgMap).find(o => 
+    const moKey = getOrgKey(mo.name);
+    const matchedKnown = orgMap[moKey] || Object.values(orgMap).find(o => 
       o.name.toLowerCase() === mo.name.toLowerCase() ||
       (mo.name.toLowerCase().includes('global tech') && o.name.toLowerCase().includes('global tech'))
     );
@@ -1024,8 +1027,8 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       matchedKnown.tenantId = String(mo._id);
     } else {
       const colors = getDynamicBrandColors(mo.name);
-      orgMap[mo.name] = {
-        id: mo.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+      orgMap[moKey] = {
+        id: moKey,
         name: mo.name,
         shortName: mo.name,
         brandColor: colors.brand,
@@ -1070,11 +1073,12 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
 
     const rawOrgName = m.ovaem_org_name?.[0] || d.organizer || 'Verified Organizer';
     const resolvedName = resolveOrganizer(rawOrgName);
+    const orgKey = getOrgKey(resolvedName);
 
-    if (!orgMap[resolvedName]) {
+    if (!orgMap[orgKey]) {
       const colors = getDynamicBrandColors(resolvedName);
-      orgMap[resolvedName] = {
-        id: resolvedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+      orgMap[orgKey] = {
+        id: orgKey,
         name: resolvedName,
         shortName: resolvedName,
         brandColor: colors.brand,
@@ -1090,17 +1094,17 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
         events: []
       };
     } else {
-      if (!orgMap[resolvedName].website && m.ovaem_org_website?.[0]) {
-        orgMap[resolvedName].website = m.ovaem_org_website[0];
+      if (!orgMap[orgKey].website && m.ovaem_org_website?.[0]) {
+        orgMap[orgKey].website = m.ovaem_org_website[0];
       }
-      if (!orgMap[resolvedName].email && m.ovaem_org_email?.[0]) {
-        orgMap[resolvedName].email = m.ovaem_org_email[0];
+      if (!orgMap[orgKey].email && m.ovaem_org_email?.[0]) {
+        orgMap[orgKey].email = m.ovaem_org_email[0];
       }
-      if (!orgMap[resolvedName].phone && m.ovaem_org_phone?.[0]) {
-        orgMap[resolvedName].phone = m.ovaem_org_phone[0];
+      if (!orgMap[orgKey].phone && m.ovaem_org_phone?.[0]) {
+        orgMap[orgKey].phone = m.ovaem_org_phone[0];
       }
-      if ((!orgMap[resolvedName].scope || orgMap[resolvedName].scope.length < 30) && m.ovaem_org_desc?.[0]) {
-        orgMap[resolvedName].scope = m.ovaem_org_desc[0];
+      if ((!orgMap[orgKey].scope || orgMap[orgKey].scope.length < 30) && m.ovaem_org_desc?.[0]) {
+        orgMap[orgKey].scope = m.ovaem_org_desc[0];
       }
     }
 
@@ -1127,7 +1131,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       isWordPress: true
     };
 
-    orgMap[resolvedName].events.push(evtObj);
+    orgMap[orgKey].events.push(evtObj);
   });
 
   // Process MongoDB Events with slug deduplication
@@ -1158,11 +1162,12 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     }
 
     const resolvedName = resolveOrganizer(orgName);
+    const orgKey = getOrgKey(resolvedName);
 
-    if (!orgMap[resolvedName]) {
+    if (!orgMap[orgKey]) {
       const colors = getDynamicBrandColors(resolvedName);
-      orgMap[resolvedName] = {
-        id: resolvedName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''),
+      orgMap[orgKey] = {
+        id: orgKey,
         name: resolvedName,
         shortName: resolvedName,
         brandColor: colors.brand,
@@ -1180,7 +1185,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     }
 
     const realMongoImg = me.banner || me.coverImage || me.thumbnail || me.image || getWpImage(me.slug, me._id, me.wpPostId, me.title);
-    orgMap[resolvedName].events.push({
+    orgMap[orgKey].events.push({
       id: String(me._id),
       title: me.title,
       slug: me.slug,

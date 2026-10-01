@@ -333,6 +333,10 @@ router.get('/me', protect, async (req, res, next) => {
         isVerified: userDoc.isVerified,
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,
         organization: userDoc.organization,
+        isChatEnabled: !!userDoc.isChatEnabled,
+        chatStatus: userDoc.chatStatus || 'offline',
+        chatWelcomeMessage: userDoc.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?',
+        chatAutoReply: userDoc.chatAutoReply !== false,
         authProvider: userDoc.authProvider || 'local',
         hasCustomPassword: userDoc.hasCustomPassword !== undefined ? userDoc.hasCustomPassword : (userDoc.authProvider !== 'google')
       }

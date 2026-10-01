@@ -100,6 +100,23 @@ const UserSchema = new mongoose.Schema(
       enum: ['active', 'suspended', 'pending'],
       default: 'active'
     },
+    isChatEnabled: {
+      type: Boolean,
+      default: false
+    },
+    chatStatus: {
+      type: String,
+      enum: ['online', 'offline', 'away'],
+      default: 'offline'
+    },
+    chatWelcomeMessage: {
+      type: String,
+      default: 'Hello! Welcome to our exhibition desk. How can we assist you today?'
+    },
+    chatAutoReply: {
+      type: Boolean,
+      default: true
+    },
     suspendedAt: {
       type: Date,
       default: null
