@@ -891,3 +891,305 @@ export const getOrganizersWithExpos = async (req, res, next) => {
     next(error);
   }
 };
+
+/**
+ * @desc Get all Organizers with their Live Chat enablement status & stats for Super Admin
+ * @route GET /api/chat/admin/organizers
+ * @access Private (Super Admin)
+ */
+export const getAdminChatOrganizers = async (req, res, next) => {
+  try {
+    const { status, search } = req.query; // status: 'all' | 'enabled' | 'online' | 'disabled'
+
+    // 1. Fetch all registered organizer users and organizations from DB
+    const [organizerUsers, mongoOrgs, events] = await Promise.all([
+      User.find({ role: { $in: ['organizer', 'super_admin', 'event_manager'] } })
+        .select('name email phone organization isChatEnabled chatStatus chatWelcomeMessage chatAutoReply isVerified company createdAt lastLogin')
+        .populate('organization', 'name logo website')
+        .lean(),
+      Organization.find()
+        .select('name logo website contact isChatEnabled chatStatus chatWelcomeMessage chatAutoReply createdAt')
+        .lean(),
+      Event.find().select('title organizer organizerName organization claimedBy').lean()
+    ]);
+
+    // 2. Fetch conversation statistics grouped by organizer
+    const conversationStats = await ChatConversation.aggregate([
+      {
+        $group: {
+          _id: '$organizer',
+          totalConversations: { $sum: 1 },
+          unreadByOrganizer: { $sum: '$unreadByOrganizer' },
+          lastMessageAt: { $max: '$lastMessageAt' }
+        }
+      }
+    ]);
+
+    const statsMap = new Map();
+    conversationStats.forEach((s) => {
+      statsMap.set(String(s._id), s);
+    });
+
+    // 3. Count events per organizer / organization
+    const eventsCountByOrg = new Map();
+    const eventsCountByUser = new Map();
+    events.forEach((e) => {
+      if (e.organization) {
+        const oId = String(e.organization);
+        eventsCountByOrg.set(oId, (eventsCountByOrg.get(oId) || 0) + 1);
+      }
+      if (e.claimedBy) {
+        const uId = String(e.claimedBy);
+        eventsCountByUser.set(uId, (eventsCountByUser.get(uId) || 0) + 1);
+      }
+    });
+
+    // 4. Transform organizer users into standardized admin view
+    let list = organizerUsers.map((u) => {
+      const uId = String(u._id);
+      const orgId = u.organization?._id ? String(u.organization._id) : null;
+
+      const convStat = statsMap.get(uId) || (orgId ? statsMap.get(orgId) : null) || {
+        totalConversations: 0,
+        unreadByOrganizer: 0,
+        lastMessageAt: null
+      };
+
+      const eventsCount =
+        (eventsCountByUser.get(uId) || 0) +
+        (orgId ? (eventsCountByOrg.get(orgId) || 0) : 0);
+
+      return {
+        id: uId,
+        userId: uId,
+        organizationId: orgId,
+        name: u.name || 'Unnamed Organizer',
+        email: u.email,
+        phone: u.phone || '',
+        company: u.company || u.organization?.name || 'Independent Organizer',
+        role: u.role,
+        isVerified: !!u.isVerified,
+        isChatEnabled: !!u.isChatEnabled,
+        chatStatus: u.chatStatus || (u.isChatEnabled ? 'online' : 'offline'),
+        chatWelcomeMessage: u.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?',
+        chatAutoReply: u.chatAutoReply !== false,
+        organizationName: u.organization?.name || '',
+        organizationLogo: u.organization?.logo || null,
+        organizationWebsite: u.organization?.website || '',
+        eventsCount,
+        totalConversations: convStat.totalConversations || 0,
+        unreadMessages: convStat.unreadByOrganizer || 0,
+        lastMessageAt: convStat.lastMessageAt || null,
+        createdAt: u.createdAt,
+        lastActive: u.lastLogin || convStat.lastMessageAt || u.createdAt
+      };
+    });
+
+    // 5. Also include organizations that do not have a dedicated user account yet
+    const existingOrgIds = new Set(list.map((item) => item.organizationId).filter(Boolean));
+    mongoOrgs.forEach((o) => {
+      const oId = String(o._id);
+      if (!existingOrgIds.has(oId)) {
+        const convStat = statsMap.get(oId) || {
+          totalConversations: 0,
+          unreadByOrganizer: 0,
+          lastMessageAt: null
+        };
+        const eventsCount = eventsCountByOrg.get(oId) || 0;
+
+        list.push({
+          id: oId,
+          userId: null,
+          organizationId: oId,
+          name: o.name,
+          email: o.contact?.email || '',
+          phone: o.contact?.phone || '',
+          company: o.name,
+          role: 'organizer',
+          isVerified: true,
+          isChatEnabled: !!o.isChatEnabled,
+          chatStatus: o.chatStatus || (o.isChatEnabled ? 'online' : 'offline'),
+          chatWelcomeMessage: o.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?',
+          chatAutoReply: o.chatAutoReply !== false,
+          organizationName: o.name,
+          organizationLogo: o.logo || null,
+          organizationWebsite: o.website || '',
+          eventsCount,
+          totalConversations: convStat.totalConversations || 0,
+          unreadMessages: convStat.unreadByOrganizer || 0,
+          lastMessageAt: convStat.lastMessageAt || null,
+          createdAt: o.createdAt,
+          lastActive: convStat.lastMessageAt || o.createdAt
+        });
+      }
+    });
+
+    // Calculate overall stats before filters
+    const statsResult = {
+      totalOrganizers: list.length,
+      chatEnabledCount: list.filter((o) => o.isChatEnabled).length,
+      chatOnlineCount: list.filter((o) => o.isChatEnabled && o.chatStatus === 'online').length,
+      chatOfflineCount: list.filter((o) => o.isChatEnabled && o.chatStatus === 'offline').length,
+      chatDisabledCount: list.filter((o) => !o.isChatEnabled).length,
+      totalConversations: list.reduce((sum, o) => sum + o.totalConversations, 0),
+      totalUnread: list.reduce((sum, o) => sum + o.unreadMessages, 0)
+    };
+
+    // Apply status filter
+    if (status === 'enabled') {
+      list = list.filter((o) => o.isChatEnabled);
+    } else if (status === 'online') {
+      list = list.filter((o) => o.isChatEnabled && o.chatStatus === 'online');
+    } else if (status === 'disabled') {
+      list = list.filter((o) => !o.isChatEnabled);
+    }
+
+    // Apply search filter
+    if (search && search.trim()) {
+      const q = search.toLowerCase().trim();
+      list = list.filter(
+        (o) =>
+          o.name.toLowerCase().includes(q) ||
+          o.email.toLowerCase().includes(q) ||
+          o.company.toLowerCase().includes(q) ||
+          o.organizationName.toLowerCase().includes(q)
+      );
+    }
+
+    // Sort: Chat enabled & active first
+    list.sort((a, b) => {
+      if (a.isChatEnabled && !b.isChatEnabled) return -1;
+      if (!a.isChatEnabled && b.isChatEnabled) return 1;
+      if (b.totalConversations !== a.totalConversations) {
+        return b.totalConversations - a.totalConversations;
+      }
+      return (b.eventsCount || 0) - (a.eventsCount || 0);
+    });
+
+    res.status(200).json({
+      success: true,
+      stats: statsResult,
+      count: list.length,
+      organizers: list
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc Admin toggle or update chat settings for any organizer
+ * @route PATCH /api/chat/admin/organizers/:id/toggle
+ * @access Private (Super Admin)
+ */
+export const adminToggleOrganizerChat = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { isChatEnabled, chatStatus, chatWelcomeMessage, chatAutoReply } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid organizer ID' });
+    }
+
+    // Try finding User
+    let user = await User.findById(id);
+    let org = null;
+
+    if (user) {
+      if (isChatEnabled !== undefined) user.isChatEnabled = isChatEnabled;
+      if (chatStatus !== undefined) user.chatStatus = chatStatus;
+      if (chatWelcomeMessage !== undefined) user.chatWelcomeMessage = chatWelcomeMessage;
+      if (chatAutoReply !== undefined) user.chatAutoReply = chatAutoReply;
+      await user.save();
+
+      // If user has organization, also sync organization
+      if (user.organization) {
+        await Organization.findByIdAndUpdate(user.organization, {
+          isChatEnabled: user.isChatEnabled,
+          chatStatus: user.chatStatus,
+          chatWelcomeMessage: user.chatWelcomeMessage,
+          chatAutoReply: user.chatAutoReply
+        });
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Chat feature ${user.isChatEnabled ? 'enabled' : 'disabled'} for ${user.name}`,
+        organizer: {
+          id: String(user._id),
+          name: user.name,
+          isChatEnabled: user.isChatEnabled,
+          chatStatus: user.chatStatus,
+          chatWelcomeMessage: user.chatWelcomeMessage,
+          chatAutoReply: user.chatAutoReply
+        }
+      });
+    }
+
+    // Otherwise try finding Organization
+    org = await Organization.findById(id);
+    if (org) {
+      if (isChatEnabled !== undefined) org.isChatEnabled = isChatEnabled;
+      if (chatStatus !== undefined) org.chatStatus = chatStatus;
+      if (chatWelcomeMessage !== undefined) org.chatWelcomeMessage = chatWelcomeMessage;
+      if (chatAutoReply !== undefined) org.chatAutoReply = chatAutoReply;
+      await org.save();
+
+      // Also sync any user attached to this organization
+      await User.updateMany(
+        { organization: org._id },
+        {
+          isChatEnabled: org.isChatEnabled,
+          chatStatus: org.chatStatus,
+          chatWelcomeMessage: org.chatWelcomeMessage,
+          chatAutoReply: org.chatAutoReply
+        }
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: `Chat feature ${org.isChatEnabled ? 'enabled' : 'disabled'} for ${org.name}`,
+        organizer: {
+          id: String(org._id),
+          name: org.name,
+          isChatEnabled: org.isChatEnabled,
+          chatStatus: org.chatStatus,
+          chatWelcomeMessage: org.chatWelcomeMessage,
+          chatAutoReply: org.chatAutoReply
+        }
+      });
+    }
+
+    return res.status(404).json({ success: false, message: 'Organizer user or organization not found' });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc Get all Conversations for a specific organizer (Admin inspection)
+ * @route GET /api/chat/admin/organizers/:id/conversations
+ * @access Private (Super Admin)
+ */
+export const getAdminOrganizerConversations = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid organizer ID' });
+    }
+
+    const conversations = await ChatConversation.find({ organizer: id })
+      .sort({ lastMessageAt: -1 })
+      .populate('event', 'title slug banner city venue')
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      count: conversations.length,
+      conversations
+    });
+  } catch (error) {
+    next(error);
+  }
+};
