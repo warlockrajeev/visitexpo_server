@@ -1373,11 +1373,11 @@ router.get('/dashboard', async (req, res, next) => {
         .populate('teamMembers.user', 'name email phone')
         .populate('subscription')
         .sort({ createdAt: -1 })
-        .limit(10)
+        .limit(100)
         .lean(),
       User.find({ role: 'organizer' })
         .sort({ createdAt: -1 })
-        .limit(10)
+        .limit(100)
         .lean()
     ]);
 
