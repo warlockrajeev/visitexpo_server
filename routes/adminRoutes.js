@@ -3233,7 +3233,11 @@ router.get('/event-history', async (req, res, next) => {
 // @route   PUT /api/admin/events/:id/status
 router.put('/events/:id/status', async (req, res, next) => {
   try {
-    const { action } = req.body; // 'approve' or 'reject'
+    const { action, rejectionReason } = req.body; // 'approve' or 'reject'
+    if (action === 'reject' && (typeof rejectionReason !== 'string' || !rejectionReason.trim())) {
+      return res.status(400).json({ success: false, error: 'A rejection reason is required' });
+    }
+
     const event = await Event.findById(req.params.id);
 
     if (!event) {
@@ -3242,12 +3246,14 @@ router.put('/events/:id/status', async (req, res, next) => {
 
     if (action === 'approve') {
       event.status = 'published';
+      event.rejectionReason = '';
       await event.save();
 
       // Real-time Sync to WordPress Pages via WordPressSyncService
       await syncEventToWordPress(event);
     } else if (action === 'reject') {
       event.status = 'cancelled';
+      event.rejectionReason = rejectionReason.trim();
       await event.save();
     }
 
@@ -3265,13 +3271,16 @@ router.put('/events/:id/status', async (req, res, next) => {
 // @route   POST /api/admin/events/bulk-status
 router.post('/events/bulk-status', async (req, res, next) => {
   try {
-    const { eventIds, action } = req.body; // 'approve' or 'reject'
+    const { eventIds, action, rejectionReason } = req.body; // 'approve' or 'reject'
     if (!Array.isArray(eventIds) || eventIds.length === 0) {
       return res.status(400).json({ success: false, error: 'eventIds array is required' });
     }
 
     if (!['approve', 'reject'].includes(action)) {
       return res.status(400).json({ success: false, error: 'action must be approve or reject' });
+    }
+    if (action === 'reject' && (typeof rejectionReason !== 'string' || !rejectionReason.trim())) {
+      return res.status(400).json({ success: false, error: 'A rejection reason is required' });
     }
 
     const events = await Event.find({ _id: { $in: eventIds } });
@@ -3286,6 +3295,7 @@ router.post('/events/bulk-status', async (req, res, next) => {
       try {
         if (action === 'approve') {
           event.status = 'published';
+          event.rejectionReason = '';
           await event.save();
           // Real-time sync to WordPress Pages in background
           syncEventToWordPress(event).catch(wpErr => {
@@ -3293,6 +3303,7 @@ router.post('/events/bulk-status', async (req, res, next) => {
           });
         } else if (action === 'reject') {
           event.status = 'cancelled';
+          event.rejectionReason = rejectionReason.trim();
           await event.save();
         }
         processedCount++;

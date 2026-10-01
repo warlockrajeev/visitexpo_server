@@ -226,6 +226,10 @@ const EventSchema = new mongoose.Schema(
       enum: ['draft', 'published', 'cancelled', 'completed'],
       default: 'draft',
       index: true
+    },
+    rejectionReason: {
+      type: String,
+      default: ''
     }
   },
   {
