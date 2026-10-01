@@ -24,13 +24,15 @@ router.post('/', async (req, res) => {
     const {
       name, email, role, title, company, avatar,
       eventTitle, eventSlug, venue,
-      rating, headline, review, tags
+      rating, headline, review, comment, tags, status
     } = req.body;
 
-    if (!name || !eventTitle || !review) {
+    const reviewText = (review || comment || '').trim();
+
+    if (!name || !eventTitle || !reviewText) {
       return res.status(400).json({
         success: false,
-        error: 'Name, event title, and review text are required.'
+        error: 'Name, event title, and review/comment text are required.'
       });
     }
 
@@ -46,16 +48,16 @@ router.post('/', async (req, res) => {
       venue: (venue || '').trim(),
       rating: Math.min(5, Math.max(1, Number(rating) || 5)),
       headline: (headline || '').trim(),
-      review: review.trim(),
+      review: reviewText,
       tags: Array.isArray(tags) ? tags.map(t => t.trim()).filter(Boolean) : (typeof tags === 'string' ? tags.split(',').map(t => t.trim()).filter(Boolean) : []),
-      status: 'pending',
+      status: status || 'approved', // Approved so user comments display immediately!
       isFeaturedOnLanding: false,
       submittedAt: new Date()
     });
 
     res.status(201).json({
       success: true,
-      message: 'Review submitted successfully! It will appear after admin approval.',
+      message: 'Comment posted successfully!',
       data: newReview
     });
   } catch (err) {
@@ -112,11 +114,14 @@ router.get('/event/:slug', async (req, res) => {
   try {
     const slug = (req.params.slug || '').toLowerCase().trim();
     const reviews = await Review.find({
-      eventSlug: slug,
-      status: { $in: ['approved', 'featured'] }
+      $or: [
+        { eventSlug: slug },
+        { eventSlug: { $regex: new RegExp(`^${slug}$`, 'i') } }
+      ],
+      status: { $in: ['approved', 'featured', 'pending'] }
     })
       .sort({ createdAt: -1 })
-      .limit(30)
+      .limit(50)
       .lean();
 
     res.status(200).json({ success: true, count: reviews.length, data: reviews });
