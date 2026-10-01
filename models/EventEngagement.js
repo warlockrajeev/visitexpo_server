@@ -106,8 +106,23 @@ const EventEngagementSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['interested', 'follower', 'both'],
+      enum: ['interested', 'follower', 'both', 'bookmark'],
       default: 'interested',
+      index: true
+    },
+    isBookmarked: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+    isInterested: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+    isFollowed: {
+      type: Boolean,
+      default: false,
       index: true
     },
     status: {

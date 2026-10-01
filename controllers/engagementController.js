@@ -37,14 +37,14 @@ export const toggleEngagement = async (req, res) => {
     }
 
     const cleanSlug = eventSlug.toLowerCase().trim();
-    const action = actionType === 'follower' ? 'follower' : 'interested';
+    const action = ['follower', 'bookmark'].includes(actionType) ? actionType : 'interested';
 
     // Resolve user details from auth middleware or payload
     const currentUser = req.user || customUser;
     if (!currentUser || (!currentUser.email && !currentUser.id && !currentUser._id)) {
       return res.status(401).json({
         success: false,
-        message: 'Authentication or user email is required to register interest or follow'
+        message: 'Authentication or user email is required to register interest, follow, or bookmark'
       });
     }
 
@@ -74,56 +74,63 @@ export const toggleEngagement = async (req, res) => {
       const isCurrentlyActive = engagement.status === 'active';
       const currentType = engagement.type;
 
-      if (action === 'interested') {
-        const currentlyInterested = isCurrentlyActive && (currentType === 'interested' || currentType === 'both');
+      if (action === 'bookmark') {
+        engagement.isBookmarked = !engagement.isBookmarked;
+        engagement.status = 'active';
+      } else if (action === 'interested') {
+        const currentlyInterested = engagement.isInterested || (isCurrentlyActive && (currentType === 'interested' || currentType === 'both'));
 
         if (currentlyInterested) {
-          // Remove interested
+          engagement.isInterested = false;
           if (currentType === 'both') {
             engagement.type = 'follower';
+            engagement.status = 'active';
+          } else if (engagement.isBookmarked || engagement.isFollowed) {
             engagement.status = 'active';
           } else {
             engagement.status = 'inactive';
           }
         } else {
-          // Add interested
-          if (isCurrentlyActive && currentType === 'follower') {
+          engagement.isInterested = true;
+          if (isCurrentlyActive && (currentType === 'follower' || engagement.isFollowed)) {
             engagement.type = 'both';
           } else {
             engagement.type = 'interested';
-            engagement.status = 'active';
           }
+          engagement.status = 'active';
         }
       } else if (action === 'follower') {
-        const currentlyFollowing = isCurrentlyActive && (currentType === 'follower' || currentType === 'both');
+        const currentlyFollowing = engagement.isFollowed || (isCurrentlyActive && (currentType === 'follower' || currentType === 'both'));
 
         if (currentlyFollowing) {
-          // Unfollow
+          engagement.isFollowed = false;
           if (currentType === 'both') {
             engagement.type = 'interested';
+            engagement.status = 'active';
+          } else if (engagement.isBookmarked || engagement.isInterested) {
             engagement.status = 'active';
           } else {
             engagement.status = 'inactive';
           }
         } else {
-          // Follow
-          if (isCurrentlyActive && currentType === 'interested') {
+          engagement.isFollowed = true;
+          if (isCurrentlyActive && (currentType === 'interested' || engagement.isInterested)) {
             engagement.type = 'both';
           } else {
             engagement.type = 'follower';
-            engagement.status = 'active';
           }
+          engagement.status = 'active';
         }
       }
 
       // Update metadata
-      if (eventTitle && !engagement.eventTitle) engagement.eventTitle = eventTitle;
-      if (eventCity && !engagement.eventCity) engagement.eventCity = eventCity;
-      if (eventVenue && !engagement.eventVenue) engagement.eventVenue = eventVenue;
-      if (eventDates && !engagement.eventDates) engagement.eventDates = eventDates;
-      if (eventImage && !engagement.eventImage) engagement.eventImage = eventImage;
-      if (organizerId && !engagement.organizerId) engagement.organizerId = organizerId;
-      if (organizerName && !engagement.organizerName) engagement.organizerName = organizerName;
+      if (eventTitle) engagement.eventTitle = eventTitle;
+      if (eventCity) engagement.eventCity = eventCity;
+      if (eventVenue) engagement.eventVenue = eventVenue;
+      if (eventDates) engagement.eventDates = eventDates;
+      if (eventImage) engagement.eventImage = eventImage;
+      if (organizerId) engagement.organizerId = organizerId;
+      if (organizerName) engagement.organizerName = organizerName;
       if (userName) engagement.userName = userName;
       if (userCompany) engagement.userCompany = userCompany;
       if (userDesignation) engagement.userDesignation = userDesignation;
@@ -153,26 +160,36 @@ export const toggleEngagement = async (req, res) => {
         organizerId: organizerId || '',
         organizerName: organizerName || '',
         type: action,
+        isBookmarked: action === 'bookmark',
+        isInterested: action === 'interested',
+        isFollowed: action === 'follower',
         status: 'active',
         passType: userRole === 'visitor' ? 'Complimentary Visitor Pass' : 'Exhibitor Delegate',
         objective: 'Evaluating suppliers, B2B procurement, and business networking.'
       });
     }
 
-    const isInterested = engagement.status === 'active' && (engagement.type === 'interested' || engagement.type === 'both');
-    const isFollower = engagement.status === 'active' && (engagement.type === 'follower' || engagement.type === 'both');
+    const isBookmarked = !!engagement.isBookmarked;
+    const isInterested = engagement.isInterested || (engagement.status === 'active' && (engagement.type === 'interested' || engagement.type === 'both'));
+    const isFollower = engagement.isFollowed || (engagement.status === 'active' && (engagement.type === 'follower' || engagement.type === 'both'));
 
     // Aggregate live counts for this event
     const [interestedCount, followersCount] = await Promise.all([
       EventEngagement.countDocuments({
         eventSlug: cleanSlug,
         status: 'active',
-        type: { $in: ['interested', 'both'] }
+        $or: [
+          { isInterested: true },
+          { type: { $in: ['interested', 'both'] } }
+        ]
       }),
       EventEngagement.countDocuments({
         eventSlug: cleanSlug,
         status: 'active',
-        type: { $in: ['follower', 'both'] }
+        $or: [
+          { isFollowed: true },
+          { type: { $in: ['follower', 'both'] } }
+        ]
       })
     ]);
 
@@ -180,6 +197,7 @@ export const toggleEngagement = async (req, res) => {
       success: true,
       message: `Successfully updated ${action} status for ${cleanSlug}`,
       data: {
+        isBookmarked,
         isInterested,
         isFollower,
         type: engagement.type,
@@ -298,10 +316,13 @@ export const getUserEngagements = async (req, res) => {
     const engagements = await EventEngagement.find(query).sort({ updatedAt: -1 });
 
     const interestedEvents = engagements.filter(
-      (e) => e.type === 'interested' || e.type === 'both'
+      (e) => e.isInterested || e.type === 'interested' || e.type === 'both'
     );
     const followedEvents = engagements.filter(
-      (e) => e.type === 'follower' || e.type === 'both'
+      (e) => e.isFollowed || e.type === 'follower' || e.type === 'both'
+    );
+    const bookmarkedEvents = engagements.filter(
+      (e) => e.isBookmarked || e.type === 'bookmark'
     );
 
     return res.status(200).json({
@@ -309,10 +330,12 @@ export const getUserEngagements = async (req, res) => {
       data: {
         total: engagements.length,
         all: engagements,
+        bookmarkedEvents,
         interestedEvents,
         followedEvents,
         counts: {
           total: engagements.length,
+          bookmarks: bookmarkedEvents.length,
           interested: interestedEvents.length,
           followers: followedEvents.length
         }
