@@ -20,7 +20,8 @@ class EventRepository extends BaseRepository {
     return await this.model
       .findOne(query)
       .populate('organizer', 'name logo website description email phone isChatEnabled chatWelcomeMessage chatStatus')
-      .populate('claimedBy', 'name email role isVerified isChatEnabled chatWelcomeMessage chatStatus');
+      .populate('claimedBy', 'name email role isVerified isChatEnabled chatWelcomeMessage chatStatus')
+      .populate('sessions');
   }
 
   async findUpcoming(limit = 5) {

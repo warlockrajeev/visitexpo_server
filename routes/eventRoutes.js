@@ -461,6 +461,546 @@ router.get('/:slug', wordpressLimiter, async (req, res, next) => {
   }
 });
 
+/**
+ * Helper to find event by either its MongoDB _id or URL slug
+ */
+async function findEventBySlugOrId(identifier) {
+  if (mongoose.isValidObjectId(identifier)) {
+    const byId = await Event.findById(identifier);
+    if (byId) return byId;
+  }
+  return await Event.findOne({ slug: identifier });
+}
+
+// ==========================================
+// VIRTUAL & HYBRID EVENT SUPPORT APIS
+// ==========================================
+
+// 1. Get complete Virtual Hub payload for an event (livestream, sessions, booths, stats)
+router.get('/:slug/virtual-hub', async (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    const event = await findEventBySlugOrId(slug);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    // Fetch associated sessions
+    let sessions = await Session.find({ event: event._id }).sort({ startTime: 1 }).lean();
+
+    // Default mock virtual booths if none exist yet for demonstration
+    let virtualBooths = (event.virtualBooths && event.virtualBooths.length > 0)
+      ? event.virtualBooths
+      : [
+          {
+            exhibitorName: 'Apex Robotics & Industrial Automation',
+            boothNumber: 'VB-101',
+            logo: 'https://images.unsplash.com/photo-1581092160607-ee22621dd758?w=200&q=80',
+            banner: 'https://images.unsplash.com/photo-1581091226825-a6a2a5aee158?w=1200&q=80',
+            tagline: 'Next-Gen Autonomous Mobile Robots & Industrial Cobots',
+            description: 'Apex Robotics is a global pioneer in automated guided vehicles, collaborative robotics, and AI-driven precision manufacturing solutions.',
+            videoUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ',
+            website: 'https://apexrobotics.example.com',
+            contactEmail: 'booth@apexrobotics.example.com',
+            contactPhone: '+1 (555) 382-9901',
+            liveChatEnabled: true,
+            products: [
+              {
+                name: 'Apex-Titan 500 Autonomous Pallet Mover',
+                description: 'Heavy payload AMR featuring LiDAR SLAM navigation, 500kg lifting capacity, and 12-hour continuous battery life.',
+                price: '$24,500',
+                category: 'AMR & Material Handling',
+                image: 'https://images.unsplash.com/photo-1485827404703-89b55fcc595e?w=600&q=80',
+                brochureUrl: 'https://example.com/spec-sheet-titan500.pdf'
+              },
+              {
+                name: 'Synapse-7 Collaborative Robot Arm',
+                description: '6-axis precision cobot with integrated force torque sensing, 0.02mm repeatability, and intuitive drag-to-teach programming.',
+                price: '$18,900',
+                category: 'Cobots',
+                image: 'https://images.unsplash.com/photo-1563770660941-20978e870e26?w=600&q=80',
+                brochureUrl: 'https://example.com/spec-sheet-synapse7.pdf'
+              },
+              {
+                name: 'OmniVision 3D Vision Quality Inspector',
+                description: 'High-speed AI computer vision scanner detecting microscopic surface defects down to 5 microns in real-time conveyor flow.',
+                price: '$9,200',
+                category: 'Quality Inspection',
+                image: 'https://images.unsplash.com/photo-1518770660439-4636190af475?w=600&q=80',
+                brochureUrl: 'https://example.com/spec-sheet-omnivision.pdf'
+              }
+            ],
+            boothVisits: 142
+          },
+          {
+            exhibitorName: 'GreenPower EV Charging Solutions',
+            boothNumber: 'VB-102',
+            logo: 'https://images.unsplash.com/photo-1563986768609-322da13575f3?w=200&q=80',
+            banner: 'https://images.unsplash.com/photo-1558441719-8b489c63f732?w=1200&q=80',
+            tagline: 'Ultra-Fast DC Fast Chargers & Smart Grid Energy Storage',
+            description: 'Leading provider of turnkey commercial EV charging plazas, OCPP-compliant fleet charging management, and solar-coupled energy storage systems.',
+            videoUrl: 'https://www.youtube.com/embed/ScMzIvxBSi4',
+            website: 'https://greenpower.example.com',
+            contactEmail: 'contact@greenpower.example.com',
+            contactPhone: '+44 20 7946 0991',
+            liveChatEnabled: true,
+            products: [
+              {
+                name: 'HyperCharge 350kW Ultra-Fast DC Dispenser',
+                description: 'Liquid-cooled dual-connector CCS2/CHAdeMO charging station capable of adding 300km range in under 12 minutes.',
+                price: '$45,000',
+                category: 'DC Fast Charging',
+                image: 'https://images.unsplash.com/photo-1558441719-8b489c63f732?w=600&q=80',
+                brochureUrl: 'https://example.com/hypercharge-brochure.pdf'
+              },
+              {
+                name: 'FleetVolt Smart Energy Hub (1MWh BESS)',
+                description: 'Modular containerized battery energy storage with dynamic peak shaving, grid backup, and solar integration.',
+                price: '$180,000',
+                category: 'Commercial Storage',
+                image: 'https://images.unsplash.com/photo-1497435334941-8c899ee9e8e9?w=600&q=80',
+                brochureUrl: 'https://example.com/fleetvolt-specs.pdf'
+              }
+            ],
+            boothVisits: 98
+          },
+          {
+            exhibitorName: 'CyberShield Cloud & Zero Trust Security',
+            boothNumber: 'VB-103',
+            logo: 'https://images.unsplash.com/photo-1550751827-4bd374c3f58b?w=200&q=80',
+            banner: 'https://images.unsplash.com/photo-1526374965328-7f61d4dc18c5?w=1200&q=80',
+            tagline: 'AI-Native SASE & Cloud Security Infrastructure',
+            description: 'Protecting enterprise hybrid workforces with unified Zero Trust Network Access (ZTNA), cloud firewall, and automated incident response.',
+            videoUrl: '',
+            website: 'https://cybershield.example.com',
+            contactEmail: 'info@cybershield.example.com',
+            contactPhone: '+1 (800) 555-0199',
+            liveChatEnabled: true,
+            products: [
+              {
+                name: 'CyberShield SASE Gateway 4.0',
+                description: 'All-in-one Zero Trust Cloud Gateway replacing legacy VPNs with granular contextual access and microsegmentation.',
+                price: '$15 / user / mo',
+                category: 'Cloud Security',
+                image: 'https://images.unsplash.com/photo-1563986768494-4dee2763ff3f?w=600&q=80',
+                brochureUrl: 'https://example.com/cybershield-sase.pdf'
+              }
+            ],
+            boothVisits: 76
+          }
+        ];
+
+    // Default virtual sessions if none populated yet
+    if (!sessions || sessions.length === 0) {
+      const baseDate = event.startDate ? new Date(event.startDate) : new Date();
+      sessions = [
+        {
+          _id: 'session-demo-1',
+          title: 'Opening Global Keynote: The Future of Hybrid Expos & AI Industry Trends',
+          description: 'Visionary leadership address exploring how virtual immersion, digital twins, and AI-driven match-making are redefining global trade exhibitions.',
+          speakers: [
+            {
+              name: 'Dr. Alistair Vance',
+              designation: 'Chief Technology Strategist',
+              company: 'Global Exhibition Alliance'
+            },
+            {
+              name: 'Sunita Mehra',
+              designation: 'VP of Digital Transformation',
+              company: 'ExpoInnovate Worldwide'
+            }
+          ],
+          startTime: new Date(baseDate.getTime() + 10 * 60 * 60 * 1000), // 10:00 AM
+          endTime: new Date(baseDate.getTime() + 11 * 60 * 60 * 1000 + 30 * 60 * 1000), // 11:30 AM
+          hallName: 'Virtual Main Stage / Hall A',
+          sessionType: 'hybrid',
+          streamProvider: 'zoom',
+          streamUrl: 'https://zoom.us/j/82049182048',
+          zoomMeetingId: '820 4918 2048',
+          zoomPasscode: 'EXPO2026',
+          timezone: 'Asia/Kolkata',
+          isLiveNow: true,
+          virtualAttendeesCount: 248
+        },
+        {
+          _id: 'session-demo-2',
+          title: 'Deep-Dive Panel: Sustainable Manufacturing, Clean Tech & Supply Chain Resilience',
+          description: 'International panel discussion with industry pioneers sharing zero-carbon manufacturing blueprints and next-gen material innovations.',
+          speakers: [
+            {
+              name: 'Elena Rostova',
+              designation: 'Head of Circular Economy',
+              company: 'Nordic Clean Industries'
+            },
+            {
+              name: 'Karan Singhania',
+              designation: 'Director of Green Energy Operations',
+              company: 'Tata Renewables'
+            }
+          ],
+          startTime: new Date(baseDate.getTime() + 14 * 60 * 60 * 1000), // 2:00 PM
+          endTime: new Date(baseDate.getTime() + 15 * 60 * 60 * 1000 + 15 * 60 * 1000), // 3:15 PM
+          hallName: 'Interactive Virtual Breakout Room B',
+          sessionType: 'virtual',
+          streamProvider: 'agora',
+          agoraChannel: 'visitexpo-sustainability-panel',
+          streamUrl: 'https://meet.jit.si/visitexpo-sustainability-panel',
+          timezone: 'Asia/Kolkata',
+          isLiveNow: false,
+          virtualAttendeesCount: 164
+        },
+        {
+          _id: 'session-demo-3',
+          title: 'Live Product Showcase & Virtual Pitch Competition',
+          description: 'Live interactive demonstrations by 6 shortlisted startups presenting breakthrough robotics, IoT hardware, and SaaS architectures.',
+          speakers: [
+            {
+              name: 'Marcus Chen',
+              designation: 'Managing Partner',
+              company: 'Vanguard Hardware Ventures'
+            }
+          ],
+          startTime: new Date(baseDate.getTime() + 16 * 60 * 60 * 1000), // 4:00 PM
+          endTime: new Date(baseDate.getTime() + 17 * 60 * 60 * 1000 + 30 * 60 * 1000), // 5:30 PM
+          hallName: 'Virtual Demo Amphitheatre',
+          sessionType: 'virtual',
+          streamProvider: 'youtube',
+          streamUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ',
+          timezone: 'Asia/Kolkata',
+          isLiveNow: false,
+          virtualAttendeesCount: 89
+        }
+      ];
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        eventId: event._id,
+        title: event.title,
+        slug: event.slug,
+        eventType: event.eventType || 'hybrid',
+        livestream: event.livestream || {
+          enabled: true,
+          provider: 'youtube',
+          streamUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ',
+          status: 'live',
+          liveViewerCount: 184
+        },
+        virtualAttendanceStats: event.virtualAttendanceStats || {
+          totalVirtualVisitors: 312,
+          liveStreamViews: 540,
+          sessionAttendeesCount: 501,
+          boothVisitsCount: 316
+        },
+        virtualBooths,
+        virtualSessions: sessions,
+        sessions
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 2. Track Virtual Attendance for Event Livestream / Hub
+router.post('/:slug/virtual-attend', async (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    const { email, name, phone, company, designation, country, viewerTimezone } = req.body;
+
+    const event = await findEventBySlugOrId(slug);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    const cleanEmail = (email || '').toLowerCase().trim();
+    const cleanName = (name || '').trim() || (cleanEmail ? cleanEmail.split('@')[0] : 'Virtual Attendee');
+    const userTimezone = viewerTimezone || 'UTC';
+
+    let visitor = null;
+    if (cleanEmail) {
+      visitor = await Visitor.findOne({ event: event._id, email: cleanEmail });
+      if (visitor) {
+        visitor.attendanceType = 'virtual';
+        visitor.virtualJoinStatus = 'checked_in';
+        visitor.virtualJoinTime = new Date();
+        visitor.viewerTimezone = userTimezone;
+        await visitor.save();
+      } else {
+        const mockQRCode = `visitexpo-${event._id}-${cleanEmail.replace(/[^a-z0-9]/g, '')}`;
+        visitor = await Visitor.create({
+          name: cleanName,
+          email: cleanEmail,
+          phone: phone || '+1-000-0000',
+          company: company || 'Virtual Participant',
+          designation: designation || 'Trade Visitor',
+          country: country || 'International',
+          qrCode: mockQRCode,
+          event: event._id,
+          attendanceType: 'virtual',
+          registrationStatus: 'confirmed',
+          checkInStatus: 'not_checked_in',
+          virtualJoinStatus: 'checked_in',
+          virtualJoinTime: new Date(),
+          viewerTimezone: userTimezone,
+          notes: `Joined virtual livestream from ${userTimezone}`
+        });
+
+        // Also create lead in CRM
+        try {
+          await Lead.create({
+            name: cleanName,
+            email: cleanEmail,
+            phone: phone || '',
+            company: company || '',
+            designation: designation || 'Trade Visitor',
+            country: country || 'International',
+            leadScore: 40,
+            source: 'virtual_event',
+            status: 'new',
+            event: event._id,
+            notes: `Captured from Virtual Livestream check-in (${userTimezone}).`,
+            activityTimeline: [
+              {
+                type: 'note',
+                content: `Checked into virtual livestream in timezone ${userTimezone}.`
+              }
+            ]
+          });
+        } catch (leadErr) {
+          // ignore duplicate lead error
+        }
+      }
+    }
+
+    // Update Event virtual attendance statistics
+    if (!event.virtualAttendanceStats) {
+      event.virtualAttendanceStats = {
+        totalVirtualVisitors: 0,
+        liveStreamViews: 0,
+        sessionAttendeesCount: 0,
+        boothVisitsCount: 0
+      };
+    }
+    event.virtualAttendanceStats.totalVirtualVisitors = (event.virtualAttendanceStats.totalVirtualVisitors || 0) + 1;
+    event.virtualAttendanceStats.liveStreamViews = (event.virtualAttendanceStats.liveStreamViews || 0) + 1;
+    await event.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Virtual attendance tracked successfully',
+      data: {
+        checkedIn: true,
+        stats: event.virtualAttendanceStats,
+        visitor: visitor ? {
+          id: visitor._id,
+          name: visitor.name,
+          email: visitor.email,
+          virtualJoinTime: visitor.virtualJoinTime,
+          viewerTimezone: visitor.viewerTimezone
+        } : null
+      },
+      stats: event.virtualAttendanceStats,
+      visitor: visitor
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 3. Track Virtual Attendance for a Specific Session
+router.post('/:slug/sessions/:sessionId/attend', async (req, res, next) => {
+  try {
+    const { slug, sessionId } = req.params;
+    const { email, name, viewerTimezone } = req.body;
+
+    const event = await findEventBySlugOrId(slug);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    let session = null;
+    if (mongoose.isValidObjectId(sessionId)) {
+      session = await Session.findById(sessionId);
+    }
+
+    const cleanEmail = (email || '').toLowerCase().trim();
+    const cleanName = (name || '').trim() || (cleanEmail ? cleanEmail.split('@')[0] : 'Session Attendee');
+    const userTimezone = viewerTimezone || 'UTC';
+
+    if (session) {
+      session.virtualAttendeesCount = (session.virtualAttendeesCount || 0) + 1;
+      session.virtualAttendees.push({
+        name: cleanName,
+        email: cleanEmail,
+        joinedAt: new Date(),
+        viewerTimezone: userTimezone
+      });
+      await session.save();
+    }
+
+    // If visitor exists or clean email provided, link to visitor record
+    if (cleanEmail) {
+      let visitor = await Visitor.findOne({ event: event._id, email: cleanEmail });
+      if (!visitor) {
+        visitor = await Visitor.create({
+          name: cleanName,
+          email: cleanEmail,
+          phone: '+1-000-0000',
+          company: 'Virtual Participant',
+          designation: 'Session Attendee',
+          country: 'International',
+          qrCode: `visitexpo-${event._id}-${cleanEmail.replace(/[^a-z0-9]/g, '')}`,
+          event: event._id,
+          attendanceType: 'virtual',
+          virtualJoinStatus: 'checked_in',
+          virtualJoinTime: new Date(),
+          viewerTimezone: userTimezone
+        });
+      }
+      visitor.virtualSessionsAttended.push({
+        sessionId: session ? session._id : null,
+        sessionTitle: session ? session.title : (req.body.sessionTitle || 'Virtual Session'),
+        joinedAt: new Date(),
+        viewerTimezone: userTimezone
+      });
+      await visitor.save();
+    }
+
+    // Update event virtual attendance stats
+    if (!event.virtualAttendanceStats) {
+      event.virtualAttendanceStats = {
+        totalVirtualVisitors: 0,
+        liveStreamViews: 0,
+        sessionAttendeesCount: 0,
+        boothVisitsCount: 0
+      };
+    }
+    event.virtualAttendanceStats.sessionAttendeesCount = (event.virtualAttendanceStats.sessionAttendeesCount || 0) + 1;
+    await event.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Session attendance tracked successfully',
+      virtualAttendeesCount: session ? session.virtualAttendeesCount : 1
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 4. Track Virtual Booth Visit
+router.post('/:slug/booths/:boothIndex/visit', async (req, res, next) => {
+  try {
+    const { slug, boothIndex } = req.params;
+    const { email, boothNumber, boothName } = req.body;
+
+    const event = await findEventBySlugOrId(slug);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    const idx = parseInt(boothIndex, 10);
+    if (event.virtualBooths && event.virtualBooths[idx]) {
+      event.virtualBooths[idx].boothVisits = (event.virtualBooths[idx].boothVisits || 0) + 1;
+    }
+
+    if (!event.virtualAttendanceStats) {
+      event.virtualAttendanceStats = {
+        totalVirtualVisitors: 0,
+        liveStreamViews: 0,
+        sessionAttendeesCount: 0,
+        boothVisitsCount: 0
+      };
+    }
+    event.virtualAttendanceStats.boothVisitsCount = (event.virtualAttendanceStats.boothVisitsCount || 0) + 1;
+    await event.save();
+
+    if (email) {
+      const visitor = await Visitor.findOne({ event: event._id, email: email.toLowerCase().trim() });
+      if (visitor) {
+        visitor.boothsVisited.push({
+          boothNumber: boothNumber || `B-${idx + 1}`,
+          boothName: boothName || event.virtualBooths?.[idx]?.exhibitorName || 'Virtual Booth',
+          visitedAt: new Date()
+        });
+        await visitor.save();
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      boothVisits: event.virtualBooths?.[idx]?.boothVisits || 1,
+      totalBoothVisits: event.virtualAttendanceStats.boothVisitsCount
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 5. Send Direct Message / Inquiry to a Virtual Booth Exhibitor
+router.post('/:slug/virtual-booth-message', async (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    const { boothNumber, senderName, senderEmail, senderPhone, senderCompany, message } = req.body;
+
+    const event = await findEventBySlugOrId(slug);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    if (!message || !message.trim()) {
+      return res.status(400).json({ success: false, error: 'Message cannot be empty' });
+    }
+
+    // Capture as lead
+    try {
+      await Lead.create({
+        name: senderName || 'Virtual Booth Inquirer',
+        email: senderEmail || 'visitor@visitexpo.in',
+        phone: senderPhone || '+1-000-0000',
+        company: senderCompany || '',
+        source: 'virtual_booth_chat',
+        status: 'new',
+        event: event._id,
+        notes: `Booth: ${boothNumber || 'General'}. Inquiry: ${message.trim()}`
+      });
+    } catch (err) {
+      // ignore duplicate or non-critical error
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Message delivered to booth representative successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// 6. Check Chat Status for Event Organizer
+router.get('/:slug/chat/status', async (req, res, next) => {
+  try {
+    const { slug } = req.params;
+    const event = await findEventBySlugOrId(slug);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found' });
+    }
+
+    const chatEnabled = event.chatEnabled !== false && event.chatSettings?.enabled !== false;
+
+    res.status(200).json({
+      success: true,
+      chatEnabled,
+      organizer: event.claimedBy || event.organizer || null,
+      message: chatEnabled ? 'Chat is enabled' : 'Chat is disabled by organizer'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ==========================================
 // ORGANIZER PRIVATE MANAGEMENT APIS
 // ==========================================

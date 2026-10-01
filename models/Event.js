@@ -159,6 +159,68 @@ const EventSchema = new mongoose.Schema(
         ref: 'Session'
       }
     ],
+    eventType: {
+      type: String,
+      enum: ['physical', 'virtual', 'hybrid'],
+      default: 'hybrid',
+      index: true
+    },
+    livestream: {
+      enabled: { type: Boolean, default: true },
+      provider: {
+        type: String,
+        enum: ['youtube', 'vimeo', 'zoom', 'agora', '100ms', 'custom'],
+        default: 'youtube'
+      },
+      streamUrl: { type: String, default: '' },
+      zoomMeetingId: { type: String, default: '' },
+      zoomPasscode: { type: String, default: '' },
+      agoraChannel: { type: String, default: '' },
+      status: {
+        type: String,
+        enum: ['upcoming', 'live', 'ended'],
+        default: 'upcoming'
+      },
+      liveViewerCount: { type: Number, default: 0 }
+    },
+    virtualSettings: {
+      enableVirtualBooths: { type: Boolean, default: true },
+      enableLiveChat: { type: Boolean, default: true },
+      allowVirtualRegistration: { type: Boolean, default: true },
+      recordedSessionsUrl: { type: String, default: '' }
+    },
+    virtualAttendanceStats: {
+      totalVirtualVisitors: { type: Number, default: 0 },
+      liveStreamViews: { type: Number, default: 0 },
+      sessionAttendeesCount: { type: Number, default: 0 },
+      boothVisitsCount: { type: Number, default: 0 }
+    },
+    virtualBooths: [
+      {
+        exhibitorName: { type: String, default: '' },
+        boothNumber: { type: String, default: '' },
+        logo: { type: String, default: '' },
+        banner: { type: String, default: '' },
+        tagline: { type: String, default: '' },
+        description: { type: String, default: '' },
+        videoUrl: { type: String, default: '' },
+        website: { type: String, default: '' },
+        contactEmail: { type: String, default: '' },
+        contactPhone: { type: String, default: '' },
+        liveChatEnabled: { type: Boolean, default: true },
+        products: [
+          {
+            name: { type: String, default: '' },
+            description: { type: String, default: '' },
+            price: { type: String, default: '' },
+            category: { type: String, default: '' },
+            image: { type: String, default: '' },
+            brochureUrl: { type: String, default: '' }
+          }
+        ],
+        boothVisits: { type: Number, default: 0 }
+      }
+    ],
     status: {
       type: String,
       enum: ['draft', 'published', 'cancelled', 'completed'],

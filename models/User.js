@@ -125,6 +125,46 @@ const UserSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
+    calendarSettings: {
+      autoSync: {
+        type: Boolean,
+        default: true
+      },
+      preferredProvider: {
+        type: String,
+        enum: ['google', 'outlook', 'ics', 'apple'],
+        default: 'google'
+      },
+      googleConnected: {
+        type: Boolean,
+        default: false
+      },
+      googleEmail: {
+        type: String,
+        default: ''
+      },
+      outlookConnected: {
+        type: Boolean,
+        default: false
+      },
+      outlookEmail: {
+        type: String,
+        default: ''
+      },
+      reminderTimes: {
+        type: [String],
+        default: ['24h', '1h', '15m']
+      },
+      channels: {
+        email: { type: Boolean, default: true },
+        push: { type: Boolean, default: true },
+        sms: { type: Boolean, default: false }
+      },
+      timezone: {
+        type: String,
+        default: 'Asia/Kolkata'
+      }
+    },
     verificationToken: String,
     resetPasswordToken: String,
     resetPasswordExpires: Date,

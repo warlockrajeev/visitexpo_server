@@ -7,6 +7,7 @@
 import 'dotenv/config';
 import app from './app.js';
 import connectDB from './config/db.js';
+import CalendarService from './services/CalendarService.js';
 
 const PORT = process.env.PORT || 5000;
 
@@ -26,11 +27,24 @@ const autoSyncWordPressEvents = async () => {
   }
 };
 
+// Automatic Scheduled Event Reminder Dispatcher
+const runScheduledEventReminders = async () => {
+  try {
+    await CalendarService.sendUpcomingEventReminders();
+  } catch (err) {
+    console.error('[ReminderCron] Background reminder dispatch error:', err.message);
+  }
+};
+
 // Start Server
 const server = app.listen(PORT, () => {
   console.log(`VisitExpo API Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
   // Run background sync every 15 minutes
   setInterval(autoSyncWordPressEvents, 15 * 60 * 1000);
+  // Run scheduled event reminder checks every 30 minutes
+  setInterval(runScheduledEventReminders, 30 * 60 * 1000);
+  // Initial check 10 seconds after boot
+  setTimeout(runScheduledEventReminders, 10 * 1000);
 });
 
 // Handle unhandled promise rejections (e.g. lost db connection)

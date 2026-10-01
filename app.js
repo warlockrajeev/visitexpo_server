@@ -29,6 +29,7 @@ import faqRoutes from './routes/faqRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
 import venueRoutes from './routes/venueRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
+import calendarRoutes from './routes/calendarRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -125,6 +126,7 @@ app.use('/api/faqs', faqRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/venues', venueRoutes);
 app.use('/api/chat', chatRoutes);
+app.use('/api/calendar', calendarRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

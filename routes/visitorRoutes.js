@@ -297,19 +297,15 @@ router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_ma
 // Register Virtual Event Join
 router.post('/virtual-join', async (req, res, next) => {
   try {
-    const { email, eventId } = req.body;
+    const { email, eventId, viewerTimezone } = req.body;
 
     if (!email || !eventId) {
       return res.status(400).json({ success: false, error: 'Email and Event ID are required' });
     }
 
-    const visitor = await Visitor.findOne({ event: eventId, email: email.toLowerCase() });
+    const visitor = await Visitor.findOne({ event: eventId, email: email.toLowerCase().trim() });
     if (!visitor) {
       return res.status(404).json({ success: false, error: 'Visitor registration not found for this email and event' });
-    }
-
-    if (visitor.attendanceType !== 'virtual') {
-      return res.status(400).json({ success: false, error: 'Visitor is registered for in-person attendance. Use physical check-in.' });
     }
 
     if (visitor.virtualJoinStatus === 'checked_in') {
@@ -319,14 +315,30 @@ router.post('/virtual-join', async (req, res, next) => {
         visitor: {
           name: visitor.name,
           email: visitor.email,
-          virtualJoinTime: visitor.virtualJoinTime
+          virtualJoinTime: visitor.virtualJoinTime,
+          viewerTimezone: visitor.viewerTimezone
         }
       });
     }
 
     visitor.virtualJoinStatus = 'checked_in';
     visitor.virtualJoinTime = new Date();
+    if (viewerTimezone) {
+      visitor.viewerTimezone = viewerTimezone;
+    }
     await visitor.save();
+
+    // Increment event virtual attendance stats
+    try {
+      await Event.findByIdAndUpdate(eventId, {
+        $inc: {
+          'virtualAttendanceStats.totalVirtualVisitors': 1,
+          'virtualAttendanceStats.liveStreamViews': 1
+        }
+      });
+    } catch (e) {
+      // ignore
+    }
 
     res.status(200).json({
       success: true,
@@ -334,7 +346,8 @@ router.post('/virtual-join', async (req, res, next) => {
       visitor: {
         name: visitor.name,
         email: visitor.email,
-        virtualJoinTime: visitor.virtualJoinTime
+        virtualJoinTime: visitor.virtualJoinTime,
+        viewerTimezone: visitor.viewerTimezone
       }
     });
   } catch (error) {

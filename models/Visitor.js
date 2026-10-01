@@ -41,7 +41,7 @@ const VisitorSchema = new mongoose.Schema(
     },
     attendanceType: {
       type: String,
-      enum: ['in_person', 'virtual'],
+      enum: ['in_person', 'virtual', 'hybrid'],
       default: 'in_person',
       index: true
     },
@@ -65,7 +65,60 @@ const VisitorSchema = new mongoose.Schema(
       type: Date,
       default: null
     },
+    viewerTimezone: {
+      type: String,
+      default: ''
+    },
+    virtualSessionsAttended: [
+      {
+        sessionId: {
+          type: mongoose.Schema.Types.ObjectId,
+          ref: 'Session'
+        },
+        sessionTitle: String,
+        joinedAt: {
+          type: Date,
+          default: Date.now
+        },
+        viewerTimezone: String
+      }
+    ],
+    boothsVisited: [
+      {
+        boothNumber: String,
+        boothName: String,
+        visitedAt: {
+          type: Date,
+          default: Date.now
+        }
+      }
+    ],
     notes: String,
+    calendarSynced: {
+      type: Boolean,
+      default: false
+    },
+    calendarProvider: {
+      type: String,
+      default: ''
+    },
+    calendarSyncedAt: {
+      type: Date,
+      default: null
+    },
+    remindersDispatched: [
+      {
+        timeframe: String, // '24h', '1h', '15m'
+        dispatchedAt: {
+          type: Date,
+          default: Date.now
+        },
+        channel: {
+          type: String,
+          default: 'in_app'
+        }
+      }
+    ],
     event: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Event',
