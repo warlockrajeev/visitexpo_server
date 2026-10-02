@@ -1771,11 +1771,11 @@ function getCallerId(req) {
   return null;
 }
 
-// @desc    Get all users (paginated + search + role & status filters)
+// @desc    Get all users (paginated + search + role, status & verification filters)
 // @route   GET /api/admin/users
 router.get('/users', async (req, res, next) => {
   try {
-    const { search, role, status, page, limit } = req.query;
+    const { search, role, status, verification, page, limit } = req.query;
     const query = {};
 
     if (role && role !== 'all') {
@@ -1788,6 +1788,17 @@ router.get('/users', async (req, res, next) => {
       } else if (status === 'active') {
         query.$and = [{ isSuspended: { $ne: true } }, { status: { $ne: 'suspended' } }];
       }
+    }
+
+    if (verification === 'email_verified') {
+      query.isVerified = true;
+    } else if (verification === 'email_unverified') {
+      query.isVerified = { $ne: true };
+    } else if (verification === 'phone_verified') {
+      query.isPhoneVerified = true;
+    } else if (verification === 'phone_unverified') {
+      query.isPhoneVerified = { $ne: true };
+      query.phone = { $exists: true, $nin: [null, ''] };
     }
 
     if (search) {
