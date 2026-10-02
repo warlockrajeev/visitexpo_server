@@ -46,7 +46,7 @@ const LeadSchema = new mongoose.Schema(
     },
     source: {
       type: String,
-      enum: ['website', 'campaign', 'cold_call', 'referral', 'walk_in'],
+      enum: ['website', 'campaign', 'cold_call', 'referral', 'walk_in', 'bulk_upload'],
       default: 'website',
       index: true
     },
