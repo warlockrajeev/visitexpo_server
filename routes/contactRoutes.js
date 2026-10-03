@@ -5,7 +5,7 @@
 
 import express from 'express';
 import ContactMessage from '../models/ContactMessage.js';
-import { protect, authorize } from '../middlewares/auth.js';
+import { protect, requirePermission } from '../middlewares/auth.js';
 
 const router = express.Router();
 
@@ -61,11 +61,11 @@ router.post('/', async (req, res, next) => {
 // ============================================================================
 
 router.use(protect);
-router.use(authorize('super_admin'));
+router.use(requirePermission('contacts.manage'));
 
 // @desc    Get all contact inquiries with search, filters & pagination
 // @route   GET /api/contact
-// @access  Super Admin
+// @access  Admins with contacts.manage permission
 router.get('/', async (req, res, next) => {
   try {
     const { status, role, source, search, page = 1, limit = 50 } = req.query;
@@ -135,7 +135,7 @@ router.get('/', async (req, res, next) => {
 
 // @desc    Get single contact inquiry by ID
 // @route   GET /api/contact/:id
-// @access  Super Admin
+// @access  Admins with contacts.manage permission
 router.get('/:id', async (req, res, next) => {
   try {
     const contact = await ContactMessage.findById(req.params.id);
@@ -157,7 +157,7 @@ router.get('/:id', async (req, res, next) => {
 
 // @desc    Update status or admin notes of an inquiry
 // @route   PATCH /api/contact/:id
-// @access  Super Admin
+// @access  Admins with contacts.manage permission
 router.patch('/:id', async (req, res, next) => {
   try {
     const { status, adminNotes } = req.body;
@@ -195,7 +195,7 @@ router.patch('/:id', async (req, res, next) => {
 
 // @desc    Delete an inquiry
 // @route   DELETE /api/contact/:id
-// @access  Super Admin
+// @access  Admins with contacts.manage permission
 router.delete('/:id', async (req, res, next) => {
   try {
     const contact = await ContactMessage.findByIdAndDelete(req.params.id);
