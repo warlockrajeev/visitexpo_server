@@ -459,6 +459,7 @@ export const getOrganizerConversations = async (req, res, next) => {
     const conversations = await ChatConversation.find(filter)
       .sort({ lastMessageAt: -1 })
       .populate('event', 'title slug banner city venue startDate endDate')
+      .select('-messages')
       .lean();
 
     res.status(200).json({
