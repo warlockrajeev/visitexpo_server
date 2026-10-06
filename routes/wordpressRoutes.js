@@ -11,6 +11,8 @@ import User from '../models/User.js';
 import Organization from '../models/Organization.js';
 import AuthService from '../services/AuthService.js';
 import EventService from '../services/EventService.js';
+import UserRepository from '../repositories/UserRepository.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 
 const router = express.Router();
@@ -299,77 +301,254 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
  */
 router.post('/onboard-organizer', async (req, res, next) => {
   try {
-    const { name, email, password, organizationName, website, phone, claimType, eventId, newEventData } = req.body;
+    const {
+      name,
+      email,
+      officialEmail,
+      password,
+      organizationName,
+      website,
+      phone,
+      claimType,
+      eventId,
+      newEventData,
+      proofFileName,
+      additionalNotes,
+      city
+    } = req.body;
 
-    if (!name || !email || !organizationName) {
+    // --- Strict Field Validation ---
+    const targetEmail = (officialEmail || email || '').toLowerCase().trim();
+    const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+    if (!targetEmail || !emailRegex.test(targetEmail)) {
       return res.status(400).json({
         success: false,
-        error: 'Name, Email, and Organization Name are required'
+        error: 'A valid official corporate email is required (e.g. organizer@company.com).'
       });
     }
 
-    let userId;
-    let orgId;
-    let userObj;
+    if (!website || !website.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Official website URL is required.'
+      });
+    }
+    const urlRegex = /^(https?:\/\/)?([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(\/[^\s]*)?$/i;
+    if (!urlRegex.test(website.trim())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter a valid website URL (e.g. https://eventdomain.com).'
+      });
+    }
 
-    const existingUser = await User.findOne({ email: email.toLowerCase() });
-    if (existingUser) {
-      userId = existingUser._id;
-      orgId = existingUser.organization;
-      if (!orgId) {
-        const org = await Organization.create({
-          name: organizationName || existingUser.name,
-          website: website || '',
-          contact: { email: email.toLowerCase(), phone: phone || '' }
-        });
-        orgId = org._id;
-        existingUser.organization = orgId;
-        await existingUser.save();
+    if (!phone || !phone.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'Contact phone hotline is required.'
+      });
+    }
+    const cleanDigits = phone.replace(/\D/g, '');
+    const hasLetters = /[a-zA-Z]/.test(phone);
+    if (hasLetters || cleanDigits.length < 10 || cleanDigits.length > 15) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter a valid phone number (10 to 15 digits, numbers only, no letters).'
+      });
+    }
+
+    if (claimType === 'claim_existing' && (!proofFileName || !proofFileName.trim())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Upload proof of ownership document (incorporation cert or authorization letter) is mandatory.'
+      });
+    }
+
+    if (additionalNotes && additionalNotes.length > 1000) {
+      return res.status(400).json({
+        success: false,
+        error: 'Notes to moderation team cannot exceed 1000 characters.'
+      });
+    }
+
+    let userId = null;
+    let orgId = null;
+    let userObj = null;
+
+    // 1. Authenticate user from Bearer token or cookies if available
+    let token = null;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      token = req.headers.authorization.split(' ')[1];
+    } else if (req.cookies && req.cookies.token) {
+      token = req.cookies.token;
+    }
+
+    if (token) {
+      const decoded = verifyAccessToken(token);
+      if (decoded?.id) {
+        const authUser = await User.findById(decoded.id);
+        if (authUser) {
+          userId = authUser._id;
+          orgId = authUser.organization;
+          userObj = authUser.toObject();
+        }
       }
-      userObj = existingUser.toObject();
-    } else {
-      if (!password) {
+    }
+
+    // 2. If not authenticated via token, check if user exists by email
+    const effectiveEmail = (officialEmail || email || '').toLowerCase().trim();
+    if (!userId && effectiveEmail) {
+      const existingUser = await User.findOne({ email: effectiveEmail });
+      if (existingUser) {
+        userId = existingUser._id;
+        orgId = existingUser.organization;
+        userObj = existingUser.toObject();
+      }
+    }
+
+    // 3. If user still does not exist, safely register new organizer account without OTP/city blockage
+    if (!userId) {
+      if (!effectiveEmail) {
         return res.status(400).json({
           success: false,
-          error: 'Password is required to create a new organizer account.'
+          error: 'Email address is required for organizer verification.'
         });
       }
-      const authData = await AuthService.signup(name, email, password, organizationName);
-      userId = authData.user.id || authData.user._id;
-      orgId = authData.user.organization;
 
-      // Set user as pending admin verification
-      await User.findByIdAndUpdate(userId, { isVerified: false });
-      userObj = { ...authData.user, isVerified: false };
+      const userCity = city || (newEventData && newEventData.city) || 'India';
+      const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '') : '';
+      const newUser = await UserRepository.create({
+        name: (name || 'Organizer User').trim(),
+        email: effectiveEmail,
+        password: password || 'Password123!',
+        role: 'organizer',
+        phone: cleanPhone,
+        city: userCity,
+        isVerified: false,
+        isPhoneVerified: false,
+        authProvider: 'local',
+        hasCustomPassword: !!password
+      });
+
+      userId = newUser._id;
+      userObj = newUser.toObject();
     }
 
-    // Update organization details if provided
-    if (website || phone) {
-      await Organization.findByIdAndUpdate(orgId, {
+    // 4. Ensure Organization is associated
+    const effectiveOrgName = organizationName || userObj?.company || userObj?.name || 'Organizer Organization';
+    if (!orgId) {
+      const org = await Organization.create({
+        name: effectiveOrgName,
         website: website || '',
-        'contact.phone': phone || '',
-        'contact.email': email
+        contact: {
+          email: effectiveEmail || userObj?.email || '',
+          phone: phone || userObj?.phone || ''
+        },
+        address: { city: city || userObj?.city || 'India' },
+        teamMembers: [{ user: userId, role: 'organizer' }]
       });
+      orgId = org._id;
+      await User.findByIdAndUpdate(userId, { organization: orgId });
+    } else {
+      const updateData = {};
+      if (website) updateData.website = website;
+      if (phone) updateData['contact.phone'] = phone;
+      if (effectiveEmail) updateData['contact.email'] = effectiveEmail;
+      if (Object.keys(updateData).length > 0) {
+        await Organization.findByIdAndUpdate(orgId, updateData);
+      }
     }
 
     let targetEvent = null;
 
-    // 2. Handle Event claiming or creation
-    if (claimType === 'claim_existing' && eventId) {
+    // 5. Handle Event claiming or creation
+    if (claimType === 'claim_existing' && (eventId || req.body.eventData)) {
       let event = null;
-      if (mongoose.Types.ObjectId.isValid(eventId)) {
-        event = await Event.findById(eventId);
+      const cleanEventId = String(eventId || '');
+      const eventSlug = req.body.eventSlug || req.body.eventData?.slug;
+      const eventWpPostId = req.body.wpPostId || req.body.eventData?.wpPostId || (cleanEventId.startsWith('wp-') ? '' : cleanEventId);
+
+      if (mongoose.Types.ObjectId.isValid(cleanEventId)) {
+        event = await Event.findById(cleanEventId);
       }
       if (!event) {
-        event = await Event.findOne({ $or: [{ wpPostId: String(eventId) }, { slug: String(eventId) }] });
+        const queryOr = [];
+        if (eventWpPostId) queryOr.push({ wpPostId: String(eventWpPostId) });
+        if (eventSlug) queryOr.push({ slug: String(eventSlug) });
+        if (cleanEventId) {
+          queryOr.push({ wpPostId: cleanEventId });
+          queryOr.push({ slug: cleanEventId });
+        }
+        if (req.body.eventData?.title) {
+          queryOr.push({ title: new RegExp(`^${req.body.eventData.title.trim()}$`, 'i') });
+        }
+        if (queryOr.length > 0) {
+          event = await Event.findOne({ $or: queryOr });
+        }
       }
+
+      // If event is not yet synced to MongoDB, create it on-the-fly from eventData so the claim can be processed
+      if (!event && req.body.eventData) {
+        const d = req.body.eventData;
+        const cleanTitle = d.title || 'Exhibition Event';
+        const cleanSlug = d.slug || cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+        const cleanCity = (d.city || 'India').replace(/\d+/g, '').trim() || 'India';
+        const rawWpId = d.wpPostId ? String(d.wpPostId) : (cleanEventId.startsWith('wp-') ? '' : cleanEventId);
+
+        event = new Event({
+          title: cleanTitle,
+          slug: cleanSlug,
+          description: d.description || `Official expo listing for ${cleanTitle}.`,
+          venue: d.venue || 'Exhibition Center',
+          city: cleanCity,
+          country: d.country || 'India',
+          startDate: d.startDate ? new Date(d.startDate) : new Date(),
+          endDate: d.endDate ? new Date(d.endDate) : new Date(Date.now() + 86400000 * 2),
+          timings: d.timings || '10:00 AM - 6:00 PM',
+          categories: Array.isArray(d.categories) && d.categories.length > 0 ? d.categories : ['Exhibition'],
+          image: d.image || '',
+          banner: d.banner || '',
+          wpPostId: rawWpId,
+          wpUrl: d.wpUrl || '',
+          organizer: orgId,
+          isClaimed: true,
+          claimedBy: userId,
+          status: 'draft'
+        });
+      }
+
       if (event) {
         event.organizer = orgId;
         event.isClaimed = true;
         event.claimedBy = userId;
         event.status = 'draft'; // Pending admin review
+
+        if (officialEmail || effectiveEmail) {
+          event.orgEmail = officialEmail || effectiveEmail;
+        }
+        if (phone) {
+          event.orgPhone = phone;
+        }
+        if (website) {
+          event.orgWebsite = website;
+        }
+        if (effectiveOrgName) {
+          event.orgName = effectiveOrgName;
+        }
+        if (additionalNotes) {
+          event.orgDesc = additionalNotes;
+          event.claimNotes = additionalNotes;
+        }
+        if (proofFileName) {
+          event.claimProof = proofFileName;
+        }
+
         await event.save();
         targetEvent = event;
+      } else {
+        return res.status(404).json({
+          success: false,
+          error: 'Event not found in directory. Please select an event to claim.'
+        });
       }
     } else if (claimType === 'create_new' && newEventData && newEventData.title) {
       targetEvent = await EventService.createEvent({
@@ -379,12 +558,16 @@ router.post('/onboard-organizer', async (req, res, next) => {
     }
 
     if (targetEvent) {
-      await syncEventToWordPress(targetEvent);
+      try {
+        await syncEventToWordPress(targetEvent);
+      } catch (syncErr) {
+        console.warn('[WP-Claim] WordPress sync warning:', syncErr.message);
+      }
     }
 
     res.status(201).json({
       success: true,
-      message: 'Organizer onboarding request submitted successfully! Your account and event claim are pending Super Admin approval.',
+      message: 'Organizer claim request submitted successfully! Your ownership verification is pending admin review.',
       pendingApproval: true,
       user: userObj,
       event: targetEvent

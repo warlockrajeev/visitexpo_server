@@ -525,6 +525,10 @@ router.put('/change-password', protect, async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'New password must be at least 6 characters long' });
     }
 
+    if (!/(?=.*[a-zA-Z])(?=.*\d)/.test(newPassword)) {
+      return res.status(400).json({ success: false, error: 'New password must contain at least one letter and one number' });
+    }
+
     const userDoc = await User.findById(req.user.id).select('+password');
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'User account not found' });

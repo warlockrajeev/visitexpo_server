@@ -186,11 +186,12 @@ export const getChatSettings = async (req, res, next) => {
     }
 
     // Calculate live conversation metrics
-    const [totalConversations, unreadConversations, visitorCount, exhibitorCount] = await Promise.all([
+    const [totalConversations, unreadConversations, visitorCount, exhibitorCount, archivedCount] = await Promise.all([
       ChatConversation.countDocuments({ organizer: req.user.id, status: { $ne: 'archived' } }),
       ChatConversation.countDocuments({ organizer: req.user.id, unreadByOrganizer: { $gt: 0 }, status: { $ne: 'archived' } }),
       ChatConversation.countDocuments({ organizer: req.user.id, participantRole: 'visitor', status: { $ne: 'archived' } }),
-      ChatConversation.countDocuments({ organizer: req.user.id, participantRole: 'exhibitor', status: { $ne: 'archived' } })
+      ChatConversation.countDocuments({ organizer: req.user.id, participantRole: 'exhibitor', status: { $ne: 'archived' } }),
+      ChatConversation.countDocuments({ organizer: req.user.id, status: 'archived' })
     ]);
 
     res.status(200).json({
@@ -207,7 +208,8 @@ export const getChatSettings = async (req, res, next) => {
         totalConversations,
         unreadConversations,
         visitorCount,
-        exhibitorCount
+        exhibitorCount,
+        archivedCount
       }
     });
   } catch (error) {
@@ -433,8 +435,12 @@ export const getOrganizerConversations = async (req, res, next) => {
 
     const filter = { organizer: req.user.id };
 
-    if (status && status !== 'all') {
-      filter.status = status;
+    if (status === 'archived') {
+      filter.status = 'archived';
+    } else if (status === 'all') {
+      // no status filter
+    } else {
+      filter.status = { $ne: 'archived' };
     }
 
     if (role && role !== 'all') {
@@ -608,6 +614,148 @@ export const updateConversationStatus = async (req, res, next) => {
     res.status(200).json({
       success: true,
       message: `Conversation marked as ${status}`,
+      conversation
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc Mark Conversation as read or unread for organizer
+ * @route PATCH /api/chat/conversations/:id/read
+ * @access Private (Organizer)
+ */
+export const markConversationReadStatus = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { isRead = true } = req.body;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid conversation ID' });
+    }
+
+    const conversation = await ChatConversation.findOne({ _id: id, organizer: req.user.id });
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+
+    if (isRead) {
+      conversation.unreadByOrganizer = 0;
+      conversation.messages.forEach((msg) => {
+        if (msg.senderRole !== 'organizer') msg.read = true;
+      });
+    } else {
+      conversation.unreadByOrganizer = Math.max(1, conversation.unreadByOrganizer || 1);
+    }
+
+    await conversation.save();
+
+    res.status(200).json({
+      success: true,
+      message: isRead ? 'Conversation marked as read' : 'Conversation marked as unread',
+      conversation
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc Mark all organizer conversations as read
+ * @route PATCH /api/chat/conversations/mark-all-read
+ * @access Private (Organizer)
+ */
+export const markAllConversationsRead = async (req, res, next) => {
+  try {
+    await ChatConversation.updateMany(
+      { organizer: req.user.id, unreadByOrganizer: { $gt: 0 } },
+      {
+        $set: {
+          unreadByOrganizer: 0,
+          'messages.$[elem].read': true
+        }
+      },
+      {
+        arrayFilters: [{ 'elem.senderRole': { $ne: 'organizer' } }]
+      }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'All conversations marked as read'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc Delete a conversation thread
+ * @route DELETE /api/chat/conversations/:id
+ * @access Private (Organizer)
+ */
+export const deleteConversation = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    if (!mongoose.isValidObjectId(id)) {
+      return res.status(400).json({ success: false, message: 'Invalid conversation ID' });
+    }
+
+    const conversation = await ChatConversation.findOneAndDelete({ _id: id, organizer: req.user.id });
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'Conversation deleted successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * @desc Delete an individual message from a conversation thread
+ * @route DELETE /api/chat/conversations/:id/messages/:messageId
+ * @access Private (Organizer)
+ */
+export const deleteMessage = async (req, res, next) => {
+  try {
+    const { id, messageId } = req.params;
+
+    if (!mongoose.isValidObjectId(id) || !mongoose.isValidObjectId(messageId)) {
+      return res.status(400).json({ success: false, message: 'Invalid ID parameters' });
+    }
+
+    const conversation = await ChatConversation.findOne({ _id: id, organizer: req.user.id });
+    if (!conversation) {
+      return res.status(404).json({ success: false, message: 'Conversation not found' });
+    }
+
+    const msgIndex = conversation.messages.findIndex((m) => String(m._id) === String(messageId));
+    if (msgIndex === -1) {
+      return res.status(404).json({ success: false, message: 'Message not found' });
+    }
+
+    conversation.messages.splice(msgIndex, 1);
+
+    // Update lastMessage preview if the last message was removed
+    if (conversation.messages.length > 0) {
+      const lastMsg = conversation.messages[conversation.messages.length - 1];
+      conversation.lastMessage = lastMsg.text;
+      conversation.lastMessageAt = lastMsg.timestamp || new Date();
+    } else {
+      conversation.lastMessage = '';
+    }
+
+    await conversation.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Message deleted successfully',
       conversation
     });
   } catch (error) {

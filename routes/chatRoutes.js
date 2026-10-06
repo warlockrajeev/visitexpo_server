@@ -13,6 +13,10 @@ import {
   getConversationById,
   sendMessage,
   updateConversationStatus,
+  markConversationReadStatus,
+  markAllConversationsRead,
+  deleteConversation,
+  deleteMessage,
   getParticipantConversations,
   getOrganizersWithExpos,
   getAdminChatOrganizers,
@@ -85,6 +89,18 @@ router.get('/conversations', protect, authorize('organizer', 'super_admin', 'eve
 
 // Update conversation status (active / archived / closed)
 router.patch('/conversations/:id/status', protect, authorize('organizer', 'super_admin', 'event_manager'), updateConversationStatus);
+
+// Mark all conversations read
+router.patch('/conversations/mark-all-read', protect, authorize('organizer', 'super_admin', 'event_manager'), markAllConversationsRead);
+
+// Mark conversation read/unread
+router.patch('/conversations/:id/read', protect, authorize('organizer', 'super_admin', 'event_manager'), markConversationReadStatus);
+
+// Delete entire conversation
+router.delete('/conversations/:id', protect, authorize('organizer', 'super_admin', 'event_manager'), deleteConversation);
+
+// Delete single message from conversation
+router.delete('/conversations/:id/messages/:messageId', protect, authorize('organizer', 'super_admin', 'event_manager'), deleteMessage);
 
 // ==========================================
 // SUPER ADMIN & SUBADMIN ORGANIZER CHAT MANAGEMENT ROUTES

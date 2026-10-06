@@ -108,6 +108,8 @@ const EventSchema = new mongoose.Schema(
     orgWebsite: { type: String, default: '' },
     orgDesc: { type: String, default: '' },
     orgLogo: { type: String, default: '' },
+    claimProof: { type: String, default: '' },
+    claimNotes: { type: String, default: '' },
     schedules: [
       {
         name: { type: String, default: '' },
