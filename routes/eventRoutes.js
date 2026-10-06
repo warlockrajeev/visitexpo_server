@@ -22,6 +22,7 @@ import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
 import RecommendationService from '../services/RecommendationService.js';
+import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 
 const router = express.Router();
@@ -231,6 +232,32 @@ router.get('/directory', async (req, res, next) => {
       success: true,
       data
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// High-speed unified events directory endpoint (served directly from indexed MongoDB)
+router.get('/all-directory', async (req, res, next) => {
+  try {
+    const forceRefresh = req.query.refresh === 'true' || !!req.query.t;
+    const events = await WordPressDirectorySyncService.getFastStoredEvents({ forceRefresh });
+    res.status(200).json({
+      success: true,
+      count: events.length,
+      source: 'mongodb_atlas',
+      events
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Trigger immediate background sync of WordPress events into MongoDB
+router.post('/sync-wordpress', async (req, res, next) => {
+  try {
+    const result = await WordPressDirectorySyncService.syncWordPressEventsToMongoDB({ force: true });
+    res.status(200).json(result);
   } catch (error) {
     next(error);
   }

@@ -3,6 +3,8 @@
  * @description Helper to load and cache live WordPress directory events for instant duplicate checking across the platform.
  */
 
+import Event from '../models/Event.js';
+
 let wpDirectoryEventsCache = {
   docs: [],
   lastFetched: 0,
@@ -17,13 +19,45 @@ export async function fetchLiveWpDirectoryEvents() {
     return wpDirectoryEventsCache.docs;
   }
 
+  // 1. Try fast local MongoDB database first (sub-20ms)
+  try {
+    const mongoEvents = await Event.find({ status: { $ne: 'cancelled' } })
+      .select('title slug description venue city startDate endDate isClaimed wpPostId')
+      .lean();
+    if (mongoEvents && mongoEvents.length > 0) {
+      const docs = mongoEvents.map((e, idx) => ({
+        _id: String(e._id || `wp-${idx}`),
+        id: String(e.wpPostId || e._id || `wp-${idx}`),
+        wpPostId: e.wpPostId || String(e._id),
+        title: e.title,
+        slug: e.slug,
+        description: e.description,
+        startDate: e.startDate ? new Date(e.startDate).toISOString() : null,
+        endDate: e.endDate ? new Date(e.endDate).toISOString() : null,
+        venue: e.venue,
+        city: e.city,
+        isClaimed: !!e.isClaimed,
+        source: 'database'
+      }));
+
+      wpDirectoryEventsCache = {
+        docs,
+        lastFetched: now,
+        ttl: 10 * 60 * 1000
+      };
+      return docs;
+    }
+  } catch (dbErr) {
+    console.warn('[WP-Cache] MongoDB event query failed:', dbErr.message);
+  }
+
   const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
   const wpKey = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
 
   try {
     const res = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
       headers: { 'X-VisitExpo-Key': wpKey },
-      signal: AbortSignal.timeout(12000)
+      signal: AbortSignal.timeout(8000)
     });
     if (res.ok) {
       const data = await res.json();

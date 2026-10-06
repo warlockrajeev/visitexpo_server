@@ -793,6 +793,9 @@ export function parseWpLocation(rawLocation = '', rawCity = '') {
     'New Delhi', 'Delhi', 'Greater Noida', 'Noida', 'Mumbai', 'Bengaluru', 'Bangalore',
     'Chennai', 'Hyderabad', 'Kolkata', 'Pune', 'Ahmedabad', 'Gandhinagar', 'Jaipur',
     'Kochi', 'Goa', 'Indore', 'Coimbatore', 'Surat', 'Lucknow', 'Chandigarh',
+    'Patna', 'Bhopal', 'Ranchi', 'Raipur', 'Dehradun', 'Bhubaneswar', 'Guwahati',
+    'Vadodara', 'Rajkot', 'Nashik', 'Agra', 'Varanasi', 'Kanpur', 'Amritsar',
+    'Jalandhar', 'Ludhiana', 'Visakhapatnam', 'Vijayawada', 'Madurai', 'Mangalore', 'Mysore',
     'Santa Barbara', 'New York', 'Chicago', 'Las Vegas', 'Los Angeles', 'San Francisco', 'Orlando',
     'Copenhagen', 'Toronto', 'Glasgow', 'London', 'Birmingham', 'Frankfurt', 'Munich', 'Berlin',
     'Cologne', 'Dusseldorf', 'Paris', 'Madrid', 'Barcelona', 'Valencia', 'Milan', 'Bologna', 'Dubai',
@@ -831,6 +834,13 @@ export function parseWpLocation(rawLocation = '', rawCity = '') {
     'Madhya Pradesh': /madhya pradesh/i,
     'Punjab': /punjab/i,
     'Goa': /goa/i,
+    'Bihar': /bihar/i,
+    'Odisha': /odisha|orissa/i,
+    'Assam': /assam/i,
+    'Uttarakhand': /uttarakhand|uttaranchal/i,
+    'Jharkhand': /jharkhand/i,
+    'Chhattisgarh': /chhattisgarh/i,
+    'Andhra Pradesh': /andhra pradesh/i,
     'Delhi NCR': /delhi|noida|gurgaon|gurugram/i,
     'California': /california|ca\b/i,
     'Florida': /florida|fl\b/i,
@@ -852,17 +862,25 @@ export function parseWpLocation(rawLocation = '', rawCity = '') {
   }
 
   if (!state) {
-    if (city === 'Mumbai' || city === 'Pune') state = 'Maharashtra';
-    else if (city === 'Bengaluru') state = 'Karnataka';
-    else if (city === 'Chennai' || city === 'Coimbatore') state = 'Tamil Nadu';
+    if (city === 'Mumbai' || city === 'Pune' || city === 'Nashik') state = 'Maharashtra';
+    else if (city === 'Bengaluru' || city === 'Mangalore' || city === 'Mysore') state = 'Karnataka';
+    else if (city === 'Chennai' || city === 'Coimbatore' || city === 'Madurai') state = 'Tamil Nadu';
     else if (city === 'Hyderabad') state = 'Telangana';
-    else if (city === 'Ahmedabad' || city === 'Gandhinagar' || city === 'Surat') state = 'Gujarat';
+    else if (city === 'Ahmedabad' || city === 'Gandhinagar' || city === 'Surat' || city === 'Vadodara' || city === 'Rajkot') state = 'Gujarat';
     else if (city === 'Kolkata') state = 'West Bengal';
     else if (city === 'New Delhi' || city === 'Greater Noida') state = 'Delhi NCR';
     else if (city === 'Jaipur') state = 'Rajasthan';
-    else if (city === 'Lucknow') state = 'Uttar Pradesh';
-    else if (city === 'Indore') state = 'Madhya Pradesh';
+    else if (city === 'Lucknow' || city === 'Agra' || city === 'Varanasi' || city === 'Kanpur') state = 'Uttar Pradesh';
+    else if (city === 'Indore' || city === 'Bhopal') state = 'Madhya Pradesh';
     else if (city === 'Kochi') state = 'Kerala';
+    else if (city === 'Patna') state = 'Bihar';
+    else if (city === 'Bhubaneswar') state = 'Odisha';
+    else if (city === 'Guwahati') state = 'Assam';
+    else if (city === 'Dehradun') state = 'Uttarakhand';
+    else if (city === 'Ranchi') state = 'Jharkhand';
+    else if (city === 'Raipur') state = 'Chhattisgarh';
+    else if (city === 'Visakhapatnam' || city === 'Vijayawada') state = 'Andhra Pradesh';
+    else if (city === 'Amritsar' || city === 'Jalandhar' || city === 'Ludhiana') state = 'Punjab';
     else if (city === 'Santa Barbara') state = 'California';
     else if (city === 'Chicago') state = 'Illinois';
     else if (city === 'Orlando') state = 'Florida';
@@ -946,17 +964,20 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
   const wpKey = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
 
   let rawDocs = [];
-  try {
-    const wpRes = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
-      headers: { 'X-VisitExpo-Key': wpKey },
-      signal: AbortSignal.timeout(25000)
-    });
-    if (wpRes.ok) {
-      const data = await wpRes.json();
-      rawDocs = data.data?.docs || [];
+  // Only execute remote WordPress HTTP call if explicitly force-refreshed
+  if (forceRefresh) {
+    try {
+      const wpRes = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
+        headers: { 'X-VisitExpo-Key': wpKey },
+        signal: AbortSignal.timeout(5000)
+      });
+      if (wpRes.ok) {
+        const data = await wpRes.json();
+        rawDocs = data.data?.docs || [];
+      }
+    } catch (err) {
+      console.warn('[Admin] inspect-event-meta fetch failed for organizers, falling back to MongoDB:', err.message);
     }
-  } catch (err) {
-    console.warn('[Admin] inspect-event-meta fetch failed for organizers, falling back to MongoDB:', err.message);
   }
 
   const [mongoEvents, mongoOrgs, deletedOrgs, deletedEvents] = await Promise.all([

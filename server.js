@@ -8,22 +8,19 @@ import 'dotenv/config';
 import app from './app.js';
 import connectDB from './config/db.js';
 import CalendarService from './services/CalendarService.js';
+import WordPressDirectorySyncService from './services/WordPressDirectorySyncService.js';
 
 const PORT = process.env.PORT || 5000;
 
 // Initialize Database connections
 connectDB();
 
-// Automatic Background WordPress Sync Routine
+// Automatic Background WordPress Sync Routine (Ingests to MongoDB)
 const autoSyncWordPressEvents = async () => {
   try {
-    const WORDPRESS_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-    const response = await fetch(`${WORDPRESS_URL}/wp-json/wp/v2/pages?per_page=100`);
-    if (response.ok) {
-      console.log(`[AutoSync] Background synced events from ${WORDPRESS_URL}`);
-    }
+    await WordPressDirectorySyncService.syncWordPressEventsToMongoDB();
   } catch (err) {
-    // Silent catch for background polling
+    console.warn('[AutoSync] Background WordPress sync error:', err.message);
   }
 };
 
@@ -39,8 +36,10 @@ const runScheduledEventReminders = async () => {
 // Start Server
 const server = app.listen(PORT, () => {
   console.log(`VisitExpo API Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
-  // Run background sync every 15 minutes
-  setInterval(autoSyncWordPressEvents, 15 * 60 * 1000);
+  // Run background sync every 30 minutes
+  setInterval(autoSyncWordPressEvents, 30 * 60 * 1000);
+  // Initial sync 5 seconds after boot (non-blocking)
+  setTimeout(autoSyncWordPressEvents, 5 * 1000);
   // Run scheduled event reminder checks every 30 minutes
   setInterval(runScheduledEventReminders, 30 * 60 * 1000);
   // Initial check 10 seconds after boot
