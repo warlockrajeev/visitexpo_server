@@ -152,100 +152,7 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
  */
 router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
   try {
-    const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-    const wpKey = process.env.WORDPRESS_API_KEY;
-
-    if (wpKey) {
-      try {
-        // Try fetching all events via inspect-event-meta first (supports posts_per_page: -1)
-        console.log(`[WP-Claimable] Fetching live events from WordPress: ${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`);
-        const wpMetaResponse = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
-          headers: { 'X-VisitExpo-Key': wpKey }
-        });
-
-        if (wpMetaResponse.ok) {
-          const wpMetaData = await wpMetaResponse.json();
-          const rawDocs = wpMetaData.data?.docs || [];
-
-          if (Array.isArray(rawDocs) && rawDocs.length > 0) {
-            let docs = rawDocs.map((d, idx) => {
-              const m = d.meta || {};
-              const startTs = m.ovaem_date_start_time?.[0];
-              const endTs = m.ovaem_date_end_time?.[0];
-              const venue = m.ovaem_address_event?.[0] || m.ovaem_venue?.[0] || m.ovaem_address?.[0] || 'Exhibition Center';
-              const rawDesc = m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || (m.content?.[0] ? m.content[0].slice(0, 300) : '') || '';
-
-              const realImg = getWpImage(d.slug, d.id, d.id, d.title);
-              return {
-                _id: String(d.id || `wp-${idx}`),
-                id: String(d.id || `wp-${idx}`),
-                wpPostId: d.id,
-                title: d.title || 'Exhibition Event',
-                slug: d.slug,
-                description: rawDesc,
-                image: realImg,
-                banner: realImg,
-                startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
-                endDate: endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000).toISOString() : null,
-                venue: venue,
-                city: m.ovaem_city?.[0] || 'India',
-                isClaimed: false
-              };
-            });
-
-            // Filter if search term is provided
-            const { search, limit } = req.query;
-            if (search) {
-              const cleanSearch = search.toLowerCase();
-              docs = docs.filter(e => 
-                e.title.toLowerCase().includes(cleanSearch) || 
-                (e.venue && e.venue.toLowerCase().includes(cleanSearch)) ||
-                (e.city && e.city.toLowerCase().includes(cleanSearch))
-              );
-            }
-
-            const total = docs.length;
-            if (limit && limit !== 'all' && !isNaN(parseInt(limit, 10))) {
-              docs = docs.slice(0, parseInt(limit, 10));
-            }
-
-            return res.status(200).json({
-              success: true,
-              data: {
-                docs,
-                total: total,
-                count: docs.length
-              }
-            });
-          }
-        }
-
-        // Fallback to claimable-events
-        const wpResponse = await fetch(`${wpUrl}/wp-json/visitexpo/v1/claimable-events`, {
-          headers: { 'X-VisitExpo-Key': wpKey }
-        });
-
-        if (wpResponse.ok) {
-          const wpData = await wpResponse.json();
-          const { search } = req.query;
-          if (search && wpData.success && wpData.data && wpData.data.docs) {
-            const cleanSearch = search.toLowerCase();
-            wpData.data.docs = wpData.data.docs.filter(e => 
-              e.title.toLowerCase().includes(cleanSearch) || 
-              (e.venue && e.venue.toLowerCase().includes(cleanSearch))
-            );
-            wpData.data.total = wpData.data.docs.length;
-          }
-          return res.status(200).json(wpData);
-        } else {
-          console.warn(`[WP-Claimable] WordPress returned error status ${wpResponse.status}. Falling back to MongoDB.`);
-        }
-      } catch (wpErr) {
-        console.error('[WP-Claimable] Error connecting to WordPress custom API. Falling back to MongoDB:', wpErr);
-      }
-    }
-
-    const { search, city, limit = 100, page = 1 } = req.query;
+    const { search, city, limit = 2500, page = 1 } = req.query;
 
     const query = {
       isClaimed: { $ne: true },
@@ -253,38 +160,64 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
       slug: { $not: /cart|checkout|my-account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about-us|blog|home/i }
     };
 
-    if (search) {
-      query.$and = [
-        {
-          $or: [
-            { title: { $regex: search, $options: 'i' } },
-            { city: { $regex: search, $options: 'i' } },
-            { categories: { $in: [new RegExp(search, 'i')] } }
-          ]
-        }
+    if (search && search.trim()) {
+      const s = search.trim();
+      query.$or = [
+        { title: { $regex: s, $options: 'i' } },
+        { venue: { $regex: s, $options: 'i' } },
+        { city: { $regex: s, $options: 'i' } },
+        { categories: { $in: [new RegExp(s, 'i')] } }
       ];
     }
 
-    if (city) {
-      query.city = { $regex: city, $options: 'i' };
+    if (city && city.trim()) {
+      query.city = { $regex: city.trim(), $options: 'i' };
     }
 
+    const pgLimit = limit === 'all' ? 2500 : (parseInt(limit, 10) || 2500);
     const pgNum = parseInt(page, 10) || 1;
-    const pgLimit = parseInt(limit, 10) || 20;
     const skip = (pgNum - 1) * pgLimit;
 
-    const [docs, total] = await Promise.all([
-      Event.find(query).sort({ startDate: 1, title: 1 }).skip(skip).limit(pgLimit),
+    const [rawDocs, total] = await Promise.all([
+      Event.find(query)
+        .select('title slug description venue city country startDate endDate banner wpPostId wpUrl isClaimed orgName orgEmail orgPhone orgWebsite orgDesc orgLogo')
+        .sort({ startDate: 1, title: 1 })
+        .skip(skip)
+        .limit(pgLimit)
+        .lean(),
       Event.countDocuments(query)
     ]);
 
-    res.status(200).json({
+    const docs = rawDocs.map((e, idx) => ({
+      _id: String(e._id),
+      id: String(e.wpPostId || e._id),
+      wpPostId: e.wpPostId || String(e._id),
+      title: e.title,
+      slug: e.slug,
+      description: e.description || '',
+      image: e.banner || getWpImage(e.slug, e._id, e.wpPostId, e.title) || null,
+      banner: e.banner || getWpImage(e.slug, e._id, e.wpPostId, e.title) || null,
+      startDate: e.startDate ? new Date(e.startDate).toISOString() : null,
+      endDate: e.endDate ? new Date(e.endDate).toISOString() : null,
+      venue: e.venue || 'Exhibition Center',
+      city: e.city || 'India',
+      country: e.country || 'India',
+      isClaimed: false,
+      orgName: e.orgName || 'Verified Organizer',
+      orgEmail: e.orgEmail || '',
+      orgPhone: e.orgPhone || '',
+      orgWebsite: e.orgWebsite || '',
+      orgDesc: e.orgDesc || '',
+      orgLogo: e.orgLogo || ''
+    }));
+
+    return res.status(200).json({
       success: true,
       data: {
         docs,
         total,
         page: pgNum,
-        pages: Math.ceil(total / pgLimit)
+        count: docs.length
       }
     });
   } catch (error) {

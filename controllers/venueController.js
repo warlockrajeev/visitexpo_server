@@ -90,56 +90,108 @@ async function syncDiscoveredVenuesFromEvents() {
   }
 }
 
+let venuesCache = {
+  data: null,
+  timestamp: 0,
+  ttl: 15 * 60 * 1000 // 15 mins cache
+};
+
+export function invalidateVenuesCache() {
+  venuesCache.data = null;
+  venuesCache.timestamp = 0;
+}
+
 /**
  * GET /api/venues
  * Get all venues with live total and upcoming event counts.
  */
 export async function getAllVenues(req, res) {
   try {
-    await ensureDefaultVenuesSeeded();
-    await syncDiscoveredVenuesFromEvents();
+    const force = req.query.force === 'true';
+    const nowMs = Date.now();
+    if (!force && venuesCache.data && (nowMs - venuesCache.timestamp < venuesCache.ttl)) {
+      return res.status(200).json(venuesCache.data);
+    }
 
-    const venues = await Venue.find().sort({ isFeatured: -1, name: 1 });
+    await ensureDefaultVenuesSeeded();
+
+    // Query all venues from MongoDB
+    const venues = await Venue.find().sort({ isFeatured: -1, name: 1 }).lean();
     const now = new Date();
 
-    // Compute live event counts for each venue
-    const enrichedVenues = await Promise.all(
-      venues.map(async (v) => {
-        const venueObj = v.toObject();
-        const vShort = (v.shortName || v.name).trim();
+    // Compute live event counts for all venues in a single fast aggregation
+    let countsAgg = [];
+    try {
+      countsAgg = await Event.aggregate([
+        { $match: { venue: { $exists: true, $ne: '' } } },
+        {
+          $group: {
+            _id: { $toLower: { $trim: { input: '$venue' } } },
+            total: { $sum: 1 },
+            upcoming: {
+              $sum: {
+                $cond: [
+                  { $or: [{ $gte: ['$endDate', now] }, { $gte: ['$startDate', now] }] },
+                  1,
+                  0
+                ]
+              }
+            }
+          }
+        }
+      ]);
+    } catch (aggErr) {
+      console.warn('[Venues] Count aggregation warning:', aggErr.message);
+    }
 
-        const [liveTotal, liveUpcoming] = await Promise.all([
-          Event.countDocuments({
-            $or: [
-              { venue: { $regex: vShort, $options: 'i' } },
-              { address: { $regex: vShort, $options: 'i' } }
-            ]
-          }),
-          Event.countDocuments({
-            $or: [
-              { venue: { $regex: vShort, $options: 'i' } },
-              { address: { $regex: vShort, $options: 'i' } }
-            ],
-            $or: [
-              { endDate: { $gte: now } },
-              { startDate: { $gte: now } },
-              { endDate: { $exists: false } }
-            ]
-          })
-        ]);
+    // Build fast lookup map
+    const countMap = new Map();
+    countsAgg.forEach((c) => {
+      if (c._id) {
+        countMap.set(c._id, { total: c.total, upcoming: c.upcoming });
+      }
+    });
 
-        venueObj.liveTotalEvents = Math.max(liveTotal, parseInt(v.eventsHosted, 10) || 0);
-        venueObj.liveUpcomingEvents = liveUpcoming > 0 ? liveUpcoming : parseInt(v.upcomingEventsCount, 10) || 0;
+    const enrichedVenues = venues.map((v) => {
+      const vShort = (v.shortName || v.name || '').toLowerCase().trim();
+      const vName = (v.name || '').toLowerCase().trim();
+      
+      let liveTotal = 0;
+      let liveUpcoming = 0;
 
-        return venueObj;
-      })
-    );
+      // Fast in-memory lookup
+      for (const [vKey, stat] of countMap.entries()) {
+        if (vKey === vShort || vKey === vName || (vShort.length > 4 && vKey.includes(vShort)) || (vName.length > 5 && vKey.includes(vName))) {
+          liveTotal += stat.total;
+          liveUpcoming += stat.upcoming;
+        }
+      }
 
-    res.status(200).json({
+      return {
+        ...v,
+        liveTotalEvents: Math.max(liveTotal, parseInt(v.eventsHosted, 10) || 0),
+        liveUpcomingEvents: liveUpcoming > 0 ? liveUpcoming : parseInt(v.upcomingEventsCount, 10) || 0
+      };
+    });
+
+    const responsePayload = {
       success: true,
       count: enrichedVenues.length,
       data: enrichedVenues
-    });
+    };
+
+    venuesCache = {
+      data: responsePayload,
+      timestamp: Date.now(),
+      ttl: 15 * 60 * 1000
+    };
+
+    // Run background venue discovery if count is low without blocking request
+    if (venues.length < 5) {
+      syncDiscoveredVenuesFromEvents().catch(() => {});
+    }
+
+    return res.status(200).json(responsePayload);
   } catch (err) {
     console.error('[Venues] Error in getAllVenues:', err);
     res.status(500).json({

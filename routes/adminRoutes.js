@@ -981,7 +981,9 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
   }
 
   const [mongoEvents, mongoOrgs, deletedOrgs, deletedEvents] = await Promise.all([
-    Event.find().lean(),
+    Event.find()
+      .select('title slug description venue city country startDate endDate banner wpPostId wpUrl isClaimed organizer orgName orgEmail orgPhone orgWebsite orgDesc orgLogo categories')
+      .lean(),
     Organization.find().lean(),
     DeletedOrganizer.find().lean(),
     DeletedEvent.find().lean()
