@@ -15,7 +15,7 @@ const SubscriptionSchema = new mongoose.Schema(
     },
     plan: {
       type: String,
-      enum: ['free', 'growth', 'enterprise'],
+      enum: ['free', 'starter', 'enterprise', 'growth'],
       default: 'free'
     },
     status: {
@@ -37,8 +37,8 @@ const SubscriptionSchema = new mongoose.Schema(
     },
     paymentCycle: {
       type: String,
-      enum: ['monthly', 'annual'],
-      default: 'monthly'
+      enum: ['monthly', 'quarterly', 'annual'],
+      default: 'quarterly'
     }
   },
   {

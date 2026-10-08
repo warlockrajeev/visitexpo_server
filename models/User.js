@@ -171,7 +171,9 @@ const UserSchema = new mongoose.Schema(
     refreshTokens: [
       {
         token: String,
-        expiresAt: Date
+        expiresAt: Date,
+        rotatedAt: Date,
+        replacedBy: String
       }
     ]
   },

@@ -3579,6 +3579,7 @@ export const ADMIN_PERMISSION_MODULES = [
     category: 'Finance, Billing & Communications',
     icon: 'CreditCard',
     permissions: [
+      { id: 'plans.manage', label: 'Manage Pricing Plans', description: 'Configure organizer pricing tiers, feature limits, and growth top-ups' },
       { id: 'subscriptions.view', label: 'View Subscriptions', description: 'Inspect active SaaS subscription tiers and recurring billing' },
       { id: 'subscriptions.manage', label: 'Manage Subscriptions', description: 'Upgrade, cancel, or manually provision plan tiers' },
       { id: 'invoices.view', label: 'View Invoices & Sales', description: 'Inspect GST tax invoices and payment receipts' },

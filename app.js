@@ -31,6 +31,7 @@ import venueRoutes from './routes/venueRoutes.js';
 import chatRoutes from './routes/chatRoutes.js';
 import organizerSupportRoutes from './routes/organizerSupportRoutes.js';
 import calendarRoutes from './routes/calendarRoutes.js';
+import planRoutes from './routes/planRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -129,6 +130,7 @@ app.use('/api/venues', venueRoutes);
 app.use('/api/chat', chatRoutes);
 app.use('/api/organizer-support', organizerSupportRoutes);
 app.use('/api/calendar', calendarRoutes);
+app.use('/api/plans', planRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

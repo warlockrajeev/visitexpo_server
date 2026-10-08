@@ -230,7 +230,7 @@ class AuthService {
       throw err;
     }
 
-    // 2. Find user containing this token in active list
+    // 2. Find user containing this token in active or recently rotated list
     const user = await UserRepository.findOne({
       _id: decoded.id,
       'refreshTokens.token': token
@@ -242,15 +242,38 @@ class AuthService {
       throw err;
     }
 
-    // 3. Clean up the used refresh token and issue new pair (rotation)
-    await UserRepository.removeRefreshToken(user._id, token);
+    const tokenEntry = (user.refreshTokens || []).find((t) => t.token === token);
+    const now = new Date();
 
+    // 3. Grace period check: if this token was already rotated within the last 60 seconds,
+    // don't reject it (handles concurrent requests from tab shifts or parallel requests)
+    if (tokenEntry && tokenEntry.rotatedAt) {
+      const ageMs = now.getTime() - new Date(tokenEntry.rotatedAt).getTime();
+      if (ageMs < 60 * 1000) {
+        const activeTokens = (user.refreshTokens || []).filter(
+          (t) => !t.rotatedAt && new Date(t.expiresAt) > now
+        );
+        const fallbackRefresh =
+          tokenEntry.replacedBy ||
+          (activeTokens.length > 0 ? activeTokens[activeTokens.length - 1].token : token);
+
+        return {
+          accessToken: generateAccessToken(user),
+          refreshToken: fallbackRefresh
+        };
+      } else {
+        const err = new Error('Refresh token has expired or was already rotated');
+        err.statusCode = 401;
+        throw err;
+      }
+    }
+
+    // 4. Token is active: generate new tokens and mark old token rotated
     const newAccessToken = generateAccessToken(user);
     const newRefreshToken = generateRefreshToken(user);
+    const expiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
-    await UserRepository.addRefreshToken(user._id, newRefreshToken, expiresAt);
+    await UserRepository.markRefreshTokenRotated(user._id, token, newRefreshToken, expiresAt);
 
     return {
       accessToken: newAccessToken,

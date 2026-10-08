@@ -27,10 +27,58 @@ class UserRepository extends BaseRepository {
   }
 
   async addRefreshToken(userId, token, expiresAt) {
+    const now = new Date();
+    // 1. Purge expired tokens
+    await this.model.findByIdAndUpdate(userId, {
+      $pull: { refreshTokens: { expiresAt: { $lt: now } } }
+    });
+    // 2. Push active token
     return await this.model.findByIdAndUpdate(
       userId,
       {
         $push: { refreshTokens: { token, expiresAt } }
+      },
+      { new: true }
+    );
+  }
+
+  async markRefreshTokenRotated(userId, oldToken, newToken, expiresAt) {
+    const now = new Date();
+    const graceCutoff = new Date(now.getTime() - 60 * 1000); // 60-second grace window
+
+    // 1. Mark old token as rotated with replacement reference
+    await this.model.updateOne(
+      { _id: userId, 'refreshTokens.token': oldToken },
+      {
+        $set: {
+          'refreshTokens.$.rotatedAt': now,
+          'refreshTokens.$.replacedBy': newToken
+        }
+      }
+    );
+
+    // 2. Purge expired or stale-rotated tokens
+    await this.model.findByIdAndUpdate(userId, {
+      $pull: {
+        refreshTokens: {
+          $or: [
+            { expiresAt: { $lt: now } },
+            { rotatedAt: { $lt: graceCutoff } }
+          ]
+        }
+      }
+    });
+
+    // 3. Push newly issued refresh token
+    return await this.model.findByIdAndUpdate(
+      userId,
+      {
+        $push: {
+          refreshTokens: {
+            token: newToken,
+            expiresAt
+          }
+        }
       },
       { new: true }
     );
