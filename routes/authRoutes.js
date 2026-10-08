@@ -14,6 +14,7 @@ import { authLimiter } from '../middlewares/rateLimiter.js';
 import jwt from 'jsonwebtoken';
 import UserRepository from '../repositories/UserRepository.js';
 import { generateAccessToken, generateRefreshToken } from '../utils/jwt.js';
+import { isCorporateEmail } from '../utils/emailValidator.js';
 
 const router = express.Router();
 
@@ -317,6 +318,27 @@ router.get('/me', protect, async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'User profile not found' });
     }
 
+    // Auto-sync corporate email plan activation for organizers
+    if (userDoc.role === 'organizer') {
+      const isCorporate = isCorporateEmail(userDoc.email);
+      let needsSave = false;
+      if (!userDoc.emailType) {
+        userDoc.emailType = isCorporate ? 'corporate' : 'general';
+        needsSave = true;
+      }
+      if (isCorporate && (!userDoc.isPlanActive || !userDoc.isVerified)) {
+        userDoc.isVerified = true;
+        userDoc.plan = 'free';
+        userDoc.planStatus = 'active';
+        userDoc.isPlanActive = true;
+        userDoc.planPaidAmount = 0;
+        needsSave = true;
+      }
+      if (needsSave) {
+        await userDoc.save();
+      }
+    }
+
     res.status(200).json({
       success: true,
       user: {
@@ -331,6 +353,11 @@ router.get('/me', protect, async (req, res, next) => {
         adminRole: userDoc.adminRole || '',
         permissions: userDoc.permissions || [],
         isVerified: userDoc.isVerified,
+        emailType: userDoc.emailType || (isCorporateEmail(userDoc.email) ? 'corporate' : 'general'),
+        plan: userDoc.plan || 'free',
+        planStatus: userDoc.planStatus || (userDoc.isVerified ? 'active' : 'payment_pending'),
+        isPlanActive: !!userDoc.isPlanActive,
+        planPaidAmount: userDoc.planPaidAmount || 0,
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,
         organization: userDoc.organization,
         isChatEnabled: !!userDoc.isChatEnabled,

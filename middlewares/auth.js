@@ -54,7 +54,22 @@ export const protect = async (req, res, next) => {
 // Role authorization check
 export const authorize = (...roles) => {
   return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
+    if (!req.user) {
+      const err = new Error('Access denied. Authentication required.');
+      err.statusCode = 401;
+      return next(err);
+    }
+
+    const userRole = req.user.role;
+    // Seamlessly match both 'sub_admin' and 'subadmin', and include 'admin' / 'super_admin'
+    const isAuthorized = roles.some(role => {
+      if (role === userRole) return true;
+      if ((role === 'sub_admin' || role === 'subadmin') && (userRole === 'sub_admin' || userRole === 'subadmin')) return true;
+      if (role === 'admin' && (userRole === 'super_admin' || userRole === 'sub_admin' || userRole === 'subadmin' || userRole === 'admin')) return true;
+      return false;
+    });
+
+    if (!isAuthorized) {
       const err = new Error(`User role '${req.user?.role || 'anonymous'}' is not authorized to access this resource.`);
       err.statusCode = 403;
       return next(err);

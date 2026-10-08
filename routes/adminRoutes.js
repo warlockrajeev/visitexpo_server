@@ -3618,7 +3618,8 @@ export const ADMIN_ROLE_PRESETS = [
       'exhibitors.manage',
       'visitors.view',
       'attendees.view',
-      'sponsors.manage'
+      'sponsors.manage',
+      'plans.manage'
     ]
   },
   {
@@ -3647,7 +3648,8 @@ export const ADMIN_ROLE_PRESETS = [
       'subscriptions.view',
       'subscriptions.manage',
       'invoices.view',
-      'tickets.manage'
+      'tickets.manage',
+      'plans.manage'
     ]
   },
   {
@@ -3680,6 +3682,7 @@ export const ADMIN_ROLE_PRESETS = [
       'rapid_creation.access',
       'subscriptions.view',
       'subscriptions.manage',
+      'plans.manage',
       'invoices.view',
       'tickets.manage',
       'contacts.manage',

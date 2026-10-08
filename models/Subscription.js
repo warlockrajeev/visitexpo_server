@@ -13,14 +13,24 @@ const SubscriptionSchema = new mongoose.Schema(
       required: true,
       index: true
     },
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null
+    },
     plan: {
       type: String,
       enum: ['free', 'starter', 'enterprise', 'growth'],
       default: 'free'
     },
+    emailType: {
+      type: String,
+      enum: ['corporate', 'general'],
+      default: 'corporate'
+    },
     status: {
       type: String,
-      enum: ['active', 'suspended', 'expired'],
+      enum: ['active', 'suspended', 'expired', 'payment_pending'],
       default: 'active'
     },
     startDate: {
@@ -37,7 +47,7 @@ const SubscriptionSchema = new mongoose.Schema(
     },
     paymentCycle: {
       type: String,
-      enum: ['monthly', 'quarterly', 'annual'],
+      enum: ['monthly', 'quarterly', 'annual', 'one_time'],
       default: 'quarterly'
     }
   },

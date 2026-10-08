@@ -6,8 +6,11 @@
 import crypto from 'crypto';
 import UserRepository from '../repositories/UserRepository.js';
 import Organization from '../models/Organization.js';
+import Subscription from '../models/Subscription.js';
+import Plan from '../models/Plan.js';
 import TwoFactorService from './twoFactorService.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
+import { isCorporateEmail } from '../utils/emailValidator.js';
 
 export const getRoleLabel = (role) => {
   if (!role) return 'User';
@@ -84,9 +87,40 @@ class AuthService {
       throw err;
     }
 
-    const isVerified = assignedRole === 'visitor'; // Visitors are auto-verified
+    // 4. Determine corporate vs general email & plan activation
+    const isCorporate = isCorporateEmail(normalizedEmail);
+    const emailType = isCorporate ? 'corporate' : 'general';
 
-    // 4. Create the User (password hashing handled by Mongoose pre-save hook)
+    let isVerified = false;
+    let planStatus = 'payment_pending';
+    let isPlanActive = false;
+    let planPaidAmount = 0;
+
+    if (assignedRole === 'visitor') {
+      isVerified = true;
+      planStatus = 'active';
+      isPlanActive = true;
+    } else if (assignedRole === 'organizer') {
+      const freePlanDoc = await Plan.findOne({ planId: 'free' });
+      const generalEmailPrice = freePlanDoc?.pricing?.generalEmailPrice !== undefined ? freePlanDoc.pricing.generalEmailPrice : 1499;
+      const isGeneralFree = generalEmailPrice === 0;
+
+      if (isCorporate || isGeneralFree) {
+        // Corporate business email or no charge for general email configured by admin: Free Organizer plan is automatically active!
+        isVerified = true;
+        planStatus = 'active';
+        isPlanActive = true;
+        planPaidAmount = 0;
+      } else {
+        // General personal email: requires ₹1,499 verification charge to activate
+        isVerified = false;
+        planStatus = 'payment_pending';
+        isPlanActive = false;
+        planPaidAmount = 0;
+      }
+    }
+
+    // Create the User (password hashing handled by Mongoose pre-save hook)
     const user = await UserRepository.create({
       name: name.trim(),
       email: normalizedEmail,
@@ -94,27 +128,49 @@ class AuthService {
       role: assignedRole,
       phone: cleanPhone,
       city: city.trim(),
+      emailType,
+      plan: 'free',
+      planStatus,
+      isPlanActive,
+      planPaidAmount,
       isVerified,
       isPhoneVerified: true,
       authProvider: 'local',
       hasCustomPassword: true
     });
 
-    // 5. Create default Organization if name is specified
-    if (orgName) {
+    // 5. Create default Organization & Subscription if organizer or name specified
+    if (orgName || assignedRole === 'organizer') {
       const organization = await Organization.create({
-        name: orgName.trim(),
+        name: (orgName || `${name.trim()}'s Organization`).trim(),
         contact: { email: normalizedEmail, phone: cleanPhone },
         address: { city: city.trim() },
         teamMembers: [{ user: user._id, role: assignedRole }]
       });
+
+      // Automatically create Subscription for organizer
+      if (assignedRole === 'organizer') {
+        const subscription = await Subscription.create({
+          organization: organization._id,
+          user: user._id,
+          plan: 'free',
+          emailType,
+          status: isPlanActive ? 'active' : 'payment_pending',
+          price: isCorporate ? 0 : 1499,
+          paymentCycle: isCorporate ? 'quarterly' : 'one_time',
+          startDate: new Date(),
+          endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+        });
+        organization.subscription = subscription._id;
+        await organization.save();
+      }
 
       // Link Organization to User
       user.organization = organization._id;
       await user.save();
     }
 
-    // 4. Generate JWT tokens
+    // 6. Generate JWT tokens
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
@@ -132,6 +188,11 @@ class AuthService {
         adminRole: user.adminRole || '',
         permissions: user.permissions || [],
         isVerified: user.isVerified,
+        emailType: user.emailType,
+        plan: user.plan,
+        planStatus: user.planStatus,
+        isPlanActive: user.isPlanActive,
+        planPaidAmount: user.planPaidAmount,
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,
         phone: user.phone || '',
@@ -179,11 +240,30 @@ class AuthService {
       throw err;
     }
 
-    // 4. Block login if account is pending admin/organizer verification
-    if (user.role === 'organizer' && !user.isVerified) {
-      const err = new Error('Your organizer account registration is pending Super Admin approval. Access will be granted once approved.');
-      err.statusCode = 403;
-      throw err;
+    // 4. Auto-sync organizer corporate email plan & verification
+    if (user.role === 'organizer') {
+      const isCorporate = isCorporateEmail(user.email);
+      let needsSave = false;
+      if (!user.emailType) {
+        user.emailType = isCorporate ? 'corporate' : 'general';
+        needsSave = true;
+      }
+      if (isCorporate && !user.isPlanActive) {
+        // Corporate business email: 100% Free Organizer plan automatically active!
+        user.isVerified = true;
+        user.plan = 'free';
+        user.planStatus = 'active';
+        user.isPlanActive = true;
+        user.planPaidAmount = 0;
+        needsSave = true;
+      } else if (!isCorporate && !user.isPlanActive) {
+        user.plan = 'free';
+        user.planStatus = user.isVerified ? 'active' : 'payment_pending';
+        needsSave = true;
+      }
+      if (needsSave) {
+        await user.save();
+      }
     }
 
     if (user.role === 'exhibitor' && !user.isVerified) {
@@ -210,6 +290,11 @@ class AuthService {
         adminRole: user.adminRole || '',
         permissions: user.permissions || [],
         isVerified: user.isVerified,
+        emailType: user.emailType || (isCorporateEmail(user.email) ? 'corporate' : 'general'),
+        plan: user.plan || 'free',
+        planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
+        isPlanActive: !!user.isPlanActive,
+        planPaidAmount: user.planPaidAmount || 0,
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,
         phone: user.phone || '',
@@ -373,6 +458,34 @@ class AuthService {
       // Auto-register new user authenticated via Google
       const randomPassword = crypto.randomBytes(24).toString('hex');
       const userName = name || normalizedEmail.split('@')[0];
+      const isCorporate = isCorporateEmail(normalizedEmail);
+      const emailType = isCorporate ? 'corporate' : 'general';
+
+      let isVerified = false;
+      let planStatus = 'payment_pending';
+      let isPlanActive = false;
+
+      if (assignedRole === 'visitor') {
+        isVerified = true;
+        planStatus = 'active';
+        isPlanActive = true;
+      } else if (assignedRole === 'organizer') {
+        const freePlanDoc = await Plan.findOne({ planId: 'free' });
+        const generalEmailPrice = freePlanDoc?.pricing?.generalEmailPrice !== undefined ? freePlanDoc.pricing.generalEmailPrice : 1499;
+        const isGeneralFree = generalEmailPrice === 0;
+
+        if (isCorporate || isGeneralFree) {
+          isVerified = true;
+          planStatus = 'active';
+          isPlanActive = true;
+        } else {
+          isVerified = false;
+          planStatus = 'payment_pending';
+          isPlanActive = false;
+        }
+      } else if (assignedRole === 'exhibitor') {
+        isVerified = false;
+      }
 
       user = await UserRepository.create({
         name: userName,
@@ -383,7 +496,12 @@ class AuthService {
         company: company || organizationName || '',
         designation: designation || '',
         city: city || '',
-        isVerified: true,
+        emailType,
+        plan: 'free',
+        planStatus,
+        isPlanActive,
+        planPaidAmount: 0,
+        isVerified,
         isPhoneVerified: true,
         authProvider: 'google',
         hasCustomPassword: false
@@ -397,16 +515,40 @@ class AuthService {
           contact: { email: normalizedEmail, phone: cleanPhone },
           address: { city: city || '' },
           description: industry ? `Industry Sector: ${industry}` : '',
-          teamMembers: [{ user: user._id, role: 'organizer' }]
+          teamMembers: [{ user: user._id, role: assignedRole }]
         });
+
+        if (assignedRole === 'organizer') {
+          const subscription = await Subscription.create({
+            organization: organization._id,
+            user: user._id,
+            plan: 'free',
+            emailType,
+            status: isPlanActive ? 'active' : 'payment_pending',
+            price: isCorporate ? 0 : 1499,
+            paymentCycle: isCorporate ? 'quarterly' : 'one_time',
+            startDate: new Date(),
+            endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+          });
+          organization.subscription = subscription._id;
+          await organization.save();
+        }
 
         user.organization = organization._id;
         await user.save();
       }
     } else {
-      // If user exists, ensure they are verified since Google verified their email
-      if (!user.isVerified) {
-        user.isVerified = true;
+      // If user exists, sync corporate email plan if organizer
+      if (user.role === 'organizer') {
+        const isCorporate = isCorporateEmail(user.email);
+        if (!user.emailType) user.emailType = isCorporate ? 'corporate' : 'general';
+        if (isCorporate && !user.isPlanActive) {
+          user.isVerified = true;
+          user.plan = 'free';
+          user.planStatus = 'active';
+          user.isPlanActive = true;
+          user.planPaidAmount = 0;
+        }
       }
       if (!user.authProvider) {
         user.authProvider = 'google';
@@ -445,7 +587,7 @@ class AuthService {
           contact: { email: normalizedEmail, phone: user.phone || '' },
           address: { city: city || '' },
           description: industry ? `Industry Sector: ${industry}` : '',
-          teamMembers: [{ user: user._id, role: 'organizer' }]
+          teamMembers: [{ user: user._id, role: user.role }]
         });
         user.organization = organization._id;
       } else if (user.organization && organizationName) {
@@ -486,6 +628,11 @@ class AuthService {
         city: user.city || '',
         role: user.role,
         isVerified: user.isVerified,
+        emailType: user.emailType || (isCorporateEmail(user.email) ? 'corporate' : 'general'),
+        plan: user.plan || 'free',
+        planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
+        isPlanActive: !!user.isPlanActive,
+        planPaidAmount: user.planPaidAmount || 0,
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,
         authProvider: user.authProvider || 'google',

@@ -7,6 +7,9 @@ import express from 'express';
 import Plan from '../models/Plan.js';
 import PlanInquiry from '../models/PlanInquiry.js';
 import Subscription from '../models/Subscription.js';
+import Organization from '../models/Organization.js';
+import User from '../models/User.js';
+import { isCorporateEmail } from '../utils/emailValidator.js';
 import { protect, authorize } from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -552,7 +555,7 @@ router.post('/inquire', async (req, res, next) => {
 
 // @desc    Admin: Get all plans (including inactive) + stats
 // @route   GET /api/plans/admin/all
-router.get('/admin/all', protect, authorize('super_admin', 'subadmin'), async (req, res, next) => {
+router.get('/admin/all', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
     await seedDefaultPlansIfEmpty();
 
@@ -581,7 +584,7 @@ router.get('/admin/all', protect, authorize('super_admin', 'subadmin'), async (r
 
 // @desc    Admin: Create new custom plan tier
 // @route   POST /api/plans/admin
-router.post('/admin', protect, authorize('super_admin'), async (req, res, next) => {
+router.post('/admin', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
     const { planId, name, tagline, description, badge, badgeColor, pricing, highlights, features, comparisonDetails, growthServices, isActive, isPopular, sortOrder } = req.body;
 
@@ -623,7 +626,7 @@ router.post('/admin', protect, authorize('super_admin'), async (req, res, next) 
 
 // @desc    Admin: Update existing plan
 // @route   PUT /api/plans/admin/:id
-router.put('/admin/:id', protect, authorize('super_admin'), async (req, res, next) => {
+router.put('/admin/:id', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const updates = req.body;
@@ -646,7 +649,7 @@ router.put('/admin/:id', protect, authorize('super_admin'), async (req, res, nex
 
 // @desc    Admin: Toggle active status or delete custom plan
 // @route   DELETE /api/plans/admin/:id
-router.delete('/admin/:id', protect, authorize('super_admin'), async (req, res, next) => {
+router.delete('/admin/:id', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const plan = await Plan.findById(id);
@@ -678,7 +681,7 @@ router.delete('/admin/:id', protect, authorize('super_admin'), async (req, res, 
 
 // @desc    Admin: Reset / Re-seed official default plans
 // @route   POST /api/plans/admin/seed-defaults
-router.post('/admin/seed-defaults', protect, authorize('super_admin'), async (req, res, next) => {
+router.post('/admin/seed-defaults', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
     for (const planData of DEFAULT_OFFICIAL_PLANS) {
       await Plan.findOneAndUpdate(
@@ -702,7 +705,7 @@ router.post('/admin/seed-defaults', protect, authorize('super_admin'), async (re
 
 // @desc    Admin: Get all organizer plan inquiries & top-up requests
 // @route   GET /api/plans/admin/inquiries
-router.get('/admin/inquiries', protect, authorize('super_admin', 'subadmin'), async (req, res, next) => {
+router.get('/admin/inquiries', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
     const { status, planId, page = 1, limit = 50 } = req.query;
     const query = {};
@@ -736,7 +739,7 @@ router.get('/admin/inquiries', protect, authorize('super_admin', 'subadmin'), as
 
 // @desc    Admin: Update plan inquiry status or add admin notes
 // @route   PATCH /api/plans/admin/inquiries/:id
-router.patch('/admin/inquiries/:id', protect, authorize('super_admin', 'subadmin'), async (req, res, next) => {
+router.patch('/admin/inquiries/:id', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const { status, adminNotes } = req.body;
@@ -759,6 +762,447 @@ router.patch('/admin/inquiries/:id', protect, authorize('super_admin', 'subadmin
       message: 'Inquiry record updated successfully.',
       data: inquiry
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Admin: Search users for plan assignment
+// @route   GET /api/plans/admin/users
+router.get('/admin/users', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
+  try {
+    const { q, role, page = 1, limit = 50 } = req.query;
+    const filter = {};
+
+    if (role && role !== 'all') {
+      filter.role = role;
+    }
+
+    if (q && q.trim()) {
+      const regex = new RegExp(q.trim(), 'i');
+      filter.$or = [{ name: regex }, { email: regex }, { phone: regex }];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [users, total] = await Promise.all([
+      User.find(filter)
+        .select('name email role isVerified emailType plan planStatus isPlanActive planPaidAmount organization phone city createdAt')
+        .populate('organization', 'name')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      User.countDocuments(filter)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: users,
+      total
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Admin: Assign plan to any user with optional no-charge general mail waiver
+// @route   POST /api/plans/admin/assign-plan
+router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
+  try {
+    const {
+      userId,
+      planId = 'free',
+      billingCycle = 'yearly',
+      noChargeForGeneralMail = true,
+      price = 0,
+      isVerified = true,
+      upgradeRoleToOrganizer = true,
+      adminNotes = '',
+      durationDays
+    } = req.body;
+
+    if (!userId) {
+      return res.status(400).json({ success: false, message: 'User ID is required.' });
+    }
+
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const isCorporate = isCorporateEmail(user.email);
+    const targetPlanId = planId || 'free';
+
+    // Calculate final price: if corporate or noChargeForGeneralMail is true, price is 0
+    let finalPrice = price !== undefined ? Number(price) : 0;
+    if (noChargeForGeneralMail && targetPlanId === 'free') {
+      finalPrice = 0;
+    }
+
+    // Upgrade role to organizer if requested
+    if (upgradeRoleToOrganizer && user.role !== 'organizer') {
+      user.role = 'organizer';
+    }
+
+    user.plan = targetPlanId;
+    user.planStatus = 'active';
+    user.isPlanActive = true;
+    if (isVerified) {
+      user.isVerified = true;
+    }
+    user.emailType = isCorporate ? 'corporate' : 'general';
+    user.planPaidAmount = finalPrice;
+    await user.save();
+
+    // Ensure Organization exists for organizer
+    let orgId = user.organization;
+    if (!orgId) {
+      const org = await Organization.create({
+        name: `${(user.name || 'User').trim()}'s Organization`,
+        contact: { email: user.email, phone: user.phone || '' },
+        teamMembers: [{ user: user._id, role: user.role }]
+      });
+      orgId = org._id;
+      user.organization = orgId;
+      await user.save();
+    }
+
+    // Calculate duration
+    let durationMs;
+    if (durationDays) {
+      durationMs = Number(durationDays) * 24 * 60 * 60 * 1000;
+    } else if (billingCycle === 'lifetime' || targetPlanId === 'free') {
+      durationMs = 10 * 365 * 24 * 60 * 60 * 1000; // 10 years
+    } else if (billingCycle === 'yearly') {
+      durationMs = 365 * 24 * 60 * 60 * 1000;
+    } else {
+      durationMs = 90 * 24 * 60 * 60 * 1000; // quarterly
+    }
+
+    // Create or update subscription record
+    const sub = await Subscription.findOneAndUpdate(
+      { organization: orgId },
+      {
+        organization: orgId,
+        user: user._id,
+        plan: targetPlanId,
+        emailType: user.emailType,
+        status: 'active',
+        price: finalPrice,
+        paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
+        startDate: new Date(),
+        endDate: new Date(Date.now() + durationMs),
+        adminNotes: adminNotes || `Assigned by admin ${req.user?.name || 'Super Admin'} (No charge for general mail: ${noChargeForGeneralMail ? 'Yes' : 'No'})`
+      },
+      { upsert: true, new: true }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: `Plan "${targetPlanId.toUpperCase()}" assigned successfully to ${user.name} (${user.email}). ${noChargeForGeneralMail ? 'No charge applied for general mail (Fee waived: ₹0).' : ''}`,
+      data: {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          plan: user.plan,
+          planStatus: user.planStatus,
+          isPlanActive: user.isPlanActive,
+          isVerified: user.isVerified,
+          emailType: user.emailType,
+          planPaidAmount: user.planPaidAmount
+        },
+        subscription: sub
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Admin: Toggle global "No charge for general mail" on Free Organizer Plan
+// @route   POST /api/plans/admin/toggle-general-mail-charge
+router.post('/admin/toggle-general-mail-charge', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
+  try {
+    const noCharge = req.body.noCharge !== undefined 
+      ? !!req.body.noCharge 
+      : (req.body.makeFree !== undefined 
+          ? !!req.body.makeFree 
+          : Number(req.body.price) === 0);
+    const targetPrice = noCharge ? 0 : 1499;
+
+    const updatedPlan = await Plan.findOneAndUpdate(
+      { planId: 'free' },
+      { $set: { 'pricing.generalEmailPrice': targetPrice } },
+      { new: true, upsert: true }
+    );
+
+    res.status(200).json({
+      success: true,
+      message: noCharge
+        ? 'Free Organizer plan updated: No charge for general mail! Personal emails (@gmail, etc) now register for 100% FREE (₹0).'
+        : 'Free Organizer plan updated: General email registration charge set to ₹1,499.',
+      generalEmailPrice: targetPrice,
+      noCharge: targetPrice === 0,
+      plan: updatedPlan
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Admin: List all assigned organizer subscriptions
+// @route   GET /api/plans/admin/assigned-subscriptions
+router.get('/admin/assigned-subscriptions', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
+  try {
+    const { page = 1, limit = 50, plan } = req.query;
+    const filter = {};
+    if (plan && plan !== 'all') {
+      filter.plan = plan;
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    const [subscriptions, total] = await Promise.all([
+      Subscription.find(filter)
+        .populate('user', 'name email role isVerified emailType plan planStatus isPlanActive phone')
+        .populate('organization', 'name')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      Subscription.countDocuments(filter)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: subscriptions,
+      total
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Check email domain eligibility for Free Organizer plan (Corporate ₹0 vs General ₹1,499 or dynamic)
+// @route   POST /api/plans/check-email
+router.post('/check-email', async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ success: false, message: 'Valid email address is required.' });
+    }
+
+    const isCorporate = isCorporateEmail(email);
+    const domain = email.toLowerCase().trim().split('@')[1];
+
+    const freePlan = await Plan.findOne({ planId: 'free' });
+    const generalPrice = freePlan?.pricing?.generalEmailPrice !== undefined ? freePlan.pricing.generalEmailPrice : 1499;
+    const isNoChargeGeneral = generalPrice === 0;
+    const price = isCorporate || isNoChargeGeneral ? 0 : generalPrice;
+
+    res.status(200).json({
+      success: true,
+      email: email.toLowerCase().trim(),
+      domain,
+      isCorporate,
+      emailType: isCorporate ? 'corporate' : 'general',
+      price,
+      generalEmailPrice: generalPrice,
+      noChargeForGeneralMail: isNoChargeGeneral,
+      formattedPrice: price === 0 ? '₹0 (Free / No Charge)' : `₹${price.toLocaleString()} (One-Time Verification)`,
+      message: isCorporate
+        ? `Corporate business domain (@${domain}) verified! Free Organizer Plan is automatically active upon registration (₹0).`
+        : isNoChargeGeneral
+        ? `Personal email domain (@${domain}) verified! No charge for general mail promotion is active (₹0 Free).`
+        : `Personal email domain (@${domain}) detected. One-time verification fee of ₹${price.toLocaleString()} applies to activate Free Organizer Plan.`
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get current organizer plan & subscription status
+// @route   GET /api/plans/my-plan
+router.get('/my-plan', protect, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const isCorporate = isCorporateEmail(user.email);
+    let sub = null;
+    if (user.organization) {
+      sub = await Subscription.findOne({ organization: user.organization }).sort({ createdAt: -1 });
+    }
+
+    const freePlan = await Plan.findOne({ planId: 'free' });
+    const generalPrice = freePlan?.pricing?.generalEmailPrice !== undefined ? freePlan.pricing.generalEmailPrice : 1499;
+    const isNoChargeGeneral = generalPrice === 0;
+
+    // Auto-activate for corporate email OR when general email is configured as no-charge
+    if (user.role === 'organizer' && (isCorporate || isNoChargeGeneral) && !user.isPlanActive) {
+      user.isVerified = true;
+      user.emailType = isCorporate ? 'corporate' : 'general';
+      user.plan = 'free';
+      user.planStatus = 'active';
+      user.isPlanActive = true;
+      user.planPaidAmount = 0;
+      await user.save();
+
+      if (user.organization && (!sub || sub.status !== 'active')) {
+        sub = await Subscription.findOneAndUpdate(
+          { organization: user.organization },
+          {
+            plan: 'free',
+            emailType: user.emailType,
+            status: 'active',
+            price: 0,
+            paymentCycle: 'quarterly',
+            user: user._id,
+            startDate: new Date(),
+            endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+          },
+          { upsert: true, new: true }
+        );
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      plan: user.plan || 'free',
+      planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
+      isPlanActive: !!user.isPlanActive,
+      isCorporate,
+      emailType: user.emailType || (isCorporate ? 'corporate' : 'general'),
+      planPaidAmount: user.planPaidAmount || 0,
+      generalEmailPrice: generalPrice,
+      noChargeForGeneralMail: isNoChargeGeneral,
+      subscription: sub,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        isVerified: user.isVerified
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Activate Free Organizer Plan (₹0 for corporate or no-charge general, ₹1,499 standard general)
+// @route   POST /api/plans/activate-free-plan
+router.post('/activate-free-plan', protect, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    if (user.role !== 'organizer') {
+      return res.status(403).json({ success: false, message: 'Only organizers can activate this plan.' });
+    }
+
+    const isCorporate = isCorporateEmail(user.email);
+    const { transactionId } = req.body;
+
+    const freePlan = await Plan.findOne({ planId: 'free' });
+    const generalPrice = freePlan?.pricing?.generalEmailPrice !== undefined ? freePlan.pricing.generalEmailPrice : 1499;
+    const isNoChargeGeneral = generalPrice === 0;
+
+    if (isCorporate || isNoChargeGeneral) {
+      // 100% Free: Auto-activate immediately
+      user.isVerified = true;
+      user.emailType = isCorporate ? 'corporate' : 'general';
+      user.plan = 'free';
+      user.planStatus = 'active';
+      user.isPlanActive = true;
+      user.planPaidAmount = 0;
+      await user.save();
+
+      if (user.organization) {
+        await Subscription.findOneAndUpdate(
+          { organization: user.organization },
+          {
+            plan: 'free',
+            emailType: user.emailType,
+            status: 'active',
+            price: 0,
+            paymentCycle: 'quarterly',
+            user: user._id,
+            startDate: new Date(),
+            endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+          },
+          { upsert: true, new: true }
+        );
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: isCorporate
+          ? 'Free Organizer Plan is active! Corporate business domain verified (₹0).'
+          : 'Free Organizer Plan is active! No charge for general mail promotion applied (₹0).',
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified,
+          emailType: user.emailType,
+          plan: user.plan,
+          planStatus: user.planStatus,
+          isPlanActive: user.isPlanActive,
+          planPaidAmount: 0
+        }
+      });
+    } else {
+      // General personal email: requires generalPrice charge (₹1,499)
+      const txn = transactionId || `TXN_ACT_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+
+      user.isVerified = true;
+      user.emailType = 'general';
+      user.plan = 'free';
+      user.planStatus = 'active';
+      user.isPlanActive = true;
+      user.planPaidAmount = generalPrice;
+      await user.save();
+
+      if (user.organization) {
+        await Subscription.findOneAndUpdate(
+          { organization: user.organization },
+          {
+            plan: 'free',
+            emailType: 'general',
+            status: 'active',
+            price: generalPrice,
+            paymentCycle: 'one_time',
+            user: user._id,
+            startDate: new Date(),
+            endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+          },
+          { upsert: true, new: true }
+        );
+      }
+
+      return res.status(200).json({
+        success: true,
+        message: `Payment of ₹${generalPrice.toLocaleString()} successful! Free Organizer Plan is now active.`,
+        transactionId: txn,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: user.isVerified,
+          emailType: user.emailType,
+          plan: user.plan,
+          planStatus: user.planStatus,
+          isPlanActive: user.isPlanActive,
+          planPaidAmount: generalPrice
+        }
+      });
+    }
   } catch (error) {
     next(error);
   }

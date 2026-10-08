@@ -100,6 +100,29 @@ const UserSchema = new mongoose.Schema(
       enum: ['active', 'suspended', 'pending'],
       default: 'active'
     },
+    emailType: {
+      type: String,
+      enum: ['corporate', 'general'],
+      default: 'general'
+    },
+    plan: {
+      type: String,
+      enum: ['free', 'starter', 'enterprise', 'growth'],
+      default: 'free'
+    },
+    planStatus: {
+      type: String,
+      enum: ['active', 'payment_pending', 'suspended', 'expired'],
+      default: 'active'
+    },
+    isPlanActive: {
+      type: Boolean,
+      default: false
+    },
+    planPaidAmount: {
+      type: Number,
+      default: 0
+    },
     isChatEnabled: {
       type: Boolean,
       default: false
