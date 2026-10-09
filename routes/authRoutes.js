@@ -7,6 +7,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
+import Subscription from '../models/Subscription.js';
 import AuthService from '../services/AuthService.js';
 import TwoFactorService from '../services/twoFactorService.js';
 import { protect } from '../middlewares/auth.js';
@@ -318,15 +319,34 @@ router.get('/me', protect, async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'User profile not found' });
     }
 
-    // Auto-sync corporate email plan activation for organizers
+    // Auto-sync corporate email plan activation & active subscription for organizers
+    let activeSub = null;
     if (userDoc.role === 'organizer') {
-      const isCorporate = isCorporateEmail(userDoc.email);
+      const orgId = userDoc.organization?._id || userDoc.organization;
+      activeSub = await Subscription.findOne({
+        $or: [
+          ...(orgId ? [{ organization: orgId }] : []),
+          { user: userDoc._id }
+        ],
+        status: 'active'
+      }).sort({ createdAt: -1 });
+
       let needsSave = false;
+      const isCorporate = isCorporateEmail(userDoc.email);
       if (!userDoc.emailType) {
         userDoc.emailType = isCorporate ? 'corporate' : 'general';
         needsSave = true;
       }
-      if (isCorporate && (!userDoc.isPlanActive || !userDoc.isVerified)) {
+
+      if (activeSub && activeSub.plan) {
+        if (userDoc.plan !== activeSub.plan || !userDoc.isPlanActive || !userDoc.isVerified) {
+          userDoc.plan = activeSub.plan;
+          userDoc.planStatus = 'active';
+          userDoc.isPlanActive = true;
+          userDoc.isVerified = true;
+          needsSave = true;
+        }
+      } else if (isCorporate && (!userDoc.isPlanActive || !userDoc.isVerified)) {
         userDoc.isVerified = true;
         userDoc.plan = 'free';
         userDoc.planStatus = 'active';
@@ -334,6 +354,7 @@ router.get('/me', protect, async (req, res, next) => {
         userDoc.planPaidAmount = 0;
         needsSave = true;
       }
+
       if (needsSave) {
         await userDoc.save();
       }
@@ -354,10 +375,11 @@ router.get('/me', protect, async (req, res, next) => {
         permissions: userDoc.permissions || [],
         isVerified: userDoc.isVerified,
         emailType: userDoc.emailType || (isCorporateEmail(userDoc.email) ? 'corporate' : 'general'),
-        plan: userDoc.plan || 'free',
-        planStatus: userDoc.planStatus || (userDoc.isVerified ? 'active' : 'payment_pending'),
-        isPlanActive: !!userDoc.isPlanActive,
-        planPaidAmount: userDoc.planPaidAmount || 0,
+        plan: activeSub?.plan || userDoc.plan || 'free',
+        planStatus: activeSub?.status || userDoc.planStatus || (userDoc.isVerified ? 'active' : 'payment_pending'),
+        isPlanActive: activeSub ? activeSub.status === 'active' : !!userDoc.isPlanActive,
+        subscription: activeSub,
+        planPaidAmount: activeSub?.price !== undefined ? activeSub.price : (userDoc.planPaidAmount || 0),
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,
         organization: userDoc.organization,
         isChatEnabled: !!userDoc.isChatEnabled,

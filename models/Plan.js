@@ -83,11 +83,11 @@ const PlanSchema = new mongoose.Schema(
       default: 'bg-primary text-black'
     },
     pricing: {
-      corporateEmailPrice: { type: Number, default: 0 },
-      generalEmailPrice: { type: Number, default: 0 },
-      quarterlyPrice: { type: Number, default: 0 },
-      yearlyPrice: { type: Number, default: 0 },
-      proposedEventResearchPrice: { type: Number, default: 4999 },
+      corporateEmailPrice: { type: Number, default: 0, min: [0, 'Corporate email price cannot be negative'] },
+      generalEmailPrice: { type: Number, default: 0, min: [0, 'General email price cannot be negative'] },
+      quarterlyPrice: { type: Number, default: 0, min: [0, 'Quarterly price cannot be negative'] },
+      yearlyPrice: { type: Number, default: 0, min: [0, 'Yearly price cannot be negative'] },
+      proposedEventResearchPrice: { type: Number, default: 4999, min: [0, 'Proposed event research price cannot be negative'] },
       currency: { type: String, default: 'INR' },
       currencySymbol: { type: String, default: '₹' },
       billingNote: { type: String, default: '' }

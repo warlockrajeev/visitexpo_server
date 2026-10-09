@@ -631,6 +631,40 @@ router.put('/admin/:id', protect, authorize('super_admin', 'sub_admin', 'subadmi
     const { id } = req.params;
     const updates = req.body;
 
+    if (updates.name !== undefined && !updates.name.trim()) {
+      return res.status(400).json({ success: false, message: 'Plan name cannot be empty.' });
+    }
+
+    if (updates.pricing) {
+      const {
+        corporateEmailPrice,
+        generalEmailPrice,
+        quarterlyPrice,
+        yearlyPrice,
+        proposedEventResearchPrice
+      } = updates.pricing;
+
+      const prices = [
+        { key: 'Corporate Email Price', val: corporateEmailPrice },
+        { key: 'General Email Price', val: generalEmailPrice },
+        { key: 'Quarterly Price', val: quarterlyPrice },
+        { key: 'Yearly Price', val: yearlyPrice },
+        { key: 'Proposed Event Research Price', val: proposedEventResearchPrice }
+      ];
+
+      for (const p of prices) {
+        if (p.val !== undefined && p.val !== null && p.val !== '') {
+          const num = Number(p.val);
+          if (isNaN(num) || num < 0) {
+            return res.status(400).json({
+              success: false,
+              message: `${p.key} cannot be a negative number or invalid value.`
+            });
+          }
+        }
+      }
+    }
+
     const plan = await Plan.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
 
     if (!plan) {
@@ -810,6 +844,7 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
   try {
     const {
       userId,
+      userIds,
       planId = 'free',
       billingCycle = 'yearly',
       noChargeForGeneralMail = true,
@@ -820,56 +855,31 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
       durationDays
     } = req.body;
 
-    if (!userId) {
-      return res.status(400).json({ success: false, message: 'User ID is required.' });
+    const targetUserIds = Array.isArray(userIds) && userIds.length > 0
+      ? userIds
+      : (userId ? [userId] : []);
+
+    if (targetUserIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'At least one User ID is required.' });
     }
 
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
+    // Ensure Custom Duration cannot be negative
+    const parsedDurationDays = durationDays !== undefined && durationDays !== '' && durationDays !== null
+      ? Math.max(0, Number(durationDays))
+      : undefined;
 
-    const isCorporate = isCorporateEmail(user.email);
     const targetPlanId = planId || 'free';
 
     // Calculate final price: if corporate or noChargeForGeneralMail is true, price is 0
-    let finalPrice = price !== undefined ? Number(price) : 0;
+    let finalPrice = price !== undefined ? Math.max(0, Number(price)) : 0;
     if (noChargeForGeneralMail && targetPlanId === 'free') {
       finalPrice = 0;
     }
 
-    // Upgrade role to organizer if requested
-    if (upgradeRoleToOrganizer && user.role !== 'organizer') {
-      user.role = 'organizer';
-    }
-
-    user.plan = targetPlanId;
-    user.planStatus = 'active';
-    user.isPlanActive = true;
-    if (isVerified) {
-      user.isVerified = true;
-    }
-    user.emailType = isCorporate ? 'corporate' : 'general';
-    user.planPaidAmount = finalPrice;
-    await user.save();
-
-    // Ensure Organization exists for organizer
-    let orgId = user.organization;
-    if (!orgId) {
-      const org = await Organization.create({
-        name: `${(user.name || 'User').trim()}'s Organization`,
-        contact: { email: user.email, phone: user.phone || '' },
-        teamMembers: [{ user: user._id, role: user.role }]
-      });
-      orgId = org._id;
-      user.organization = orgId;
-      await user.save();
-    }
-
     // Calculate duration
     let durationMs;
-    if (durationDays) {
-      durationMs = Number(durationDays) * 24 * 60 * 60 * 1000;
+    if (parsedDurationDays && parsedDurationDays > 0) {
+      durationMs = parsedDurationDays * 24 * 60 * 60 * 1000;
     } else if (billingCycle === 'lifetime' || targetPlanId === 'free') {
       durationMs = 10 * 365 * 24 * 60 * 60 * 1000; // 10 years
     } else if (billingCycle === 'yearly') {
@@ -878,41 +888,86 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
       durationMs = 90 * 24 * 60 * 60 * 1000; // quarterly
     }
 
-    // Create or update subscription record
-    const sub = await Subscription.findOneAndUpdate(
-      { organization: orgId },
-      {
-        organization: orgId,
-        user: user._id,
-        plan: targetPlanId,
-        emailType: user.emailType,
-        status: 'active',
-        price: finalPrice,
-        paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
-        startDate: new Date(),
-        endDate: new Date(Date.now() + durationMs),
-        adminNotes: adminNotes || `Assigned by admin ${req.user?.name || 'Super Admin'} (No charge for general mail: ${noChargeForGeneralMail ? 'Yes' : 'No'})`
-      },
-      { upsert: true, new: true }
-    );
+    const assignedUsers = [];
+    let lastSubscription = null;
+
+    for (const uId of targetUserIds) {
+      const user = await User.findById(uId);
+      if (!user) continue;
+
+      const isCorporate = isCorporateEmail(user.email);
+
+      // Upgrade role to organizer if requested
+      if (upgradeRoleToOrganizer && user.role !== 'organizer') {
+        user.role = 'organizer';
+      }
+
+      user.plan = targetPlanId;
+      user.planStatus = 'active';
+      user.isPlanActive = true;
+      if (isVerified) {
+        user.isVerified = true;
+      }
+      user.emailType = isCorporate ? 'corporate' : 'general';
+      user.planPaidAmount = finalPrice;
+      await user.save();
+
+      // Ensure Organization exists for organizer
+      let orgId = user.organization;
+      if (!orgId) {
+        const org = await Organization.create({
+          name: `${(user.name || 'User').trim()}'s Organization`,
+          contact: { email: user.email, phone: user.phone || '' },
+          teamMembers: [{ user: user._id, role: user.role }]
+        });
+        orgId = org._id;
+        user.organization = orgId;
+        await user.save();
+      }
+
+      // Create or update subscription record
+      lastSubscription = await Subscription.findOneAndUpdate(
+        { organization: orgId },
+        {
+          organization: orgId,
+          user: user._id,
+          plan: targetPlanId,
+          emailType: user.emailType,
+          status: 'active',
+          price: finalPrice,
+          paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
+          startDate: new Date(),
+          endDate: new Date(Date.now() + durationMs),
+          adminNotes: adminNotes || `Assigned by admin ${req.user?.name || 'Super Admin'} (No charge for general mail: ${noChargeForGeneralMail ? 'Yes' : 'No'})`
+        },
+        { upsert: true, new: true }
+      );
+
+      assignedUsers.push({
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        plan: user.plan
+      });
+    }
+
+    if (assignedUsers.length === 0) {
+      return res.status(404).json({ success: false, message: 'No valid users found to assign plan.' });
+    }
+
+    const message = assignedUsers.length === 1
+      ? `Plan "${targetPlanId.toUpperCase()}" assigned successfully to ${assignedUsers[0].name} (${assignedUsers[0].email}). ${noChargeForGeneralMail ? 'No charge applied for general mail (Fee waived: ₹0).' : ''}`
+      : `Plan "${targetPlanId.toUpperCase()}" assigned successfully to ${assignedUsers.length} users. ${noChargeForGeneralMail ? 'No charge applied for general mail (Fee waived: ₹0).' : ''}`;
 
     res.status(200).json({
       success: true,
-      message: `Plan "${targetPlanId.toUpperCase()}" assigned successfully to ${user.name} (${user.email}). ${noChargeForGeneralMail ? 'No charge applied for general mail (Fee waived: ₹0).' : ''}`,
+      message,
       data: {
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          role: user.role,
-          plan: user.plan,
-          planStatus: user.planStatus,
-          isPlanActive: user.isPlanActive,
-          isVerified: user.isVerified,
-          emailType: user.emailType,
-          planPaidAmount: user.planPaidAmount
-        },
-        subscription: sub
+        count: assignedUsers.length,
+        users: assignedUsers,
+        user: assignedUsers[0],
+        subscription: lastSubscription
       }
     });
   } catch (error) {
@@ -1030,17 +1085,40 @@ router.get('/my-plan', protect, async (req, res, next) => {
     }
 
     const isCorporate = isCorporateEmail(user.email);
-    let sub = null;
-    if (user.organization) {
-      sub = await Subscription.findOne({ organization: user.organization }).sort({ createdAt: -1 });
+    let sub = await Subscription.findOne({
+      $or: [
+        ...(user.organization ? [{ organization: user.organization }] : []),
+        { user: user._id }
+      ],
+      status: 'active'
+    }).sort({ createdAt: -1 });
+
+    if (!sub && user.organization) {
+      sub = await Subscription.findOne({
+        $or: [
+          { organization: user.organization },
+          { user: user._id }
+        ]
+      }).sort({ createdAt: -1 });
+    }
+
+    // Auto-sync plan from active subscription if present
+    if (sub && sub.status === 'active' && sub.plan) {
+      if (user.plan !== sub.plan || !user.isPlanActive || !user.isVerified) {
+        user.plan = sub.plan;
+        user.planStatus = 'active';
+        user.isPlanActive = true;
+        user.isVerified = true;
+        await user.save();
+      }
     }
 
     const freePlan = await Plan.findOne({ planId: 'free' });
     const generalPrice = freePlan?.pricing?.generalEmailPrice !== undefined ? freePlan.pricing.generalEmailPrice : 1499;
     const isNoChargeGeneral = generalPrice === 0;
 
-    // Auto-activate for corporate email OR when general email is configured as no-charge
-    if (user.role === 'organizer' && (isCorporate || isNoChargeGeneral) && !user.isPlanActive) {
+    // Auto-activate for corporate email OR when general email is configured as no-charge (if no active paid plan)
+    if (user.role === 'organizer' && (isCorporate || isNoChargeGeneral) && !user.isPlanActive && (!sub || sub.status !== 'active')) {
       user.isVerified = true;
       user.emailType = isCorporate ? 'corporate' : 'general';
       user.plan = 'free';
@@ -1069,12 +1147,12 @@ router.get('/my-plan', protect, async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      plan: user.plan || 'free',
-      planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
-      isPlanActive: !!user.isPlanActive,
+      plan: sub?.plan || user.plan || 'free',
+      planStatus: sub?.status || user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
+      isPlanActive: sub ? sub.status === 'active' : !!user.isPlanActive,
       isCorporate,
       emailType: user.emailType || (isCorporate ? 'corporate' : 'general'),
-      planPaidAmount: user.planPaidAmount || 0,
+      planPaidAmount: sub?.price !== undefined ? sub.price : (user.planPaidAmount || 0),
       generalEmailPrice: generalPrice,
       noChargeForGeneralMail: isNoChargeGeneral,
       subscription: sub,
