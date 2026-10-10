@@ -16,7 +16,7 @@ import { getAggregatedOrganizers } from '../routes/adminRoutes.js';
 async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
   // 1. Direct Organizer User ID
   if (organizerId && mongoose.isValidObjectId(organizerId)) {
-    const user = await User.findById(organizerId).select('name email role isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
+    const user = await User.findById(organizerId).select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
     if (user && (user.role === 'organizer' || user.role === 'super_admin' || user.role === 'event_manager')) {
       return { user, source: 'user_id' };
     }
@@ -25,7 +25,7 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
     const org = await Organization.findById(organizerId);
     if (org) {
       const orgUser = await User.findOne({ organization: org._id, role: 'organizer' })
-        .select('name email role isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
+        .select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
       if (orgUser) return { user: orgUser, organization: org, source: 'organization_id' };
       // Fallback: synthesized user object from organization
       return {
@@ -34,11 +34,13 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
           name: org.name,
           email: org.contact?.email || '',
           role: 'organizer',
+          plan: org.plan || 'free',
+          isPlanActive: org.isPlanActive !== false,
           isVerified: true,
           isChatEnabled: !!org.isChatEnabled,
           chatStatus: org.chatStatus || 'offline',
           chatWelcomeMessage: org.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?',
-          chatAutoReply: true
+          chatAutoReply: false
         },
         organization: org,
         source: 'organization_fallback'
@@ -59,14 +61,14 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
   if (eventDoc) {
     // Check claimedBy user
     if (eventDoc.claimedBy && mongoose.isValidObjectId(eventDoc.claimedBy)) {
-      const claimedUser = await User.findById(eventDoc.claimedBy).select('name email role isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
+      const claimedUser = await User.findById(eventDoc.claimedBy).select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
       if (claimedUser) return { user: claimedUser, event: eventDoc, source: 'event_claimedBy' };
     }
 
     // Check organizer organization
     if (eventDoc.organizer && mongoose.isValidObjectId(eventDoc.organizer)) {
       const orgUser = await User.findOne({ organization: eventDoc.organizer, role: 'organizer' })
-        .select('name email role isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
+        .select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
       if (orgUser) return { user: orgUser, event: eventDoc, source: 'event_organizer_user' };
       
       const org = await Organization.findById(eventDoc.organizer);
@@ -77,11 +79,13 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
             name: org.name,
             email: org.contact?.email || '',
             role: 'organizer',
+            plan: org.plan || 'free',
+            isPlanActive: org.isPlanActive !== false,
             isVerified: true,
             isChatEnabled: !!org.isChatEnabled,
             chatStatus: org.chatStatus || 'offline',
             chatWelcomeMessage: org.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?',
-            chatAutoReply: true
+            chatAutoReply: false
           },
           event: eventDoc,
           organization: org,
@@ -93,7 +97,7 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
     // Check orgEmail
     if (eventDoc.orgEmail) {
       const userByEmail = await User.findOne({ email: eventDoc.orgEmail.toLowerCase().trim() })
-        .select('name email role isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
+        .select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
       if (userByEmail) return { user: userByEmail, event: eventDoc, source: 'event_orgEmail' };
     }
   }
@@ -101,7 +105,7 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
   // 3. Query by orgEmail directly
   if (orgEmail) {
     const userByEmail = await User.findOne({ email: orgEmail.toLowerCase().trim() })
-      .select('name email role isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
+      .select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
     if (userByEmail) return { user: userByEmail, source: 'direct_email' };
   }
 
@@ -139,14 +143,21 @@ export const getChatStatus = async (req, res, next) => {
 
     const isEnabled = !!organizer.isChatEnabled;
     const currentStatus = organizer.chatStatus || (isEnabled ? 'online' : 'offline');
+    const isEnterprise =
+      organizer.role === 'super_admin' ||
+      (organizer.isPlanActive !== false &&
+        ['enterprise', 'growth'].includes(String(organizer.plan || '').toLowerCase()));
 
     res.status(200).json({
       success: true,
       isChatEnabled: isEnabled,
       chatStatus: currentStatus,
-      chatWelcomeMessage:
-        organizer.chatWelcomeMessage ||
-        'Hello! Welcome to our exhibition desk. How can we assist you today?',
+      chatWelcomeMessage: isEnterprise
+        ? (organizer.chatWelcomeMessage ||
+           'Hello! Welcome to our exhibition desk. How can we assist you today?')
+        : '',
+      chatAutoReply: isEnterprise ? organizer.chatAutoReply !== false : false,
+      isEnterprise,
       organizer: {
         id: organizer._id,
         name: organizer.name,
@@ -178,12 +189,16 @@ export const getChatStatus = async (req, res, next) => {
 export const getChatSettings = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).select(
-      'isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization name'
+      'isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization name plan isPlanActive role'
     );
 
     if (!user) {
       return res.status(404).json({ success: false, message: 'Organizer user not found' });
     }
+
+    const isSuperAdmin = user.role === 'super_admin';
+    const rawPlan = (user.plan || 'free').toLowerCase();
+    const isEnterprise = isSuperAdmin || (user.isPlanActive !== false && ['enterprise', 'growth'].includes(rawPlan));
 
     // Calculate live conversation metrics
     const [totalConversations, unreadConversations, visitorCount, exhibitorCount, archivedCount] = await Promise.all([
@@ -199,10 +214,11 @@ export const getChatSettings = async (req, res, next) => {
       settings: {
         isChatEnabled: !!user.isChatEnabled,
         chatStatus: user.chatStatus || 'offline',
-        chatWelcomeMessage:
-          user.chatWelcomeMessage ||
-          'Hello! Welcome to our exhibition desk. How can we assist you today?',
-        chatAutoReply: user.chatAutoReply !== false
+        chatWelcomeMessage: isEnterprise
+          ? (user.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?')
+          : '',
+        chatAutoReply: isEnterprise ? user.chatAutoReply !== false : false,
+        isEnterprise
       },
       stats: {
         totalConversations,
@@ -234,11 +250,20 @@ export const updateChatSettings = async (req, res, next) => {
     const isSuperAdmin = req.user.role === 'super_admin';
     const rawPlan = (user.plan || 'free').toLowerCase();
     const isPaidPlan = user.isPlanActive && ['starter', 'enterprise', 'growth'].includes(rawPlan);
+    const isEnterprise = isSuperAdmin || (user.isPlanActive !== false && ['enterprise', 'growth'].includes(rawPlan));
 
     if (!isSuperAdmin && !isPaidPlan && (isChatEnabled === true || chatStatus === 'online')) {
       return res.status(403).json({
         success: false,
         message: 'Live Chat Desk is exclusive to Starter and Enterprise plans. Please upgrade your plan to activate Live Chat.'
+      });
+    }
+
+    // Starter plan cannot configure custom welcome message or auto-reply
+    if ((chatWelcomeMessage !== undefined || chatAutoReply !== undefined) && !isEnterprise) {
+      return res.status(403).json({
+        success: false,
+        message: 'Configuring custom welcome greeting messages is exclusive to Enterprise plan organizers. Please upgrade to Enterprise to activate automated welcome greetings.'
       });
     }
 
@@ -257,23 +282,29 @@ export const updateChatSettings = async (req, res, next) => {
       }
     }
 
-    if (chatWelcomeMessage !== undefined) {
-      user.chatWelcomeMessage = String(chatWelcomeMessage).trim();
-    }
+    if (isEnterprise) {
+      if (chatWelcomeMessage !== undefined) {
+        user.chatWelcomeMessage = String(chatWelcomeMessage).trim();
+      }
 
-    if (chatAutoReply !== undefined) {
-      user.chatAutoReply = Boolean(chatAutoReply);
+      if (chatAutoReply !== undefined) {
+        user.chatAutoReply = Boolean(chatAutoReply);
+      }
     }
 
     await user.save();
 
     // Sync with Organization if linked
     if (user.organization) {
-      await Organization.findByIdAndUpdate(user.organization, {
+      const orgUpdate = {
         isChatEnabled: user.isChatEnabled,
-        chatStatus: user.chatStatus,
-        chatWelcomeMessage: user.chatWelcomeMessage
-      }).catch(() => {});
+        chatStatus: user.chatStatus
+      };
+      if (isEnterprise) {
+        orgUpdate.chatWelcomeMessage = user.chatWelcomeMessage;
+        orgUpdate.chatAutoReply = user.chatAutoReply;
+      }
+      await Organization.findByIdAndUpdate(user.organization, orgUpdate).catch(() => {});
     }
 
     res.status(200).json({
@@ -282,8 +313,9 @@ export const updateChatSettings = async (req, res, next) => {
       settings: {
         isChatEnabled: user.isChatEnabled,
         chatStatus: user.chatStatus,
-        chatWelcomeMessage: user.chatWelcomeMessage,
-        chatAutoReply: user.chatAutoReply
+        chatWelcomeMessage: isEnterprise ? user.chatWelcomeMessage : '',
+        chatAutoReply: isEnterprise ? user.chatAutoReply : false,
+        isEnterprise
       }
     });
   } catch (error) {
@@ -339,7 +371,7 @@ export const startOrFetchConversation = async (req, res, next) => {
         resolvedOrgUser = resolved.user;
       }
     } else {
-      resolvedOrgUser = await User.findById(resolvedOrganizerId).select('name email isChatEnabled chatStatus chatWelcomeMessage chatAutoReply');
+      resolvedOrgUser = await User.findById(resolvedOrganizerId).select('name email role plan isPlanActive isChatEnabled chatStatus chatWelcomeMessage chatAutoReply');
     }
 
     if (!resolvedOrganizerId) {
@@ -392,8 +424,14 @@ export const startOrFetchConversation = async (req, res, next) => {
         messages: []
       });
 
-      // If organizer has auto-reply welcome message enabled, insert welcome message first
-      if (resolvedOrgUser && resolvedOrgUser.chatAutoReply !== false) {
+      // ONLY for Enterprise plan will the automated welcome message be sent!
+      // Starter plan and Free organizers do not send auto welcome messages.
+      const isOrgEnterprise = resolvedOrgUser && (
+        resolvedOrgUser.role === 'super_admin' ||
+        (resolvedOrgUser.isPlanActive !== false && ['enterprise', 'growth'].includes(String(resolvedOrgUser.plan || '').toLowerCase()))
+      );
+
+      if (isOrgEnterprise && resolvedOrgUser.chatAutoReply !== false) {
         const welcomeText =
           resolvedOrgUser.chatWelcomeMessage ||
           'Hello! Welcome to our exhibition desk. How can we assist you today?';
