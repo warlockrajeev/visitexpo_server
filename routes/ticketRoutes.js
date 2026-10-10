@@ -5,6 +5,8 @@
 
 import express from 'express';
 import Ticket from '../models/Ticket.js';
+import User from '../models/User.js';
+import Subscription from '../models/Subscription.js';
 import { protect, authorize } from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -47,6 +49,35 @@ router.post('/', async (req, res, next) => {
       });
     }
 
+    const numPrice = type === 'free' ? 0 : (parseFloat(price) || 0);
+
+    // Enforce Plan Ticket Price Limits: Free plan limit is 1-10 Rs
+    if (type === 'paid' || numPrice > 0) {
+      const isAdmin = ['super_admin', 'admin', 'sub_admin', 'subadmin'].includes(req.user.role);
+      if (!isAdmin) {
+        const user = await User.findById(req.user.id);
+        const orgId = req.user.organization?._id || req.user.organization || user?.organization;
+        const sub = await Subscription.findOne({
+          $or: [
+            ...(orgId ? [{ organization: orgId }] : []),
+            { user: req.user.id }
+          ],
+          status: 'active'
+        }).sort({ createdAt: -1 });
+
+        const rawPlan = (sub?.plan || user?.plan || 'free').toLowerCase();
+        const isPlanActive = sub ? sub.status === 'active' : !!user?.isPlanActive;
+        const isPaidTier = isPlanActive && ['starter', 'enterprise', 'growth'].includes(rawPlan);
+
+        if (!isPaidTier && (numPrice < 1 || numPrice > 10)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Free plan organizers can create token tickets priced between ₹1 and ₹10 only. Upgrade to Starter or Enterprise plan to set custom ticket pricing.'
+          });
+        }
+      }
+    }
+
     const ticket = await Ticket.create({
       title,
       description: description || '',
@@ -80,6 +111,36 @@ router.put('/:id', async (req, res, next) => {
 
     if (title) ticket.title = title;
     if (description !== undefined) ticket.description = description;
+
+    const newType = type || ticket.type;
+    const newPriceVal = price !== undefined ? parseFloat(price) : ticket.price;
+
+    if (newType === 'paid' || (newType !== 'free' && newPriceVal > 0)) {
+      const isAdmin = ['super_admin', 'admin', 'sub_admin', 'subadmin'].includes(req.user.role);
+      if (!isAdmin) {
+        const user = await User.findById(req.user.id);
+        const orgId = req.user.organization?._id || req.user.organization || user?.organization;
+        const sub = await Subscription.findOne({
+          $or: [
+            ...(orgId ? [{ organization: orgId }] : []),
+            { user: req.user.id }
+          ],
+          status: 'active'
+        }).sort({ createdAt: -1 });
+
+        const rawPlan = (sub?.plan || user?.plan || 'free').toLowerCase();
+        const isPlanActive = sub ? sub.status === 'active' : !!user?.isPlanActive;
+        const isPaidTier = isPlanActive && ['starter', 'enterprise', 'growth'].includes(rawPlan);
+
+        if (!isPaidTier && (newPriceVal < 1 || newPriceVal > 10)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Free plan organizers can create token tickets priced between ₹1 and ₹10 only. Upgrade to Starter or Enterprise plan to set custom ticket pricing.'
+          });
+        }
+      }
+    }
+
     if (type) ticket.type = type;
     if (price !== undefined) ticket.price = type === 'free' ? 0 : price;
     if (currency) ticket.currency = currency;

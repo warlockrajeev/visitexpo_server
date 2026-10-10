@@ -15,7 +15,8 @@ import EventEngagement from '../models/EventEngagement.js';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import DeletedOrganizer from '../models/DeletedOrganizer.js';
-import DeletedEvent from '../models/DeletedEvent.js';
+import User from '../models/User.js';
+import Subscription from '../models/Subscription.js';
 import { getAggregatedOrganizers } from './adminRoutes.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
@@ -26,6 +27,48 @@ import WordPressDirectorySyncService from '../services/WordPressDirectorySyncSer
 import { verifyAccessToken } from '../utils/jwt.js';
 
 const router = express.Router();
+
+/**
+ * Helper to validate ticket price limits according to organizer subscription tier:
+ * Free plan: 1 to 10 Rs only (token demand test)
+ * Starter, Enterprise, Growth & Admins: custom prices (no upper limit)
+ */
+async function validateTicketPriceForPlan(userId, userRole, callerOrg, body) {
+  const isFree = body.isFreeEvent === true || body.isFreeEvent === 'true';
+  if (isFree) return null;
+  if (body.paidTicketPrice === undefined && body.price === undefined) return null;
+
+  const rawVal = body.paidTicketPrice !== undefined ? body.paidTicketPrice : body.price;
+  const numPrice = parseFloat(rawVal);
+  if (isNaN(numPrice) || numPrice <= 0) {
+    return 'Ticket price must be a valid amount greater than 0.';
+  }
+
+  // Admins are exempt
+  if (['super_admin', 'admin', 'sub_admin', 'subadmin'].includes(userRole)) {
+    return null;
+  }
+
+  const user = await User.findById(userId);
+  const orgId = callerOrg?._id || callerOrg || user?.organization;
+  const sub = await Subscription.findOne({
+    $or: [
+      ...(orgId ? [{ organization: orgId }] : []),
+      { user: userId }
+    ],
+    status: 'active'
+  }).sort({ createdAt: -1 });
+
+  const rawPlan = (sub?.plan || user?.plan || 'free').toLowerCase();
+  const isPlanActive = sub ? sub.status === 'active' : !!user?.isPlanActive;
+  const isPaidTier = isPlanActive && ['starter', 'enterprise', 'growth'].includes(rawPlan);
+
+  if (!isPaidTier && (numPrice < 1 || numPrice > 10)) {
+    return 'Free plan organizers can set token ticket price between ₹1 and ₹10 only. Upgrade to Starter or Enterprise plan to set custom ticket prices.';
+  }
+
+  return null;
+}
 
 /**
  * Helper: Auto-create or update the default ticket tier for an event
@@ -1039,6 +1082,11 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
       return res.status(400).json({ success: false, error: 'User does not belong to any organization' });
     }
 
+    const priceError = await validateTicketPriceForPlan(req.user.id, req.user.role, req.user.organization, req.body);
+    if (priceError) {
+      return res.status(400).json({ success: false, error: priceError });
+    }
+
     const event = await EventService.createEvent(req.body, req.user.organization);
 
     // Auto-create default ticket tier if ticketing data is provided
@@ -1063,6 +1111,11 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
 // Update event
 router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager'), async (req, res, next) => {
   try {
+    const priceError = await validateTicketPriceForPlan(req.user.id, req.user.role, req.user.organization, req.body);
+    if (priceError) {
+      return res.status(400).json({ success: false, error: priceError });
+    }
+
     const event = await EventService.updateEvent(req.params.id, req.body, req.user.organization);
 
     // Sync default ticket tier if ticketing data changed

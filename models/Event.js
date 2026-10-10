@@ -101,6 +101,11 @@ const EventSchema = new mongoose.Schema(
       ref: 'User',
       default: null
     },
+    claimedAt: {
+      type: Date,
+      default: null,
+      index: true
+    },
     website: String,
     orgName: { type: String, default: '' },
     orgEmail: { type: String, default: '' },

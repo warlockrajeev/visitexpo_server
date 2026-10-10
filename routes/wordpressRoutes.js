@@ -9,6 +9,7 @@ import Event from '../models/Event.js';
 import Ticket from '../models/Ticket.js';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
+import Subscription from '../models/Subscription.js';
 import AuthService from '../services/AuthService.js';
 import EventService from '../services/EventService.js';
 import UserRepository from '../repositories/UserRepository.js';
@@ -219,6 +220,138 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
         page: pgNum,
         count: docs.length
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==========================================
+// 2.5 CLAIM QUOTA ENDPOINT & HELPER
+// ==========================================
+/**
+ * Helper to calculate daily event claim quota for an organizer.
+ * Free plan: max 3 claims per calendar day.
+ * Starter / Enterprise / Growth plans & Super Admin / Admin: unlimited claims.
+ */
+async function getOrganizerClaimQuota(userId) {
+  if (!userId) {
+    return {
+      plan: 'free',
+      isUnlimited: false,
+      dailyLimit: 3,
+      claimsToday: 0,
+      claimsRemaining: 3,
+      canClaim: true
+    };
+  }
+
+  const user = await User.findById(userId);
+  if (!user) {
+    return {
+      plan: 'free',
+      isUnlimited: false,
+      dailyLimit: 3,
+      claimsToday: 0,
+      claimsRemaining: 3,
+      canClaim: true
+    };
+  }
+
+  // Super admins and platform admins bypass daily limits
+  const isAdmin = ['super_admin', 'admin', 'sub_admin', 'subadmin'].includes(user.role);
+
+  let sub = await Subscription.findOne({
+    $or: [
+      ...(user.organization ? [{ organization: user.organization }] : []),
+      { user: user._id }
+    ],
+    status: 'active'
+  }).sort({ createdAt: -1 });
+
+  const rawPlan = (sub?.plan || user.plan || 'free').toLowerCase();
+  const isPlanActive = sub ? sub.status === 'active' : !!user.isPlanActive;
+  const isPaidTier = isPlanActive && ['starter', 'enterprise', 'growth'].includes(rawPlan);
+  const isUnlimited = isAdmin || isPaidTier;
+
+  // Calendar day window: from today's midnight 00:00:00
+  const startOfDay = new Date();
+  startOfDay.setHours(0, 0, 0, 0);
+
+  const claimsToday = await Event.countDocuments({
+    claimedBy: user._id,
+    isClaimed: true,
+    $or: [
+      { claimedAt: { $gte: startOfDay } },
+      { claimedAt: null, updatedAt: { $gte: startOfDay } },
+      { claimedAt: null, createdAt: { $gte: startOfDay } }
+    ]
+  });
+
+  const dailyLimit = isUnlimited ? null : 3;
+  const claimsRemaining = isUnlimited ? null : Math.max(0, 3 - claimsToday);
+  const canClaim = isUnlimited || claimsToday < 3;
+
+  return {
+    plan: isUnlimited ? (isAdmin ? 'admin' : rawPlan) : 'free',
+    isUnlimited,
+    dailyLimit,
+    claimsToday,
+    claimsRemaining,
+    canClaim
+  };
+}
+
+/**
+ * GET /api/wordpress/claim-quota
+ * Returns current organizer's daily event claim quota, used count, and plan limit.
+ */
+router.get('/claim-quota', async (req, res, next) => {
+  try {
+    let token = null;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+      token = req.headers.authorization.split(' ')[1];
+    } else if (req.cookies && req.cookies.token) {
+      token = req.cookies.token;
+    }
+
+    if (!token) {
+      return res.status(200).json({
+        success: true,
+        authenticated: false,
+        quota: {
+          plan: 'free',
+          isUnlimited: false,
+          dailyLimit: 3,
+          claimsToday: 0,
+          claimsRemaining: 3,
+          canClaim: true
+        }
+      });
+    }
+
+    const decoded = verifyAccessToken(token);
+    if (!decoded?.id) {
+      return res.status(200).json({
+        success: true,
+        authenticated: false,
+        quota: {
+          plan: 'free',
+          isUnlimited: false,
+          dailyLimit: 3,
+          claimsToday: 0,
+          claimsRemaining: 3,
+          canClaim: true
+        }
+      });
+    }
+
+    const quota = await getOrganizerClaimQuota(decoded.id);
+
+    res.status(200).json({
+      success: true,
+      authenticated: true,
+      quota
     });
   } catch (error) {
     next(error);
@@ -445,14 +578,40 @@ router.post('/onboard-organizer', async (req, res, next) => {
           organizer: orgId,
           isClaimed: true,
           claimedBy: userId,
+          claimedAt: new Date(),
           status: 'draft'
         });
       }
 
       if (event) {
+        // Prevent claiming an event that is already claimed by another organizer
+        if (event.isClaimed && event.claimedBy && String(event.claimedBy) !== String(userId)) {
+          return res.status(400).json({
+            success: false,
+            error: 'This event listing has already been claimed by another organizer.'
+          });
+        }
+
+        // Enforce Plan Claim Quota: Free plan limit is 3 claims per day; Starter/Enterprise are unlimited
+        const isExistingClaimUpdate = event.isClaimed && String(event.claimedBy) === String(userId);
+        if (!isExistingClaimUpdate) {
+          const quota = await getOrganizerClaimQuota(userId);
+          if (!quota.canClaim) {
+            return res.status(403).json({
+              success: false,
+              error: `Daily event claim limit reached. Free organizers can claim up to 3 events per day (${quota.claimsToday}/3 used). Upgrade to Starter or Enterprise plan to claim unlimited events.`,
+              dailyLimitReached: true,
+              claimsToday: quota.claimsToday,
+              maxDailyClaims: 3,
+              plan: 'free'
+            });
+          }
+        }
+
         event.organizer = orgId;
         event.isClaimed = true;
         event.claimedBy = userId;
+        event.claimedAt = new Date();
         event.status = 'draft'; // Pending admin review
 
         if (officialEmail || effectiveEmail) {
@@ -498,12 +657,15 @@ router.post('/onboard-organizer', async (req, res, next) => {
       }
     }
 
+    const updatedQuota = await getOrganizerClaimQuota(userId);
+
     res.status(201).json({
       success: true,
       message: 'Organizer claim request submitted successfully! Your ownership verification is pending admin review.',
       pendingApproval: true,
       user: userObj,
-      event: targetEvent
+      event: targetEvent,
+      quota: updatedQuota
     });
   } catch (error) {
     next(error);

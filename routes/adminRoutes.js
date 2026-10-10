@@ -2954,6 +2954,7 @@ router.put('/claims/:id/status', async (req, res, next) => {
     } else if (action === 'reject') {
       event.isClaimed = false;
       event.claimedBy = null;
+      event.claimedAt = null;
       event.status = 'draft';
       await event.save();
     }
