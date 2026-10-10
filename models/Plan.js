@@ -117,7 +117,6 @@ const PlanSchema = new mongoose.Schema(
 );
 
 // Helpful index
-PlanSchema.index({ planId: 1 });
 PlanSchema.index({ isActive: 1, sortOrder: 1 });
 
 export default mongoose.model('Plan', PlanSchema);
