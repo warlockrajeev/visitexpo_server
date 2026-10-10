@@ -93,6 +93,8 @@ const PlanSchema = new mongoose.Schema(
       billingNote: { type: String, default: '' }
     },
     highlights: [{ type: String }],
+    bestFor: [{ type: String }],
+    keyInclusions: [{ type: String }],
     features: [PlanFeatureSchema],
     comparisonDetails: [DetailedComparisonSchema],
     growthServices: [GrowthServiceSchema],

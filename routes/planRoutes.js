@@ -18,10 +18,10 @@ export const DEFAULT_OFFICIAL_PLANS = [
   {
     planId: 'free',
     name: 'Free Organizer',
-    tagline: 'Free for corporate email · Paid for general email 1499/-',
-    description: 'Post ideas, claim expos, test token ticket demand, and gather early interest with masked lead intelligence.',
-    badge: 'Free Forever',
-    badgeColor: 'bg-zinc-800 text-zinc-200 border border-zinc-700',
+    tagline: 'Start listing your events and build your presence on VisitExpo.',
+    description: 'Start listing your events and build your presence on VisitExpo.',
+    badge: 'Get Started',
+    badgeColor: 'bg-orange-50 text-orange-700 border border-orange-200',
     pricing: {
       corporateEmailPrice: 0,
       generalEmailPrice: 1499,
@@ -30,27 +30,29 @@ export const DEFAULT_OFFICIAL_PLANS = [
       proposedEventResearchPrice: 4999,
       currency: 'INR',
       currencySymbol: '₹',
-      billingNote: 'Free for corporate business email (@yourcompany.com). One-time ₹1,499 for general email (@gmail, etc).'
+      billingNote: 'Free registration (corporate email) · Paid registration for general email (₹1,499)'
     },
+    bestFor: [
+      'You are new to VisitExpo',
+      'Want to list your first event',
+      'Want basic visibility on platform'
+    ],
+    keyInclusions: [
+      'Free registration (corporate email)',
+      'Paid registration for general email (₹1,499)',
+      'Limited event claiming',
+      'Create & publish events'
+    ],
     highlights: [
-      'Free Registration for corporate email & general email 1499/-',
-      'Expo Claiming: Any number of expos (verification per expo, limit 3/day)',
-      'Event Creation: Create & publish new, upcoming & prospective events (B2B or B2C)',
-      'Event Ownership: Permitted on claimed or created expos',
-      'Ticket Creation: Min 1 to 10 price ticket demand activation',
-      'Ticket Demand Test: 1 / 10 nominal token-style request model to measure response',
-      'Full Ticket Selling: Monitization unlocked in paid plans',
-      'Lead Categories: Receive all Visitor, Exhibitor, Vendor, Venue, Designer, Ticket Platform, Expo Mgmt leads (Masked)',
-      'Lead Visibility: Masked lead info; inquiry counts & interest volume visible',
-      'Organic Visit Expo positioning',
-      'Proposed Event Research: ₹4,999 per proposed/prospective event (B2B/B2C validation)',
-      'B2B / B2C Validation available for trade shows, business events, Garba, fun events',
-      'Growth Plan available separately as paid services'
+      'Free registration (corporate email)',
+      'Paid registration for general email (₹1,499)',
+      'Limited event claiming',
+      'Create & publish events'
     ],
     features: [
       { title: 'Free Registration (Work Email)', included: true, detail: '₹0 for corporate domain, ₹1,499 for general' },
       { title: 'Claim Any Number of Expos', included: true, detail: 'Limit 3 expo claims per day' },
-      { title: 'Unlimited Event Creation', included: true, detail: 'New, upcoming & prospective B2B/B2C expos' },
+      { title: 'Create & Publish Events', included: true, detail: 'New, upcoming & prospective B2B/B2C expos' },
       { title: 'Token Ticket Demand Test', included: true, detail: '1 / 10 nominal token response activation' },
       { title: 'Lead Counts & Interest Volume', included: true, detail: 'Real-time counters visible (details masked)' },
       { title: 'Full Ticket Monetization', included: false, detail: 'Unlocked in paid plans' },
@@ -85,10 +87,10 @@ export const DEFAULT_OFFICIAL_PLANS = [
   {
     planId: 'starter',
     name: 'Organizer Starter',
-    tagline: 'Operate validated events and unlock usable lead/ticket functionality',
-    description: 'Empowers organizers to monetize ticket sales, unlock unmasked attendee and exhibitor leads, and run operational lead CRM.',
-    badge: 'Most Popular',
-    badgeColor: 'bg-primary text-black font-semibold',
+    tagline: 'Get more leads and unlock valuable organizer tools.',
+    description: 'Get more leads and unlock valuable organizer tools.',
+    badge: '👑 Most Popular →',
+    badgeColor: 'bg-red-600 text-white font-semibold',
     pricing: {
       corporateEmailPrice: 0,
       generalEmailPrice: 0,
@@ -97,24 +99,28 @@ export const DEFAULT_OFFICIAL_PLANS = [
       proposedEventResearchPrice: 0,
       currency: 'INR',
       currencySymbol: '₹',
-      billingNote: '₹14,999 / Quarter · ₹49,999 / Year (Save ₹9,997 annually)'
+      billingNote: '₹14,999 per quarter · ₹49,999 per year (Save 17%)'
     },
+    bestFor: [
+      'You organize one or a few events',
+      'Want genuine leads and contacts',
+      'Need tools to manage your events'
+    ],
+    keyInclusions: [
+      'Everything in Free plan',
+      'Detailed lead access',
+      'Basic lead management (CRM)',
+      'Advanced event search',
+      'Visitor, exhibitor & vendor leads',
+      'In-dashboard lead CRM & pipeline'
+    ],
     highlights: [
-      'Everything in Free included',
-      'Detailed Lead Access: Full unlocked contacts',
-      'Lead CRM: Basic operational CRM workflow',
-      'Lead Search & Filtering: Ok (Basic query tools)',
-      'Visitor / Exhibitor / Vendor Leads: Unlocked',
-      'Venue / Designer / Organizer Leads: Unlocked',
-      'Ticket Platform / Expo Management Leads: Unlocked',
-      'Paid Ticket Selling: Unlocked with payment gateway',
-      'Payment Gateway: Ok (Direct integrated)',
-      'Ticket Sales Analytics: Basic real-time reporting',
-      'Exhibitor Management: Basic exhibitor directory',
-      'Proposed Expo Validation: Limited allowance included',
-      'Interest Analysis & B2B/B2C Demand: Basic reports',
-      'Active Events: Unlimited',
-      'Priority Organizer Support'
+      'Everything in Free plan',
+      'Detailed lead access',
+      'Basic lead management (CRM)',
+      'Advanced event search',
+      'Visitor, exhibitor & vendor leads',
+      'In-dashboard lead CRM & pipeline'
     ],
     features: [
       { title: 'Everything in Free Plan', included: true, detail: 'All claiming & prospective event features' },
@@ -157,10 +163,10 @@ export const DEFAULT_OFFICIAL_PLANS = [
   {
     planId: 'enterprise',
     name: 'Organizer Enterprise',
-    tagline: 'Large organizers managing multiple expos and enterprise operations',
-    description: 'Full-scale enterprise capability with advanced CRM + API, unlimited lead export, private gateway, and featured search spotlight.',
-    badge: 'Enterprise Scale',
-    badgeColor: 'bg-indigo-600 text-white font-semibold',
+    tagline: 'Advanced tools for multiple expos and enterprise operations.',
+    description: 'Advanced tools for multiple expos and enterprise operations.',
+    badge: 'For Large Organizers',
+    badgeColor: 'bg-blue-50 text-blue-700 border border-blue-200',
     pricing: {
       corporateEmailPrice: 0,
       generalEmailPrice: 0,
@@ -169,26 +175,28 @@ export const DEFAULT_OFFICIAL_PLANS = [
       proposedEventResearchPrice: 0,
       currency: 'INR',
       currencySymbol: '₹',
-      billingNote: '₹89,999 / Quarter · ₹2,99,999 / Year (Save ₹59,997 annually)'
+      billingNote: '₹89,999 per quarter · ₹2,99,999 per year (Save 17%)'
     },
+    bestFor: [
+      'You manage multiple expos',
+      'Need advanced analytics & tools',
+      'Require API and bulk export options'
+    ],
+    keyInclusions: [
+      'Everything in Starter plan',
+      'Advanced CRM & analytics',
+      'Multiple expos management',
+      'Developer API & webhooks',
+      'Unlimited lead report export (CSV & Excel)',
+      'Advanced search & filtering'
+    ],
     highlights: [
-      'Everything in Starter & Free',
-      'Detailed Lead Access: Full + advanced analytics',
-      'Lead CRM: Advanced CRM + Developer REST API',
-      'Lead Export: Unlimited (CSV, Excel, Webhooks)',
-      'Lead Search & Filtering: Advanced multi-criteria search',
-      'Visitor / Exhibitor / Vendor Leads: Full + analytics',
-      'Venue / Designer / Organizer Leads: Full + analytics + Search Database',
-      'Ticket Platform / Expo Mgmt Leads: Full + analytics',
-      'Paid Ticket Selling: Advanced / private payment gateway integration',
-      'Payment Gateway: Ok (Multi-gateway + Custom integration)',
-      'Ticket Sales Analytics: Advanced conversion & attendee metrics',
-      'Exhibitor Management: Advance exhibitor portal & floor management',
-      'Proposed Expo Validation: Multiple events included',
-      'Interest & Demand Analysis: Detailed category-wise & Advance B2B/B2C',
-      'Active Events: Unlimited enterprise events',
-      'Priority Search / Featured Placement: Available',
-      'Support: Faster priority (Dedicated Account Director)'
+      'Everything in Starter plan',
+      'Advanced CRM & analytics',
+      'Multiple expos management',
+      'Developer API & webhooks',
+      'Unlimited lead report export (CSV & Excel)',
+      'Advanced search & filtering'
     ],
     features: [
       { title: 'Everything in Starter Plan', included: true, detail: 'All operational & ticketing features' },
@@ -232,10 +240,10 @@ export const DEFAULT_OFFICIAL_PLANS = [
   {
     planId: 'growth',
     name: 'Organizer Growth',
-    tagline: 'Top-up plan start from 1k to unlimited · Point wise price uses',
-    description: 'On-demand promotional horsepower to guarantee buyer turnout, exhibitor registrations, and multi-channel marketing reach.',
+    tagline: 'Boost your event visibility with our promotion services.',
+    description: 'Boost your event visibility with our promotion services.',
     badge: 'Marketing Engine',
-    badgeColor: 'bg-emerald-500 text-white font-semibold',
+    badgeColor: 'bg-emerald-50 text-emerald-700 border border-emerald-200',
     pricing: {
       corporateEmailPrice: 0,
       generalEmailPrice: 0,
@@ -244,20 +252,28 @@ export const DEFAULT_OFFICIAL_PLANS = [
       proposedEventResearchPrice: 4999,
       currency: 'INR',
       currencySymbol: '₹',
-      billingNote: 'Top-up credit packs starting from ₹1,000 to unlimited. Point-wise price uses as you consume services.'
+      billingNote: 'From ₹1,000 per top-up pack'
     },
+    bestFor: [
+      'You want more visibility & reach',
+      'Need targeted promotion for events',
+      'Want flexible, pay-as-you-go options'
+    ],
+    keyInclusions: [
+      'Top-up packs from ₹1,000',
+      'Use across 13 promotion channels',
+      'Flexible point-wise pricing',
+      'Google listing & search visibility',
+      'Social media optimization (SMO)',
+      'Paid lead generation options'
+    ],
     highlights: [
-      'Top-up plans start from ₹1,000 to unlimited',
-      'Point-wise price uses for flexible budgeting',
-      'Multi-channel promotional firepower across 13 channels',
-      'Google Listing & Search Visibility (Paid separately)',
-      'Paid Lead Generation & Social Media Optimization (SMO)',
-      'AI & SEO-driven content promotion',
-      'Direct outreach: WhatsApp Broadcast & Targeted SMS',
-      'Email marketing & IVR automated voice promotion',
-      'Platform Spotlight: Push notifications, banners & popups',
-      'Search spotlight: Top Expo Display & Side Expo Placement',
-      'Member + External Audience Promotion (Tailored targeting)'
+      'Top-up packs from ₹1,000',
+      'Use across 13 promotion channels',
+      'Flexible point-wise pricing',
+      'Google listing & search visibility',
+      'Social media optimization (SMO)',
+      'Paid lead generation options'
     ],
     features: [
       { title: 'Top-Up Packs from ₹1,000', included: true, detail: 'Flexible scale with zero lock-in' },
@@ -430,12 +446,28 @@ export const DEFAULT_OFFICIAL_PLANS = [
   }
 ];
 
-// Helper: seed default official plans if DB is empty
+// Helper: seed default official plans if DB is empty or backfill simplified descriptions
 export const seedDefaultPlansIfEmpty = async () => {
   const count = await Plan.countDocuments();
   if (count === 0) {
     await Plan.insertMany(DEFAULT_OFFICIAL_PLANS);
     console.log('[Plan Service] Initialized 4 default official plans (Free, Starter, Enterprise, Growth).');
+  } else {
+    // Ensure all official core plans have the latest simplified descriptions and inclusions
+    for (const planData of DEFAULT_OFFICIAL_PLANS) {
+      await Plan.updateOne(
+        { planId: planData.planId },
+        {
+          $set: {
+            tagline: planData.tagline,
+            description: planData.description,
+            badge: planData.badge,
+            bestFor: planData.bestFor,
+            keyInclusions: planData.keyInclusions
+          }
+        }
+      );
+    }
   }
 };
 
