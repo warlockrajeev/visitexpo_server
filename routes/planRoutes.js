@@ -55,6 +55,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
       { title: 'Create & Publish Events', included: true, detail: 'New, upcoming & prospective B2B/B2C expos' },
       { title: 'Token Ticket Demand Test', included: true, detail: '1 / 10 nominal token response activation' },
       { title: 'Lead Counts & Interest Volume', included: true, detail: 'Real-time counters visible (details masked)' },
+      { title: 'Exhibitor Management', included: false, detail: 'Available in Starter & Enterprise plans' },
       { title: 'Full Ticket Monetization', included: false, detail: 'Unlocked in paid plans' },
       { title: 'Lead Details Unmasked', included: false, detail: 'Unlocked in paid plans' },
       { title: 'Lead CSV/Excel Export', included: false, detail: 'Unlocked in Enterprise' }
@@ -70,7 +71,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
       { featureKey: 'paid_ticket_selling', label: 'Paid Ticket Selling', category: 'Ticketing & Commerce', value: 'Not included (1/10 demand test only)', status: 'unavailable' },
       { featureKey: 'payment_gateway', label: 'Payment Gateway', category: 'Ticketing & Commerce', value: 'Not included', status: 'unavailable' },
       { featureKey: 'ticket_sales_analytics', label: 'Ticket Sales Analytics', category: 'Ticketing & Commerce', value: 'Demand stats only', status: 'limited' },
-      { featureKey: 'exhibitor_management', label: 'Exhibitor Management', category: 'Operations & Validation', value: 'Basic', status: 'limited' },
+      { featureKey: 'exhibitor_management', label: 'Exhibitor Management', category: 'Operations & Validation', value: 'Not Available', status: 'unavailable' },
       { featureKey: 'proposed_expo_validation', label: 'Proposed Expo Validation', category: 'Operations & Validation', value: '4,999 per proposed event', status: 'paid_extra' },
       { featureKey: 'interest_analysis', label: 'Interest Analysis', category: 'Operations & Validation', value: 'Basic volume', status: 'limited' },
       { featureKey: 'demand_analysis', label: 'B2B / B2C Demand Analysis', category: 'Operations & Validation', value: 'Basic', status: 'limited' },
@@ -131,6 +132,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
       { title: 'Ticket Sales Analytics', included: true, detail: 'Basic transactions and revenue metrics' },
       { title: 'Proposed Expo Validation Allowance', included: true, detail: 'Test ideas with included allowance' },
       { title: 'Unlimited Active Events', included: true, detail: 'Manage as many expos as you run' },
+      { title: 'Exhibitor Management (Normal Level)', included: true, detail: 'Directory onboarding, booth assignments & staff roster' },
       { title: 'Priority Support', included: true, detail: 'Fast-track response via email & dashboard' },
       { title: 'Lead CSV/Excel Export', included: false, detail: 'Unlocked in Enterprise' },
       { title: 'Featured Top Placement', included: false, detail: 'Available in Enterprise' }
@@ -146,7 +148,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
       { featureKey: 'paid_ticket_selling', label: 'Paid Ticket Selling', category: 'Ticketing & Commerce', value: 'Unlocked', status: 'available' },
       { featureKey: 'payment_gateway', label: 'Payment Gateway', category: 'Ticketing & Commerce', value: 'Ok', status: 'available' },
       { featureKey: 'ticket_sales_analytics', label: 'Ticket Sales Analytics', category: 'Ticketing & Commerce', value: 'Basic', status: 'available' },
-      { featureKey: 'exhibitor_management', label: 'Exhibitor Management', category: 'Operations & Validation', value: 'Basic', status: 'available' },
+      { featureKey: 'exhibitor_management', label: 'Exhibitor Management', category: 'Operations & Validation', value: 'Normal Level', status: 'available' },
       { featureKey: 'proposed_expo_validation', label: 'Proposed Expo Validation', category: 'Operations & Validation', value: 'Limited allowance', status: 'available' },
       { featureKey: 'interest_analysis', label: 'Interest Analysis', category: 'Operations & Validation', value: 'Basic', status: 'available' },
       { featureKey: 'demand_analysis', label: 'B2B / B2C Demand Analysis', category: 'Operations & Validation', value: 'Basic', status: 'available' },
@@ -223,7 +225,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
       { featureKey: 'paid_ticket_selling', label: 'Paid Ticket Selling', category: 'Ticketing & Commerce', value: 'Advanced / private payment Gateway Integration', status: 'advanced' },
       { featureKey: 'payment_gateway', label: 'Payment Gateway', category: 'Ticketing & Commerce', value: 'Ok', status: 'advanced' },
       { featureKey: 'ticket_sales_analytics', label: 'Ticket Sales Analytics', category: 'Ticketing & Commerce', value: 'Advanced', status: 'advanced' },
-      { featureKey: 'exhibitor_management', label: 'Exhibitor Management', category: 'Operations & Validation', value: 'Advance', status: 'advanced' },
+      { featureKey: 'exhibitor_management', label: 'Exhibitor Management', category: 'Operations & Validation', value: 'Advance Level', status: 'advanced' },
       { featureKey: 'proposed_expo_validation', label: 'Proposed Expo Validation', category: 'Operations & Validation', value: 'Multiple Events', status: 'advanced' },
       { featureKey: 'interest_analysis', label: 'Interest Analysis', category: 'Operations & Validation', value: 'Detailed category-wise', status: 'advanced' },
       { featureKey: 'demand_analysis', label: 'B2B / B2C Demand Analysis', category: 'Operations & Validation', value: 'Advance', status: 'advanced' },
@@ -463,7 +465,9 @@ export const seedDefaultPlansIfEmpty = async () => {
             description: planData.description,
             badge: planData.badge,
             bestFor: planData.bestFor,
-            keyInclusions: planData.keyInclusions
+            keyInclusions: planData.keyInclusions,
+            features: planData.features,
+            comparisonDetails: planData.comparisonDetails
           }
         }
       );

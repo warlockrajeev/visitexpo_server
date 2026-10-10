@@ -71,6 +71,20 @@ const ExhibitorSchema = new mongoose.Schema(
     wpSource: {
       type: Boolean,
       default: true
+    },
+    isVipFeatured: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+    priorityHall: {
+      type: String,
+      default: ''
+    },
+    leadRetrievalStatus: {
+      type: String,
+      enum: ['active', 'inactive', 'not_subscribed'],
+      default: 'inactive'
     }
   },
   {

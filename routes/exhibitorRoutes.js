@@ -67,6 +67,44 @@ router.post('/register', async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Target event not found' });
     }
 
+    // Check if called by an organizer, enforce plan tier checks
+    let callerToken;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      callerToken = req.headers.authorization.split(' ')[1];
+    } else if (req.cookies && req.cookies.token) {
+      callerToken = req.cookies.token;
+    }
+    if (callerToken) {
+      try {
+        const decoded = verifyAccessToken(callerToken);
+        if (decoded && decoded.role === 'organizer') {
+          const userDoc = await User.findById(decoded.id).select('plan');
+          const userPlan = (userDoc?.plan || 'free').toLowerCase();
+          if (userPlan === 'free') {
+            return res.status(403).json({
+              success: false,
+              error: 'Exhibitor onboarding is not permitted on the Free Organizer Plan. Please upgrade to Starter or Enterprise.',
+              requiresUpgrade: true,
+              currentPlan: 'free',
+              requiredPlan: 'starter'
+            });
+          }
+          if (userPlan === 'starter') {
+            const count = await Exhibitor.countDocuments({ event: eventId });
+            if (count >= 25) {
+              return res.status(403).json({
+                success: false,
+                error: 'You have reached the Starter plan allowance of 25 exhibitors for this event (Normal Level). Upgrade to Enterprise for unlimited exhibitors.',
+                requiresUpgrade: true,
+                currentPlan: 'starter',
+                requiredPlan: 'enterprise'
+              });
+            }
+          }
+        }
+      } catch (_) {}
+    }
+
     // 2. Check if already registered for this event
     const existing = await Exhibitor.findOne({ event: eventId, name: name.trim() });
     if (existing) {
@@ -258,6 +296,20 @@ router.post('/claim', protect, async (req, res, next) => {
 // @route   GET /api/exhibitors/stats
 router.get('/stats', protect, authorize('super_admin', 'sub_admin', 'admin', 'organizer', 'event_manager'), async (req, res, next) => {
   try {
+    if (req.user.role === 'organizer') {
+      const userDoc = await User.findById(req.user.id).select('plan');
+      const userPlan = (userDoc?.plan || 'free').toLowerCase();
+      if (userPlan === 'free') {
+        return res.status(403).json({
+          success: false,
+          error: 'Exhibitor Management is not available on the Free Organizer Plan. Please upgrade to Starter or Enterprise.',
+          requiresUpgrade: true,
+          currentPlan: 'free',
+          requiredPlan: 'starter'
+        });
+      }
+    }
+
     const { eventId } = req.query;
     const query = {};
 
@@ -301,6 +353,20 @@ router.get('/stats', protect, authorize('super_admin', 'sub_admin', 'admin', 'or
 // Get exhibitors list
 router.get('/', protect, authorize('super_admin', 'sub_admin', 'admin', 'organizer', 'event_manager', 'sales_team', 'support'), async (req, res, next) => {
   try {
+    if (req.user.role === 'organizer') {
+      const userDoc = await User.findById(req.user.id).select('plan');
+      const userPlan = (userDoc?.plan || 'free').toLowerCase();
+      if (userPlan === 'free') {
+        return res.status(403).json({
+          success: false,
+          error: 'Exhibitor Management is not available on the Free Organizer Plan. Please upgrade to Starter or Enterprise.',
+          requiresUpgrade: true,
+          currentPlan: 'free',
+          requiredPlan: 'starter'
+        });
+      }
+    }
+
     const { eventId, status, search, page, limit } = req.query;
 
     const query = {};
@@ -643,7 +709,34 @@ router.put('/:id', protect, async (req, res, next) => {
       return res.status(403).json({ success: false, error: 'Not authorized to update this exhibitor profile' });
     }
 
-    const { name, description, logo, website, contactEmail, contactPhone, boothNumber, attendanceType, staff } = req.body;
+    if (req.user.role === 'organizer') {
+      const userDoc = await User.findById(req.user.id).select('plan');
+      const userPlan = (userDoc?.plan || 'free').toLowerCase();
+      if (userPlan === 'free') {
+        return res.status(403).json({
+          success: false,
+          error: 'Exhibitor Management is not available on the Free Organizer Plan. Please upgrade to Starter or Enterprise.',
+          requiresUpgrade: true,
+          currentPlan: 'free',
+          requiredPlan: 'starter'
+        });
+      }
+    }
+
+    const {
+      name,
+      description,
+      logo,
+      website,
+      contactEmail,
+      contactPhone,
+      boothNumber,
+      attendanceType,
+      staff,
+      isVipFeatured,
+      priorityHall,
+      leadRetrievalStatus
+    } = req.body;
 
     // Update fields if provided
     if (name && isMgmt) exhibitor.name = name;
@@ -655,6 +748,29 @@ router.put('/:id', protect, async (req, res, next) => {
     if (boothNumber !== undefined && isMgmt) exhibitor.boothNumber = boothNumber;
     if (attendanceType) exhibitor.attendanceType = attendanceType;
     if (staff) exhibitor.staff = staff;
+
+    // Advance Level Enterprise Fields
+    if (isVipFeatured !== undefined && isMgmt) {
+      if (req.user.role === 'organizer') {
+        const userDoc = await User.findById(req.user.id).select('plan');
+        const userPlan = (userDoc?.plan || 'free').toLowerCase();
+        if (userPlan !== 'enterprise' && userPlan !== 'growth') {
+          return res.status(403).json({
+            success: false,
+            error: 'VIP & Featured Exhibitor Badging is an advance feature available exclusively on the Enterprise Plan.',
+            requiresUpgrade: true,
+            requiredPlan: 'enterprise'
+          });
+        }
+      }
+      exhibitor.isVipFeatured = Boolean(isVipFeatured);
+    }
+    if (priorityHall !== undefined && isMgmt) {
+      exhibitor.priorityHall = priorityHall;
+    }
+    if (leadRetrievalStatus !== undefined && isMgmt) {
+      exhibitor.leadRetrievalStatus = leadRetrievalStatus;
+    }
 
     await exhibitor.save();
 
