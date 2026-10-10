@@ -8,6 +8,7 @@ import EventEngagement from '../models/EventEngagement.js';
 import User from '../models/User.js';
 import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
+import Lead from '../models/Lead.js';
 import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
 
 /**
@@ -172,6 +173,57 @@ export const toggleEngagement = async (req, res) => {
     const isBookmarked = !!engagement.isBookmarked;
     const isInterested = engagement.isInterested || (engagement.status === 'active' && (engagement.type === 'interested' || engagement.type === 'both'));
     const isFollower = engagement.isFollowed || (engagement.status === 'active' && (engagement.type === 'follower' || engagement.type === 'both'));
+
+    // Automatically create or update a Lead in the CRM for the event's organizer
+    try {
+      let targetEvt = null;
+      if (eventId && mongoose.isValidObjectId(eventId)) {
+        targetEvt = await Event.findById(eventId);
+      }
+      if (!targetEvt && cleanSlug) {
+        targetEvt = await Event.findOne({ slug: cleanSlug });
+      }
+
+      if (targetEvt) {
+        const orgEmail = (targetEvt.organizerEmail || targetEvt.orgEmail || '').toLowerCase().trim();
+        const orgId = targetEvt.organizer ? String(targetEvt.organizer) : '';
+        const isOrganizerSelf = (orgEmail && orgEmail === userEmail) || (orgId && orgId === userId);
+
+        if (!isOrganizerSelf) {
+          let leadDoc = await Lead.findOne({ event: targetEvt._id, email: userEmail });
+          if (leadDoc) {
+            leadDoc.leadScore = Math.max(leadDoc.leadScore || 50, action === 'interested' ? 70 : 55);
+            leadDoc.activityTimeline.push({
+              type: 'note',
+              content: `User marked "${action === 'interested' ? 'Interested' : 'Followed'}" for this event on VisitExpo.`
+            });
+            await leadDoc.save();
+          } else {
+            await Lead.create({
+              name: userName,
+              email: userEmail,
+              phone: userPhone || '',
+              company: userCompany || 'Interested Attendee',
+              designation: userDesignation || 'Trade Visitor',
+              country: eventCountry || targetEvt.country || 'India',
+              leadScore: action === 'interested' ? 65 : 50,
+              source: action === 'interested' ? 'interested' : 'follower',
+              status: 'new',
+              event: targetEvt._id,
+              notes: `Captured when user clicked "${action === 'interested' ? 'Interested' : 'Follow'}" for "${targetEvt.title}".`,
+              activityTimeline: [
+                {
+                  type: 'note',
+                  content: `User registered interest (${action}) on VisitExpo directory.`
+                }
+              ]
+            });
+          }
+        }
+      }
+    } catch (leadSyncErr) {
+      console.warn('[EngagementController] Failed to auto-sync Lead:', leadSyncErr.message);
+    }
 
     // Aggregate live counts for this event
     const [interestedCount, followersCount] = await Promise.all([

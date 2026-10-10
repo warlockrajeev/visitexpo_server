@@ -4,13 +4,285 @@
  */
 
 import express from 'express';
+import mongoose from 'mongoose';
 import Lead from '../models/Lead.js';
 import Event from '../models/Event.js';
+import User from '../models/User.js';
 import { protect, authorize } from '../middlewares/auth.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 
 const router = express.Router();
 
-// All lead routes require authentication and organizer roles
+// Optional JWT authentication helper for visitor-facing endpoints
+const optionalAuth = (req, res, next) => {
+  let token;
+  if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+    token = req.headers.authorization.split(' ')[1];
+  } else if (req.cookies && req.cookies.token) {
+    token = req.cookies.token;
+  }
+
+  if (token) {
+    try {
+      const decoded = verifyAccessToken(token);
+      if (decoded) {
+        req.user = {
+          id: decoded.id,
+          _id: decoded.id,
+          email: decoded.email,
+          role: decoded.role,
+          organization: decoded.organization
+        };
+      }
+    } catch (_) {}
+  }
+  next();
+};
+
+// =========================================================================
+// 1. PUBLIC VISITOR LEAD CAPTURE ENDPOINTS (Runs before protect)
+// =========================================================================
+
+// @desc    Track visitor click / view on an event and automatically capture as a CRM Lead
+// @route   POST /api/leads/track-click
+// @access  Public / Optional Auth
+router.post('/track-click', optionalAuth, async (req, res, next) => {
+  try {
+    const { eventId, eventSlug, visitor, user: bodyUser } = req.body;
+    let currentUser = req.user || bodyUser || visitor;
+
+    if (!eventId && !eventSlug) {
+      return res.status(400).json({ success: false, error: 'Event identifier is required' });
+    }
+
+    // Resolve target event in MongoDB
+    let targetEvent = null;
+    if (eventId && mongoose.isValidObjectId(eventId)) {
+      targetEvent = await Event.findById(eventId);
+    }
+    if (!targetEvent && eventSlug) {
+      targetEvent = await Event.findOne({ slug: eventSlug.toLowerCase().trim() });
+    }
+    if (!targetEvent && eventId) {
+      targetEvent = await Event.findOne({
+        $or: [
+          { slug: String(eventId).toLowerCase().trim() },
+          { wpPostId: String(eventId) }
+        ]
+      });
+    }
+
+    if (!targetEvent) {
+      return res.status(200).json({ success: true, message: 'Event not found in DB, skipping lead capture' });
+    }
+
+    // Fetch full profile if user ID exists
+    let resolvedUser = currentUser;
+    if (currentUser?.id || currentUser?._id) {
+      const uId = currentUser.id || currentUser._id;
+      if (mongoose.isValidObjectId(uId)) {
+        const dbUser = await User.findById(uId).lean();
+        if (dbUser) {
+          resolvedUser = { ...dbUser, ...currentUser };
+        }
+      }
+    }
+
+    // If visitor has no identity yet (anonymous browsing)
+    if (!resolvedUser || (!resolvedUser.email && !resolvedUser.phone)) {
+      return res.status(200).json({
+        success: true,
+        message: 'Anonymous visitor interaction noted. Requires identity for CRM lead capture.',
+        isAnonymous: true
+      });
+    }
+
+    const email = (resolvedUser.email || '').toLowerCase().trim();
+    if (!email) {
+      return res.status(200).json({ success: true, message: 'No email found for lead capture' });
+    }
+
+    // Check if the viewer is the organizer themselves
+    const orgId = targetEvent.organizer ? String(targetEvent.organizer) : '';
+    const claimedBy = targetEvent.claimedBy ? String(targetEvent.claimedBy) : '';
+    const orgEmail = (targetEvent.organizerEmail || targetEvent.orgEmail || '').toLowerCase().trim();
+    const currentUserId = String(resolvedUser.id || resolvedUser._id || '');
+
+    if (
+      (orgEmail && orgEmail === email) ||
+      (orgId && orgId === currentUserId) ||
+      (claimedBy && claimedBy === currentUserId)
+    ) {
+      // Avoid creating a lead when an organizer views their own event
+      return res.status(200).json({ success: true, message: 'Organizer self-view ignored' });
+    }
+
+    const name = (resolvedUser.name || email.split('@')[0]).trim();
+    const phone = resolvedUser.phone || '';
+    const company = resolvedUser.company || resolvedUser.organization?.name || 'Prospective Attendee';
+    const designation = resolvedUser.designation || 'Trade Visitor';
+    const country = resolvedUser.country || targetEvent.country || 'India';
+
+    // Check if lead already exists for this event + email
+    let existingLead = await Lead.findOne({ event: targetEvent._id, email });
+
+    if (existingLead) {
+      // Increment intent score (+5 points per view, capped at 95)
+      existingLead.leadScore = Math.min(95, (existingLead.leadScore || 25) + 5);
+      if (phone && !existingLead.phone) existingLead.phone = phone;
+      if (company && (!existingLead.company || existingLead.company === 'Prospective Attendee' || existingLead.company === 'Individual')) {
+        existingLead.company = company;
+      }
+      if (designation && existingLead.designation === 'Trade Visitor') {
+        existingLead.designation = designation;
+      }
+
+      existingLead.activityTimeline.push({
+        type: 'note',
+        content: `Clicked and explored event "${targetEvent.title}" on VisitExpo (${new Date().toLocaleDateString()}).`
+      });
+      await existingLead.save();
+
+      return res.status(200).json({
+        success: true,
+        message: 'Lead interaction recorded & intent score boosted',
+        lead: existingLead
+      });
+    }
+
+    // Create new Lead for the organizer
+    const newLead = await Lead.create({
+      name,
+      email,
+      phone,
+      company,
+      designation,
+      country,
+      leadScore: 35, // Initial interest score for viewing event
+      source: 'event_click',
+      status: 'new',
+      event: targetEvent._id,
+      notes: `Captured when user clicked and explored event "${targetEvent.title}" on VisitExpo directory.`,
+      activityTimeline: [
+        {
+          type: 'note',
+          content: `Clicked and viewed event details page on VisitExpo directory.`
+        }
+      ]
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'New lead successfully captured from event click',
+      lead: newLead
+    });
+  } catch (error) {
+    console.error('Error tracking event click lead:', error);
+    next(error);
+  }
+});
+
+// @desc    Direct attendee inquiry to organizer (e.g. Stall booking inquiry, delegate questions)
+// @route   POST /api/leads/inquire
+// @access  Public / Optional Auth
+router.post('/inquire', optionalAuth, async (req, res, next) => {
+  try {
+    const { eventId, eventSlug, name, email, phone, company, designation, country, message, inquiryType } = req.body;
+    const currentUser = req.user;
+
+    if (!eventId && !eventSlug) {
+      return res.status(400).json({ success: false, error: 'Event identifier is required' });
+    }
+
+    const leadEmail = (email || currentUser?.email || '').toLowerCase().trim();
+    if (!leadEmail) {
+      return res.status(400).json({ success: false, error: 'Work email is required' });
+    }
+
+    const leadName = (name || currentUser?.name || leadEmail.split('@')[0]).trim();
+
+    // Resolve event
+    let targetEvent = null;
+    if (eventId && mongoose.isValidObjectId(eventId)) {
+      targetEvent = await Event.findById(eventId);
+    }
+    if (!targetEvent && eventSlug) {
+      targetEvent = await Event.findOne({ slug: eventSlug.toLowerCase().trim() });
+    }
+    if (!targetEvent && eventId) {
+      targetEvent = await Event.findOne({
+        $or: [
+          { slug: String(eventId).toLowerCase().trim() },
+          { wpPostId: String(eventId) }
+        ]
+      });
+    }
+
+    if (!targetEvent) {
+      return res.status(404).json({ success: false, error: 'Target event not found' });
+    }
+
+    const leadPhone = phone || currentUser?.phone || '';
+    const leadCompany = company || currentUser?.company || 'Interested Attendee';
+    const leadDesignation = designation || currentUser?.designation || 'Trade Buyer';
+    const leadCountry = country || currentUser?.country || targetEvent.country || 'India';
+    const noteText = message ? `Inquiry (${inquiryType || 'General'}): ${message.trim()}` : `Direct attendee inquiry for "${targetEvent.title}".`;
+
+    let existingLead = await Lead.findOne({ event: targetEvent._id, email: leadEmail });
+
+    if (existingLead) {
+      existingLead.leadScore = Math.max(existingLead.leadScore || 50, 80);
+      existingLead.status = 'qualified';
+      existingLead.notes = `${existingLead.notes ? existingLead.notes + ' | ' : ''}${noteText}`;
+      existingLead.activityTimeline.push({
+        type: 'email',
+        content: `Submitted inquiry: ${message || 'Inquired about event details.'}`
+      });
+      await existingLead.save();
+
+      return res.status(200).json({
+        success: true,
+        message: 'Inquiry received. The organizer has been notified.',
+        lead: existingLead
+      });
+    }
+
+    const newLead = await Lead.create({
+      name: leadName,
+      email: leadEmail,
+      phone: leadPhone,
+      company: leadCompany,
+      designation: leadDesignation,
+      country: leadCountry,
+      leadScore: 80, // High-intent lead from direct inquiry
+      source: 'inquiry',
+      status: 'qualified',
+      event: targetEvent._id,
+      notes: noteText,
+      activityTimeline: [
+        {
+          type: 'email',
+          content: `Inquiry submitted via event page: ${message || 'Inquired about event details.'}`
+        }
+      ]
+    });
+
+    return res.status(201).json({
+      success: true,
+      message: 'Inquiry submitted successfully. Organizer has received your inquiry.',
+      lead: newLead
+    });
+  } catch (error) {
+    console.error('Error in lead inquiry:', error);
+    next(error);
+  }
+});
+
+// =========================================================================
+// 2. PROTECTED ORGANIZER & ADMIN CRM ROUTES
+// =========================================================================
+
+// All organizer lead routes require authentication and organizer roles
 router.use(protect);
 router.use(authorize('super_admin', 'organizer', 'event_manager', 'sales_team', 'marketing_manager'));
 
@@ -22,9 +294,15 @@ router.get('/', async (req, res, next) => {
 
     const query = {};
 
-    if (eventId) {
+    if (eventId && eventId !== 'all') {
+      let event = null;
+      if (mongoose.isValidObjectId(eventId)) {
+        event = await Event.findById(eventId);
+      } else {
+        event = await Event.findOne({ slug: eventId.toLowerCase().trim() });
+      }
+
       if (req.user.role === 'organizer') {
-        const event = await Event.findById(eventId);
         const orgId = req.user.organization;
         const userId = req.user.id;
         const userEmail = (req.user.email || '').toLowerCase().trim();
@@ -39,7 +317,7 @@ router.get('/', async (req, res, next) => {
           return res.status(403).json({ success: false, error: 'Not authorized to access leads for this event' });
         }
       }
-      query.event = eventId;
+      query.event = event?._id || eventId;
     } else {
       if (req.user.role === 'organizer') {
         const orgId = req.user.organization;
@@ -70,6 +348,10 @@ router.get('/', async (req, res, next) => {
       query.status = status;
     }
 
+    if (req.query.source && req.query.source !== 'all') {
+      query.source = req.query.source;
+    }
+
     if (search) {
       query.$or = [
         { name: { $regex: search, $options: 'i' } },
@@ -84,6 +366,7 @@ router.get('/', async (req, res, next) => {
 
     const [docs, total] = await Promise.all([
       Lead.find(query)
+        .populate('event', 'title slug city dates venue')
         .populate('assignedSales', 'name email')
         .populate('activityTimeline.performedBy', 'name')
         .sort({ leadScore: -1, createdAt: -1 })
