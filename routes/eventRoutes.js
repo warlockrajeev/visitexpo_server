@@ -25,6 +25,7 @@ import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEv
 import RecommendationService from '../services/RecommendationService.js';
 import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
+import LocationFeasibilityService from '../services/LocationFeasibilityService.js';
 
 const router = express.Router();
 
@@ -230,6 +231,39 @@ router.post('/recommendations/preferences', protect, async (req, res, next) => {
       preferredLocations
     });
     res.status(200).json({ success: true, message: 'Recommendation preferences updated', data: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==========================================
+// LOCATION MARKET FEASIBILITY & EVENT PRESENCE INTELLIGENCE
+// ==========================================
+
+// @desc    Get comprehensive location feasibility, buyer interest, and competitor event presence report
+// @route   GET /api/events/market-feasibility
+router.get('/market-feasibility', async (req, res, next) => {
+  try {
+    const { city = 'Delhi', category = '' } = req.query;
+
+    let user = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      const decoded = verifyAccessToken(authHeader.split(' ')[1]);
+      if (decoded?.id) {
+        user = await User.findById(decoded.id)
+          .select('name email role plan planStatus isPlanActive hasUnlockedLocationResearch unlockedResearchLocations')
+          .lean();
+      }
+    }
+
+    const report = await LocationFeasibilityService.analyzeLocation({
+      city: String(city),
+      category: String(category || ''),
+      user
+    });
+
+    res.status(200).json({ success: true, data: report });
   } catch (error) {
     next(error);
   }

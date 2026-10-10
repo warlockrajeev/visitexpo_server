@@ -123,6 +123,14 @@ const UserSchema = new mongoose.Schema(
       type: Number,
       default: 0
     },
+    hasUnlockedLocationResearch: {
+      type: Boolean,
+      default: false
+    },
+    unlockedResearchLocations: {
+      type: [String],
+      default: []
+    },
     isChatEnabled: {
       type: Boolean,
       default: false

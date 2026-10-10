@@ -1155,13 +1155,16 @@ router.get('/my-plan', protect, async (req, res, next) => {
       planPaidAmount: sub?.price !== undefined ? sub.price : (user.planPaidAmount || 0),
       generalEmailPrice: generalPrice,
       noChargeForGeneralMail: isNoChargeGeneral,
+      hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch,
+      unlockedResearchLocations: user.unlockedResearchLocations || [],
       subscription: sub,
       user: {
         id: user._id,
         name: user.name,
         email: user.email,
         role: user.role,
-        isVerified: user.isVerified
+        isVerified: user.isVerified,
+        hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch
       }
     });
   } catch (error) {
@@ -1231,7 +1234,8 @@ router.post('/activate-free-plan', protect, async (req, res, next) => {
           plan: user.plan,
           planStatus: user.planStatus,
           isPlanActive: user.isPlanActive,
-          planPaidAmount: 0
+          planPaidAmount: 0,
+          hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch
         }
       });
     } else {
@@ -1277,10 +1281,56 @@ router.post('/activate-free-plan', protect, async (req, res, next) => {
           plan: user.plan,
           planStatus: user.planStatus,
           isPlanActive: user.isPlanActive,
-          planPaidAmount: generalPrice
+          planPaidAmount: generalPrice,
+          hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch
         }
       });
     }
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Unlock Location Feasibility & Event Presence Intelligence for Free Organizers (₹4,999)
+// @route   POST /api/plans/unlock-location-research
+router.post('/unlock-location-research', protect, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const { location, transactionId, paymentMethod = 'card' } = req.body;
+    const price = 4999;
+    const txn = transactionId || `TXN_RESEARCH_${Date.now()}_${Math.floor(Math.random() * 10000)}`;
+
+    user.hasUnlockedLocationResearch = true;
+    if (location) {
+      const locLower = String(location).trim().toLowerCase();
+      if (!user.unlockedResearchLocations) user.unlockedResearchLocations = [];
+      if (!user.unlockedResearchLocations.includes(locLower)) {
+        user.unlockedResearchLocations.push(locLower);
+      }
+    }
+    user.planPaidAmount = (user.planPaidAmount || 0) + price;
+    await user.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Location Feasibility & Event Presence Intelligence unlocked successfully for ₹4,999!',
+      transactionId: txn,
+      amount: price,
+      hasUnlockedLocationResearch: true,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        plan: user.plan,
+        hasUnlockedLocationResearch: true,
+        unlockedResearchLocations: user.unlockedResearchLocations || []
+      }
+    });
   } catch (error) {
     next(error);
   }

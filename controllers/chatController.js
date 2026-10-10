@@ -231,6 +231,17 @@ export const updateChatSettings = async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'Organizer user not found' });
     }
 
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const rawPlan = (user.plan || 'free').toLowerCase();
+    const isPaidPlan = user.isPlanActive && ['starter', 'enterprise', 'growth'].includes(rawPlan);
+
+    if (!isSuperAdmin && !isPaidPlan && (isChatEnabled === true || chatStatus === 'online')) {
+      return res.status(403).json({
+        success: false,
+        message: 'Live Chat Desk is exclusive to Starter and Enterprise plans. Please upgrade your plan to activate Live Chat.'
+      });
+    }
+
     if (isChatEnabled !== undefined) {
       user.isChatEnabled = Boolean(isChatEnabled);
       // Auto-set status to online when enabled, offline when disabled if not specified
