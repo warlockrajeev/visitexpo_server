@@ -19,6 +19,7 @@ import DeletedOrganizer from '../models/DeletedOrganizer.js';
 import DeletedEvent from '../models/DeletedEvent.js';
 import Category from '../models/Category.js';
 import Ticket from '../models/Ticket.js';
+import FeaturedOrganizer from '../models/FeaturedOrganizer.js';
 import mongoose from 'mongoose';
 import { protect, authorize } from '../middlewares/auth.js';
 import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
@@ -2533,14 +2534,15 @@ router.get('/invoices', async (req, res, next) => {
 // @route   GET /api/admin/pending-summary
 router.get('/pending-summary', async (req, res, next) => {
   try {
-    const [pendingOrganizers, pendingExhibitors, pendingClaims, pendingEvents] = await Promise.all([
+    const [pendingOrganizers, pendingExhibitors, pendingClaims, pendingEvents, pendingFeatured] = await Promise.all([
       User.countDocuments({ role: 'organizer', isVerified: false }),
       Exhibitor.countDocuments({ status: 'pending' }),
       Event.countDocuments({ isClaimed: true, status: 'draft' }),
-      Event.countDocuments({ status: 'pending' })
+      Event.countDocuments({ status: 'pending' }),
+      FeaturedOrganizer.countDocuments({ status: 'pending' })
     ]);
 
-    const totalPending = pendingOrganizers + pendingExhibitors + pendingClaims + pendingEvents;
+    const totalPending = pendingOrganizers + pendingExhibitors + pendingClaims + pendingEvents + pendingFeatured;
 
     res.status(200).json({
       success: true,
@@ -2549,6 +2551,7 @@ router.get('/pending-summary', async (req, res, next) => {
         pendingExhibitors,
         pendingClaims,
         pendingEvents,
+        pendingFeatured,
         totalPending
       }
     });
