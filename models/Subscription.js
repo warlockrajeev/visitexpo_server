@@ -30,7 +30,7 @@ const SubscriptionSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ['active', 'suspended', 'expired', 'payment_pending'],
+      enum: ['active', 'suspended', 'expired', 'payment_pending', 'cancelled'],
       default: 'active'
     },
     startDate: {

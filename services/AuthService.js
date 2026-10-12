@@ -192,6 +192,7 @@ class AuthService {
         plan: user.plan,
         planStatus: user.planStatus,
         isPlanActive: user.isPlanActive,
+        hasGrowthPlan: Boolean(user.hasGrowthPlan || user.plan === 'growth'),
         planPaidAmount: user.planPaidAmount,
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,
@@ -248,7 +249,34 @@ class AuthService {
         user.emailType = isCorporate ? 'corporate' : 'general';
         needsSave = true;
       }
-      if (isCorporate && !user.isPlanActive) {
+
+      // Check active subscription
+      const orgId = user.organization?._id || user.organization;
+      const activeSub = await Subscription.findOne({
+        $or: [
+          ...(orgId ? [{ organization: orgId }] : []),
+          { user: user._id }
+        ],
+        plan: { $ne: 'growth' },
+        status: 'active'
+      }).sort({ createdAt: -1 });
+
+      if (activeSub && activeSub.plan && activeSub.plan !== 'growth') {
+        if (user.plan !== activeSub.plan || !user.isPlanActive || !user.isVerified) {
+          user.plan = activeSub.plan;
+          user.planStatus = 'active';
+          user.isPlanActive = true;
+          user.isVerified = true;
+          needsSave = true;
+        }
+      } else if (['enterprise', 'starter'].includes(user.plan)) {
+        if (!user.isPlanActive || !user.isVerified) {
+          user.isPlanActive = true;
+          user.isVerified = true;
+          user.planStatus = 'active';
+          needsSave = true;
+        }
+      } else if (isCorporate && !user.isPlanActive) {
         // Corporate business email: 100% Free Organizer plan automatically active!
         user.isVerified = true;
         user.plan = 'free';
@@ -256,7 +284,7 @@ class AuthService {
         user.isPlanActive = true;
         user.planPaidAmount = 0;
         needsSave = true;
-      } else if (!isCorporate && !user.isPlanActive) {
+      } else if (!isCorporate && !user.isPlanActive && user.plan === 'free') {
         user.plan = 'free';
         user.planStatus = user.isVerified ? 'active' : 'payment_pending';
         needsSave = true;
@@ -281,6 +309,8 @@ class AuthService {
     expiresAt.setDate(expiresAt.getDate() + 7); // 7 days
     await UserRepository.addRefreshToken(user._id, refreshToken, expiresAt);
 
+    const isPaidOrganizer = ['enterprise', 'starter'].includes(user.plan);
+
     return {
       user: {
         id: user._id,
@@ -289,11 +319,13 @@ class AuthService {
         role: user.role,
         adminRole: user.adminRole || '',
         permissions: user.permissions || [],
-        isVerified: user.isVerified,
+        isVerified: isPaidOrganizer ? true : user.isVerified,
         emailType: user.emailType || (isCorporateEmail(user.email) ? 'corporate' : 'general'),
         plan: user.plan || 'free',
+        basePlan: user.plan || 'free',
         planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
-        isPlanActive: !!user.isPlanActive,
+        isPlanActive: isPaidOrganizer ? true : !!user.isPlanActive,
+        hasGrowthPlan: Boolean(user.hasGrowthPlan || user.plan === 'growth'),
         planPaidAmount: user.planPaidAmount || 0,
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,
@@ -542,7 +574,27 @@ class AuthService {
       if (user.role === 'organizer') {
         const isCorporate = isCorporateEmail(user.email);
         if (!user.emailType) user.emailType = isCorporate ? 'corporate' : 'general';
-        if (isCorporate && !user.isPlanActive) {
+
+        const orgId = user.organization?._id || user.organization;
+        const activeSub = await Subscription.findOne({
+          $or: [
+            ...(orgId ? [{ organization: orgId }] : []),
+            { user: user._id }
+          ],
+          plan: { $ne: 'growth' },
+          status: 'active'
+        }).sort({ createdAt: -1 });
+
+        if (activeSub && activeSub.plan && activeSub.plan !== 'growth') {
+          user.plan = activeSub.plan;
+          user.planStatus = 'active';
+          user.isPlanActive = true;
+          user.isVerified = true;
+        } else if (['enterprise', 'starter'].includes(user.plan)) {
+          user.isPlanActive = true;
+          user.isVerified = true;
+          user.planStatus = 'active';
+        } else if (isCorporate && !user.isPlanActive) {
           user.isVerified = true;
           user.plan = 'free';
           user.planStatus = 'active';
@@ -617,6 +669,8 @@ class AuthService {
     expiresAt.setDate(expiresAt.getDate() + 7);
     await UserRepository.addRefreshToken(user._id, refreshToken, expiresAt);
 
+    const isPaidOrganizerGoogle = ['enterprise', 'starter'].includes(user.plan);
+
     return {
       user: {
         id: user._id,
@@ -627,11 +681,13 @@ class AuthService {
         designation: user.designation || '',
         city: user.city || '',
         role: user.role,
-        isVerified: user.isVerified,
+        isVerified: isPaidOrganizerGoogle ? true : user.isVerified,
         emailType: user.emailType || (isCorporateEmail(user.email) ? 'corporate' : 'general'),
         plan: user.plan || 'free',
+        basePlan: user.plan || 'free',
         planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
-        isPlanActive: !!user.isPlanActive,
+        isPlanActive: isPaidOrganizerGoogle ? true : !!user.isPlanActive,
+        hasGrowthPlan: Boolean(user.hasGrowthPlan || user.plan === 'growth'),
         planPaidAmount: user.planPaidAmount || 0,
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,

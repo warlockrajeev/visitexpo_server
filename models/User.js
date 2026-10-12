@@ -110,6 +110,10 @@ const UserSchema = new mongoose.Schema(
       enum: ['free', 'starter', 'enterprise', 'growth'],
       default: 'free'
     },
+    hasGrowthPlan: {
+      type: Boolean,
+      default: false
+    },
     planStatus: {
       type: String,
       enum: ['active', 'payment_pending', 'suspended', 'expired'],

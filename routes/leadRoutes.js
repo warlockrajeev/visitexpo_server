@@ -10,6 +10,7 @@ import Event from '../models/Event.js';
 import User from '../models/User.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
+import { notifyOrganizerOnLead } from '../services/oneSignalService.js';
 
 const router = express.Router();
 
@@ -171,6 +172,13 @@ router.post('/track-click', optionalAuth, async (req, res, next) => {
       ]
     });
 
+    // Trigger Web Push notification to Organizer (Enterprise plan only)
+    notifyOrganizerOnLead({
+      event: targetEvent,
+      lead: newLead,
+      source: 'event_click'
+    }).catch(err => console.warn('[LeadRoutes] Event click push error:', err.message));
+
     return res.status(201).json({
       success: true,
       message: 'New lead successfully captured from event click',
@@ -266,6 +274,14 @@ router.post('/inquire', optionalAuth, async (req, res, next) => {
         }
       ]
     });
+
+    // Trigger Web Push notification to Organizer (Enterprise plan only)
+    notifyOrganizerOnLead({
+      event: targetEvent,
+      lead: newLead,
+      source: 'inquiry',
+      note: message
+    }).catch(err => console.warn('[LeadRoutes] Inquiry push error:', err.message));
 
     return res.status(201).json({
       success: true,
@@ -458,6 +474,13 @@ router.post('/', async (req, res, next) => {
         }
       ]
     });
+
+    // Trigger Web Push notification to Organizer (Enterprise plan only)
+    notifyOrganizerOnLead({
+      event: eventId,
+      lead: newLead,
+      source: newLead.source
+    }).catch(err => console.warn('[LeadRoutes] Manual lead push error:', err.message));
 
     res.status(201).json({
       success: true,

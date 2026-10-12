@@ -321,15 +321,30 @@ router.get('/me', protect, async (req, res, next) => {
 
     // Auto-sync corporate email plan activation & active subscription for organizers
     let activeSub = null;
+    let hasGrowthPlan = false;
     if (userDoc.role === 'organizer') {
       const orgId = userDoc.organization?._id || userDoc.organization;
+
+      // Find active BASE plan subscription (excluding Growth add-on)
       activeSub = await Subscription.findOne({
         $or: [
           ...(orgId ? [{ organization: orgId }] : []),
           { user: userDoc._id }
         ],
+        plan: { $ne: 'growth' },
         status: 'active'
       }).sort({ createdAt: -1 });
+
+      // Check if organizer also has an active Growth plan add-on
+      const hasGrowthSub = await Subscription.exists({
+        $or: [
+          ...(orgId ? [{ organization: orgId }] : []),
+          { user: userDoc._id }
+        ],
+        plan: 'growth',
+        status: 'active'
+      });
+      hasGrowthPlan = Boolean(userDoc.hasGrowthPlan || hasGrowthSub);
 
       let needsSave = false;
       const isCorporate = isCorporateEmail(userDoc.email);
@@ -338,12 +353,30 @@ router.get('/me', protect, async (req, res, next) => {
         needsSave = true;
       }
 
-      if (activeSub && activeSub.plan) {
+      if (userDoc.hasGrowthPlan !== hasGrowthPlan) {
+        userDoc.hasGrowthPlan = hasGrowthPlan;
+        needsSave = true;
+      }
+
+      // If userDoc.plan was mistakenly set to 'growth', restore it to base plan
+      if (userDoc.plan === 'growth') {
+        userDoc.plan = activeSub?.plan || 'enterprise';
+        needsSave = true;
+      }
+
+      if (activeSub && activeSub.plan && activeSub.plan !== 'growth') {
         if (userDoc.plan !== activeSub.plan || !userDoc.isPlanActive || !userDoc.isVerified) {
           userDoc.plan = activeSub.plan;
           userDoc.planStatus = 'active';
           userDoc.isPlanActive = true;
           userDoc.isVerified = true;
+          needsSave = true;
+        }
+      } else if (['enterprise', 'starter'].includes(userDoc.plan)) {
+        if (!userDoc.isPlanActive || !userDoc.isVerified) {
+          userDoc.isPlanActive = true;
+          userDoc.isVerified = true;
+          userDoc.planStatus = 'active';
           needsSave = true;
         }
       } else if (isCorporate && (!userDoc.isPlanActive || !userDoc.isVerified)) {
@@ -358,7 +391,17 @@ router.get('/me', protect, async (req, res, next) => {
       if (needsSave) {
         await userDoc.save();
       }
+    } else {
+      hasGrowthPlan = Boolean(userDoc.hasGrowthPlan);
     }
+
+    const resolvedBasePlan = (activeSub?.plan && activeSub.plan !== 'growth')
+      ? activeSub.plan
+      : (userDoc.plan && userDoc.plan !== 'growth' ? userDoc.plan : 'free');
+
+    const isPaidOrganizer = ['enterprise', 'starter'].includes(resolvedBasePlan);
+    const isPlanActive = isPaidOrganizer ? true : (activeSub ? activeSub.status === 'active' : (userDoc.isPlanActive ?? true));
+    const isVerified = isPaidOrganizer ? true : Boolean(userDoc.isVerified);
 
     res.status(200).json({
       success: true,
@@ -373,11 +416,13 @@ router.get('/me', protect, async (req, res, next) => {
         role: userDoc.role,
         adminRole: userDoc.adminRole || '',
         permissions: userDoc.permissions || [],
-        isVerified: userDoc.isVerified,
+        isVerified,
         emailType: userDoc.emailType || (isCorporateEmail(userDoc.email) ? 'corporate' : 'general'),
-        plan: activeSub?.plan || userDoc.plan || 'free',
-        planStatus: activeSub?.status || userDoc.planStatus || (userDoc.isVerified ? 'active' : 'payment_pending'),
-        isPlanActive: activeSub ? activeSub.status === 'active' : !!userDoc.isPlanActive,
+        plan: resolvedBasePlan,
+        basePlan: resolvedBasePlan,
+        planStatus: userDoc.planStatus || (isPlanActive ? 'active' : 'payment_pending'),
+        isPlanActive,
+        hasGrowthPlan,
         subscription: activeSub,
         planPaidAmount: activeSub?.price !== undefined ? activeSub.price : (userDoc.planPaidAmount || 0),
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,

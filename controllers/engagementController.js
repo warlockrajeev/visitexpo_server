@@ -10,6 +10,7 @@ import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
 import Lead from '../models/Lead.js';
 import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
+import { notifyOrganizerOnFollow, notifyOrganizerOnInterest } from '../services/oneSignalService.js';
 
 /**
  * @desc Toggle interest or follow for a user on a specific event
@@ -218,6 +219,23 @@ export const toggleEngagement = async (req, res) => {
                 }
               ]
             });
+          }
+
+          // Trigger Web Push notification to Organizer (Enterprise plan only)
+          if (action === 'follower' && isFollower) {
+            notifyOrganizerOnFollow({
+              event: targetEvt,
+              userName,
+              userEmail,
+              userCompany
+            }).catch(pushErr => console.warn('[EngagementController] Follow push error:', pushErr.message));
+          } else if (action === 'interested' && isInterested) {
+            notifyOrganizerOnInterest({
+              event: targetEvt,
+              userName,
+              userEmail,
+              userCompany
+            }).catch(pushErr => console.warn('[EngagementController] Interest push error:', pushErr.message));
           }
         }
       }

@@ -8,6 +8,7 @@ import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
 import Lead from '../models/Lead.js';
 import { protect, authorize } from '../middlewares/auth.js';
+import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
 
 const router = express.Router();
 
@@ -73,6 +74,13 @@ router.post('/register', async (req, res, next) => {
         }
       ]
     });
+
+    // 5. Trigger Web Push notification to Organizer (Enterprise plan only)
+    notifyOrganizerOnVisitor({
+      event,
+      visitor,
+      type: 'registered'
+    }).catch(pushErr => console.warn('[VisitorRoutes] Push notification warning:', pushErr.message));
 
     res.status(201).json({
       success: true,
@@ -279,6 +287,13 @@ router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_ma
     visitor.checkInTime = new Date();
     await visitor.save();
 
+    // Trigger Web Push notification to Organizer (Enterprise plan only)
+    notifyOrganizerOnVisitor({
+      event: visitor.event,
+      visitor,
+      type: 'checked_in'
+    }).catch(pushErr => console.warn('[VisitorRoutes] Check-in push error:', pushErr.message));
+
     res.status(200).json({
       success: true,
       message: 'Visitor checked in successfully',
@@ -339,6 +354,13 @@ router.post('/virtual-join', async (req, res, next) => {
     } catch (e) {
       // ignore
     }
+
+    // Trigger Web Push notification to Organizer (Enterprise plan only)
+    notifyOrganizerOnVisitor({
+      event: eventId,
+      visitor,
+      type: 'virtual'
+    }).catch(pushErr => console.warn('[VisitorRoutes] Virtual join push error:', pushErr.message));
 
     res.status(200).json({
       success: true,

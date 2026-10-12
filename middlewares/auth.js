@@ -36,6 +36,7 @@ export const protect = async (req, res, next) => {
     // Set user info on request
     req.user = {
       id: decoded.id,
+      _id: decoded.id,
       email: decoded.email,
       role: decoded.role,
       adminRole: decoded.adminRole || '',

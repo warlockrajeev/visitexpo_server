@@ -13,6 +13,7 @@ import Lead from '../models/Lead.js';
 import Organization from '../models/Organization.js';
 import User from '../models/User.js';
 import { protect, authorize } from '../middlewares/auth.js';
+import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
 
 const router = express.Router();
 
@@ -103,6 +104,13 @@ router.post('/checkout', async (req, res, next) => {
           }
         ]
       });
+
+      // Trigger Web Push notification to Organizer (Enterprise plan only)
+      notifyOrganizerOnVisitor({
+        event: targetEventId,
+        visitor,
+        type: 'registered'
+      }).catch(pushErr => console.warn('[OrderRoutes] Checkout push error:', pushErr.message));
     }
 
     // 3. Create Order

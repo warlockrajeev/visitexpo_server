@@ -190,7 +190,8 @@ export const DEFAULT_OFFICIAL_PLANS = [
       'Multiple expos management',
       'Developer API & webhooks',
       'Unlimited lead report export (CSV & Excel)',
-      'Advanced search & filtering'
+      'Advanced search & filtering',
+      'VIP Dedicated Account Director'
     ],
     highlights: [
       'Everything in Starter plan',
@@ -264,6 +265,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
     keyInclusions: [
       'Top-up packs from ₹1,000',
       'Use across 13 promotion channels',
+      'Real-time Web Push alerts (visitors, leads, follows)',
       'Flexible point-wise pricing',
       'Google listing & search visibility',
       'Social media optimization (SMO)',
@@ -272,6 +274,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
     highlights: [
       'Top-up packs from ₹1,000',
       'Use across 13 promotion channels',
+      'Real-time Web Push alerts (visitors, leads, follows)',
       'Flexible point-wise pricing',
       'Google listing & search visibility',
       'Social media optimization (SMO)',
@@ -279,6 +282,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
     ],
     features: [
       { title: 'Top-Up Packs from ₹1,000', included: true, detail: 'Flexible scale with zero lock-in' },
+      { title: 'VisitExpo Web Push Notifications', included: true, detail: 'Instant desktop & mobile push alerts for visitors, leads, attendee follows, and delegates' },
       { title: '13 Specialized Marketing Channels', included: true, detail: 'Digital, messaging, voice and on-site display' },
       { title: 'Targeted Buyer Acquisition', included: true, detail: 'Drive verified attendees and booth buyers' },
       { title: 'Real-Time ROI Campaign Analytics', included: true, detail: 'Inspect clicks, deliveries and converted inquiries' }
@@ -555,6 +559,18 @@ router.post('/inquire', async (req, res, next) => {
       const domain = email.split('@')[1]?.toLowerCase();
       const freeProviders = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'rediffmail.com', 'zoho.com'];
       detectedEmailType = freeProviders.includes(domain) ? 'general' : 'corporate';
+    }
+
+    // Restriction: Growth plan is only for organizers on Starter or Enterprise base plans. Free plan users cannot take it.
+    if ((planId === 'growth' || planName?.toLowerCase()?.includes('growth')) && email) {
+      const existingUser = await User.findOne({ email: email.toLowerCase() });
+      if (existingUser && String(existingUser.plan || 'free').toLowerCase() === 'free') {
+        return res.status(403).json({
+          success: false,
+          message: 'Growth Top-Up Plan is an exclusive add-on for Starter and Enterprise organizers. Organizers on the Free Plan must upgrade their base plan to Starter or Enterprise first.',
+          requiresBaseUpgrade: true
+        });
+      }
     }
 
     const inquiry = await PlanInquiry.create({
@@ -931,6 +947,17 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
       const user = await User.findById(uId);
       if (!user) continue;
 
+      // Restriction: Growth plan can ONLY be assigned to organizers with Starter or Enterprise base plan
+      if (targetPlanId === 'growth') {
+        const currentBasePlan = String(user.plan || 'free').toLowerCase();
+        if (currentBasePlan === 'free' || !['starter', 'enterprise'].includes(currentBasePlan)) {
+          return res.status(400).json({
+            success: false,
+            message: `Cannot assign Growth Plan to ${user.name} (${user.email}). Growth Plan is an exclusive add-on for Starter and Enterprise organizers. Organizers on the Free plan must upgrade their base plan to Starter or Enterprise first.`
+          });
+        }
+      }
+
       const isCorporate = isCorporateEmail(user.email);
 
       // Upgrade role to organizer if requested
@@ -938,7 +965,16 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
         user.role = 'organizer';
       }
 
-      user.plan = targetPlanId;
+      if (targetPlanId === 'growth') {
+        // Growth is an additional plan - preserve base plan and enable Growth
+        user.hasGrowthPlan = true;
+      } else {
+        user.plan = targetPlanId;
+        if (targetPlanId === 'free') {
+          user.hasGrowthPlan = false;
+        }
+      }
+
       user.planStatus = 'active';
       user.isPlanActive = true;
       if (isVerified) {
@@ -962,22 +998,37 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
       }
 
       // Create or update subscription record
-      lastSubscription = await Subscription.findOneAndUpdate(
-        { organization: orgId },
-        {
+      if (targetPlanId === 'growth') {
+        lastSubscription = await Subscription.create({
           organization: orgId,
           user: user._id,
-          plan: targetPlanId,
+          plan: 'growth',
           emailType: user.emailType,
           status: 'active',
           price: finalPrice,
           paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
           startDate: new Date(),
           endDate: new Date(Date.now() + durationMs),
-          adminNotes: adminNotes || `Assigned by admin ${req.user?.name || 'Super Admin'} (No charge for general mail: ${noChargeForGeneralMail ? 'Yes' : 'No'})`
-        },
-        { upsert: true, new: true }
-      );
+          adminNotes: adminNotes || `Growth Plan Add-on assigned by admin ${req.user?.name || 'Super Admin'}`
+        });
+      } else {
+        lastSubscription = await Subscription.findOneAndUpdate(
+          { organization: orgId, plan: { $ne: 'growth' } },
+          {
+            organization: orgId,
+            user: user._id,
+            plan: targetPlanId,
+            emailType: user.emailType,
+            status: 'active',
+            price: finalPrice,
+            paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
+            startDate: new Date(),
+            endDate: new Date(Date.now() + durationMs),
+            adminNotes: adminNotes || `Assigned by admin ${req.user?.name || 'Super Admin'} (No charge for general mail: ${noChargeForGeneralMail ? 'Yes' : 'No'})`
+          },
+          { upsert: true, new: true }
+        );
+      }
 
       assignedUsers.push({
         id: user._id,
@@ -1005,6 +1056,284 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
         user: assignedUsers[0],
         subscription: lastSubscription
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Admin: Remove plan / growth add-on from user or revert to Free plan
+// @route   POST /api/plans/admin/remove-plan
+router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
+  try {
+    const { userId, userIds, subscriptionId, planType = 'base', adminNotes = '' } = req.body;
+
+    // 1. Specific subscription removal if subscriptionId is provided
+    if (subscriptionId) {
+      const sub = await Subscription.findById(subscriptionId).populate('user');
+      if (!sub) {
+        return res.status(404).json({ success: false, message: 'Subscription record not found.' });
+      }
+
+      const user = sub.user && sub.user._id ? sub.user : (sub.user ? await User.findById(sub.user) : null);
+      const orgId = sub.organization || (user ? user.organization : null);
+
+      if (sub.plan === 'growth' || planType === 'growth') {
+        // CANCEL GROWTH ADD-ON ONLY
+        sub.status = 'cancelled';
+        sub.adminNotes = adminNotes || `Growth Add-on cancelled by admin ${req.user?.name || 'Administrator'}`;
+        await sub.save();
+
+        if (user) {
+          // Check if there are any other remaining active growth subscriptions
+          const remainingGrowth = await Subscription.countDocuments({
+            _id: { $ne: sub._id },
+            $or: [
+              ...(orgId ? [{ organization: orgId }] : []),
+              { user: user._id }
+            ],
+            plan: 'growth',
+            status: 'active'
+          });
+
+          if (remainingGrowth === 0) {
+            user.hasGrowthPlan = false;
+          }
+
+          // Ensure user.plan reflects their active base plan
+          const activeBaseSub = await Subscription.findOne({
+            $or: [
+              ...(orgId ? [{ organization: orgId }] : []),
+              { user: user._id }
+            ],
+            plan: { $ne: 'growth' },
+            status: 'active'
+          });
+
+          if (activeBaseSub) {
+            user.plan = activeBaseSub.plan;
+          } else if (user.plan === 'growth') {
+            user.plan = 'free';
+          }
+          await user.save();
+
+          return res.status(200).json({
+            success: true,
+            message: `Successfully removed Growth Add-on from ${user.name || user.email}. Base plan (${(user.plan || 'Free').toUpperCase()}) remains active.`,
+            user: {
+              id: user._id,
+              name: user.name,
+              email: user.email,
+              plan: user.plan,
+              hasGrowthPlan: user.hasGrowthPlan
+            }
+          });
+        }
+
+        return res.status(200).json({
+          success: true,
+          message: 'Growth Add-on subscription cancelled successfully.'
+        });
+      } else {
+        // CANCEL BASE PLAN SUBSCRIPTION & REVERT TO FREE
+        sub.status = 'cancelled';
+        sub.adminNotes = adminNotes || `Base plan cancelled by admin ${req.user?.name || 'Administrator'}`;
+        await sub.save();
+
+        if (user) {
+          const previousPlan = user.plan || sub.plan || 'starter';
+          user.plan = 'free';
+          user.hasGrowthPlan = false;
+          user.planStatus = 'active';
+          user.isPlanActive = true;
+          user.isVerified = true;
+          user.planPaidAmount = 0;
+          await user.save();
+
+          if (orgId) {
+            // Cancel any remaining active subscriptions (including growth since Free users cannot have growth)
+            await Subscription.updateMany(
+              {
+                _id: { $ne: sub._id },
+                $or: [{ organization: orgId }, { user: user._id }],
+                status: 'active'
+              },
+              {
+                status: 'cancelled',
+                adminNotes: adminNotes || `All subscriptions cancelled & reverted to Free plan by admin ${req.user?.name || 'Administrator'}`
+              }
+            );
+
+            // Upsert standard active Free plan subscription (10 years)
+            const isCorporate = isCorporateEmail(user.email);
+            await Subscription.findOneAndUpdate(
+              { organization: orgId, plan: { $ne: 'growth' } },
+              {
+                organization: orgId,
+                user: user._id,
+                plan: 'free',
+                emailType: user.emailType || (isCorporate ? 'corporate' : 'general'),
+                status: 'active',
+                price: 0,
+                paymentCycle: 'quarterly',
+                startDate: new Date(),
+                endDate: new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000),
+                adminNotes: `Reverted to Free plan by admin ${req.user?.name || 'Administrator'} (Previous plan: ${previousPlan})`
+              },
+              { upsert: true, new: true }
+            );
+          }
+
+          return res.status(200).json({
+            success: true,
+            message: `Successfully reverted ${user.name} (${user.email}) back to Free Plan.`,
+            user: {
+              id: user._id,
+              name: user.name,
+              email: user.email,
+              plan: 'free',
+              hasGrowthPlan: false
+            }
+          });
+        }
+
+        return res.status(200).json({
+          success: true,
+          message: 'Subscription cancelled successfully and reverted to Free.'
+        });
+      }
+    }
+
+    // 2. User-level removal (by userId or userIds)
+    const targetUserIds = Array.isArray(userIds) && userIds.length > 0
+      ? userIds
+      : (userId ? [userId] : []);
+
+    if (targetUserIds.length === 0) {
+      return res.status(400).json({ success: false, message: 'User ID or Subscription ID is required.' });
+    }
+
+    const modifiedUsers = [];
+
+    for (const uId of targetUserIds) {
+      const user = await User.findById(uId);
+      if (!user) continue;
+
+      const orgId = user.organization?._id || user.organization;
+
+      if (planType === 'growth') {
+        // CANCEL ONLY GROWTH ADD-ON FOR THIS USER
+        user.hasGrowthPlan = false;
+
+        // Ensure user.plan reflects their active base plan
+        const activeBaseSub = await Subscription.findOne({
+          $or: [
+            ...(orgId ? [{ organization: orgId }] : []),
+            { user: user._id }
+          ],
+          plan: { $ne: 'growth' },
+          status: 'active'
+        });
+
+        if (activeBaseSub) {
+          user.plan = activeBaseSub.plan;
+        } else if (user.plan === 'growth') {
+          user.plan = 'free';
+        }
+        await user.save();
+
+        // Cancel active growth subscriptions for this user/org
+        await Subscription.updateMany(
+          {
+            $or: [
+              ...(orgId ? [{ organization: orgId }] : []),
+              { user: user._id }
+            ],
+            plan: 'growth',
+            status: 'active'
+          },
+          {
+            status: 'cancelled',
+            adminNotes: adminNotes || `Growth Add-on cancelled by admin ${req.user?.name || 'Administrator'}`
+          }
+        );
+
+        modifiedUsers.push({
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          plan: user.plan,
+          hasGrowthPlan: false
+        });
+      } else {
+        // REVERT USER TO FREE PLAN
+        const previousPlan = user.plan || 'starter';
+        const isCorporate = isCorporateEmail(user.email);
+
+        user.plan = 'free';
+        user.hasGrowthPlan = false;
+        user.planStatus = 'active';
+        user.isPlanActive = true;
+        user.isVerified = true;
+        user.planPaidAmount = 0;
+        await user.save();
+
+        if (orgId) {
+          // Cancel all existing active subscriptions
+          await Subscription.updateMany(
+            {
+              $or: [{ organization: orgId }, { user: user._id }],
+              status: 'active'
+            },
+            {
+              status: 'cancelled',
+              adminNotes: adminNotes || `Plan cancelled & reverted to Free plan by admin ${req.user?.name || 'Administrator'}`
+            }
+          );
+
+          // Upsert standard active Free plan subscription (10 years)
+          await Subscription.findOneAndUpdate(
+            { organization: orgId, plan: { $ne: 'growth' } },
+            {
+              organization: orgId,
+              user: user._id,
+              plan: 'free',
+              emailType: user.emailType || (isCorporate ? 'corporate' : 'general'),
+              status: 'active',
+              price: 0,
+              paymentCycle: 'quarterly',
+              startDate: new Date(),
+              endDate: new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000),
+              adminNotes: adminNotes || `Reverted to Free plan by admin ${req.user?.name || 'Administrator'} (Previous plan: ${previousPlan})`
+            },
+            { upsert: true, new: true }
+          );
+        }
+
+        modifiedUsers.push({
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          plan: 'free',
+          previousPlan
+        });
+      }
+    }
+
+    const message = planType === 'growth'
+      ? (modifiedUsers.length === 1
+          ? `Successfully removed Growth Add-on from ${modifiedUsers[0].name} (${modifiedUsers[0].email}). Base plan (${(modifiedUsers[0].plan || 'Free').toUpperCase()}) remains active.`
+          : `Successfully removed Growth Add-on from ${modifiedUsers.length} user(s).`)
+      : (modifiedUsers.length === 1
+          ? `Successfully removed plan from ${modifiedUsers[0].name} (${modifiedUsers[0].email}) and reverted account to Free Plan.`
+          : `Successfully removed plan from ${modifiedUsers.length} user(s) and reverted all to Free Plan.`);
+
+    res.status(200).json({
+      success: true,
+      message,
+      users: modifiedUsers
     });
   } catch (error) {
     next(error);
@@ -1121,11 +1450,13 @@ router.get('/my-plan', protect, async (req, res, next) => {
     }
 
     const isCorporate = isCorporateEmail(user.email);
+    // Find active BASE subscription (excluding Growth add-on)
     let sub = await Subscription.findOne({
       $or: [
         ...(user.organization ? [{ organization: user.organization }] : []),
         { user: user._id }
       ],
+      plan: { $ne: 'growth' },
       status: 'active'
     }).sort({ createdAt: -1 });
 
@@ -1134,27 +1465,62 @@ router.get('/my-plan', protect, async (req, res, next) => {
         $or: [
           { organization: user.organization },
           { user: user._id }
-        ]
+        ],
+        plan: { $ne: 'growth' }
       }).sort({ createdAt: -1 });
     }
 
-    // Auto-sync plan from active subscription if present
-    if (sub && sub.status === 'active' && sub.plan) {
+    // Check Growth add-on subscription
+    const growthSub = await Subscription.findOne({
+      $or: [
+        ...(user.organization ? [{ organization: user.organization }] : []),
+        { user: user._id }
+      ],
+      plan: 'growth',
+      status: 'active'
+    });
+    const hasGrowthPlan = Boolean(user.hasGrowthPlan || growthSub);
+
+    let needsSave = false;
+    if (user.hasGrowthPlan !== hasGrowthPlan) {
+      user.hasGrowthPlan = hasGrowthPlan;
+      needsSave = true;
+    }
+
+    // If user.plan was mistakenly set to 'growth', recover base plan
+    if (user.plan === 'growth') {
+      user.plan = sub?.plan || 'enterprise';
+      needsSave = true;
+    }
+
+    // Auto-sync plan from active base subscription if present
+    if (sub && sub.status === 'active' && sub.plan && sub.plan !== 'growth') {
       if (user.plan !== sub.plan || !user.isPlanActive || !user.isVerified) {
         user.plan = sub.plan;
         user.planStatus = 'active';
         user.isPlanActive = true;
         user.isVerified = true;
-        await user.save();
+        needsSave = true;
       }
+    } else if (['enterprise', 'starter'].includes(user.plan)) {
+      if (!user.isPlanActive || !user.isVerified) {
+        user.isPlanActive = true;
+        user.isVerified = true;
+        user.planStatus = 'active';
+        needsSave = true;
+      }
+    }
+
+    if (needsSave) {
+      await user.save();
     }
 
     const freePlan = await Plan.findOne({ planId: 'free' });
     const generalPrice = freePlan?.pricing?.generalEmailPrice !== undefined ? freePlan.pricing.generalEmailPrice : 1499;
     const isNoChargeGeneral = generalPrice === 0;
 
-    // Auto-activate for corporate email OR when general email is configured as no-charge (if no active paid plan)
-    if (user.role === 'organizer' && (isCorporate || isNoChargeGeneral) && !user.isPlanActive && (!sub || sub.status !== 'active')) {
+    // Auto-activate for corporate email OR when general email is configured as no-charge (if on free tier)
+    if (user.role === 'organizer' && (isCorporate || isNoChargeGeneral) && !user.isPlanActive && (!sub || sub.status !== 'active') && !['enterprise', 'starter'].includes(user.plan)) {
       user.isVerified = true;
       user.emailType = isCorporate ? 'corporate' : 'general';
       user.plan = 'free';
@@ -1165,7 +1531,7 @@ router.get('/my-plan', protect, async (req, res, next) => {
 
       if (user.organization && (!sub || sub.status !== 'active')) {
         sub = await Subscription.findOneAndUpdate(
-          { organization: user.organization },
+          { organization: user.organization, plan: { $ne: 'growth' } },
           {
             plan: 'free',
             emailType: user.emailType,
@@ -1181,11 +1547,22 @@ router.get('/my-plan', protect, async (req, res, next) => {
       }
     }
 
+    const resolvedBasePlan = (sub?.plan && sub.plan !== 'growth')
+      ? sub.plan
+      : (user.plan && user.plan !== 'growth' ? user.plan : 'free');
+
+    const isPaidOrganizer = ['enterprise', 'starter'].includes(resolvedBasePlan);
+    const isPlanActive = isPaidOrganizer ? true : (sub ? sub.status === 'active' : !!user.isPlanActive);
+    const isVerified = isPaidOrganizer ? true : (user.isVerified ?? false);
+
     res.status(200).json({
       success: true,
-      plan: sub?.plan || user.plan || 'free',
-      planStatus: sub?.status || user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
-      isPlanActive: sub ? sub.status === 'active' : !!user.isPlanActive,
+      plan: resolvedBasePlan,
+      basePlan: resolvedBasePlan,
+      hasGrowthPlan,
+      growthSubscription: growthSub,
+      planStatus: sub?.status || user.planStatus || 'active',
+      isPlanActive,
       isCorporate,
       emailType: user.emailType || (isCorporate ? 'corporate' : 'general'),
       planPaidAmount: sub?.price !== undefined ? sub.price : (user.planPaidAmount || 0),
@@ -1199,7 +1576,12 @@ router.get('/my-plan', protect, async (req, res, next) => {
         name: user.name,
         email: user.email,
         role: user.role,
-        isVerified: user.isVerified,
+        plan: resolvedBasePlan,
+        basePlan: resolvedBasePlan,
+        hasGrowthPlan,
+        isVerified,
+        planStatus: sub?.status || user.planStatus || 'active',
+        isPlanActive,
         hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch
       }
     });
@@ -1219,6 +1601,31 @@ router.post('/activate-free-plan', protect, async (req, res, next) => {
 
     if (user.role !== 'organizer') {
       return res.status(403).json({ success: false, message: 'Only organizers can activate this plan.' });
+    }
+
+    // Safety check: Never downgrade an active Enterprise or Starter plan to Free via this endpoint!
+    if (['enterprise', 'starter'].includes(user.plan)) {
+      user.isPlanActive = true;
+      user.isVerified = true;
+      user.planStatus = 'active';
+      await user.save();
+      return res.status(200).json({
+        success: true,
+        message: `Your account already has an active ${user.plan.toUpperCase()} plan. Dashboard unlocked!`,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          isVerified: true,
+          emailType: user.emailType,
+          plan: user.plan,
+          basePlan: user.plan,
+          planStatus: 'active',
+          isPlanActive: true,
+          hasGrowthPlan: !!user.hasGrowthPlan
+        }
+      });
     }
 
     const isCorporate = isCorporateEmail(user.email);
