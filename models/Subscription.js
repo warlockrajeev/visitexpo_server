@@ -49,6 +49,14 @@ const SubscriptionSchema = new mongoose.Schema(
       type: String,
       enum: ['monthly', 'quarterly', 'annual', 'one_time'],
       default: 'quarterly'
+    },
+    cancelledAt: {
+      type: Date,
+      default: null
+    },
+    adminNotes: {
+      type: String,
+      default: ''
     }
   },
   {

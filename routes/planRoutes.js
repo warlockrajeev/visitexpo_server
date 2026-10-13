@@ -97,6 +97,7 @@ export const DEFAULT_OFFICIAL_PLANS = [
       generalEmailPrice: 0,
       quarterlyPrice: 14999,
       yearlyPrice: 49999,
+      annualDiscountPercent: 17,
       proposedEventResearchPrice: 0,
       currency: 'INR',
       currencySymbol: '₹',
@@ -172,12 +173,13 @@ export const DEFAULT_OFFICIAL_PLANS = [
     pricing: {
       corporateEmailPrice: 0,
       generalEmailPrice: 0,
-      quarterlyPrice: 89999,
-      yearlyPrice: 299999,
+      quarterlyPrice: 39999,
+      yearlyPrice: 89999,
+      annualDiscountPercent: 44,
       proposedEventResearchPrice: 0,
       currency: 'INR',
       currencySymbol: '₹',
-      billingNote: '₹89,999 per quarter · ₹2,99,999 per year (Save 17%)'
+      billingNote: '₹39,999 per quarter · ₹89,999 per year (Save 44%)'
     },
     bestFor: [
       'You manage multiple expos',
@@ -697,6 +699,17 @@ router.put('/admin/:id', protect, authorize('super_admin', 'sub_admin', 'subadmi
           }
         }
       }
+
+      const q = Number(updates.pricing.quarterlyPrice);
+      const y = Number(updates.pricing.yearlyPrice);
+      if (q > 0 && y > 0 && q * 4 > y) {
+        const discount = Math.round(((q * 4 - y) / (q * 4)) * 100);
+        updates.pricing.annualDiscountPercent = discount;
+        const currentNote = updates.pricing.billingNote || '';
+        if (!currentNote || currentNote.includes('Save ')) {
+          updates.pricing.billingNote = `₹${q.toLocaleString('en-IN')} per quarter · ₹${y.toLocaleString('en-IN')} per year (Save ${discount}%)`;
+        }
+      }
     }
 
     const plan = await Plan.findByIdAndUpdate(id, updates, { new: true, runValidators: true });
@@ -981,18 +994,33 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
 
       // Create or update subscription record
       if (targetPlanId === 'growth') {
-        lastSubscription = await Subscription.create({
-          organization: orgId,
-          user: user._id,
+        // Clean up any stale cancelled growth subscriptions for this user or org
+        await Subscription.deleteMany({
+          $or: [{ organization: orgId }, { user: user._id }],
           plan: 'growth',
-          emailType: user.emailType,
-          status: 'active',
-          price: finalPrice,
-          paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
-          startDate: new Date(),
-          endDate: new Date(Date.now() + durationMs),
-          adminNotes: adminNotes || `Growth Plan Add-on assigned by admin ${req.user?.name || 'Super Admin'}`
+          status: 'cancelled'
         });
+
+        lastSubscription = await Subscription.findOneAndUpdate(
+          {
+            $or: [{ organization: orgId }, { user: user._id }],
+            plan: 'growth'
+          },
+          {
+            organization: orgId,
+            user: user._id,
+            plan: 'growth',
+            emailType: user.emailType,
+            status: 'active',
+            price: finalPrice,
+            paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
+            startDate: new Date(),
+            endDate: new Date(Date.now() + durationMs),
+            cancelledAt: null,
+            adminNotes: adminNotes || `Growth Plan Add-on assigned by admin ${req.user?.name || 'Super Admin'}`
+          },
+          { upsert: true, new: true }
+        );
       } else {
         lastSubscription = await Subscription.findOneAndUpdate(
           { organization: orgId, plan: { $ne: 'growth' } },
@@ -1006,6 +1034,7 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
             paymentCycle: billingCycle === 'lifetime' ? 'one_time' : billingCycle,
             startDate: new Date(),
             endDate: new Date(Date.now() + durationMs),
+            cancelledAt: null,
             adminNotes: adminNotes || `Assigned by admin ${req.user?.name || 'Super Admin'} (No charge for general mail: ${noChargeForGeneralMail ? 'Yes' : 'No'})`
           },
           { upsert: true, new: true }
@@ -1063,6 +1092,7 @@ router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin',
       if (sub.plan === 'growth' || planType === 'growth') {
         // CANCEL GROWTH ADD-ON ONLY
         sub.status = 'cancelled';
+        sub.cancelledAt = new Date();
         sub.adminNotes = adminNotes || `Growth Add-on cancelled by admin ${req.user?.name || 'Administrator'}`;
         await sub.save();
 
@@ -1119,6 +1149,7 @@ router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin',
       } else {
         // CANCEL BASE PLAN SUBSCRIPTION & REVERT TO FREE
         sub.status = 'cancelled';
+        sub.cancelledAt = new Date();
         sub.adminNotes = adminNotes || `Base plan cancelled by admin ${req.user?.name || 'Administrator'}`;
         await sub.save();
 
@@ -1142,6 +1173,7 @@ router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin',
               },
               {
                 status: 'cancelled',
+                cancelledAt: new Date(),
                 adminNotes: adminNotes || `All subscriptions cancelled & reverted to Free plan by admin ${req.user?.name || 'Administrator'}`
               }
             );
@@ -1236,6 +1268,7 @@ router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin',
           },
           {
             status: 'cancelled',
+            cancelledAt: new Date(),
             adminNotes: adminNotes || `Growth Add-on cancelled by admin ${req.user?.name || 'Administrator'}`
           }
         );
@@ -1270,6 +1303,7 @@ router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin',
             },
             {
               status: 'cancelled',
+              cancelledAt: new Date(),
               adminNotes: adminNotes || `Plan cancelled & reverted to Free plan by admin ${req.user?.name || 'Administrator'}`
             }
           );
@@ -1357,27 +1391,53 @@ router.post('/admin/toggle-general-mail-charge', protect, authorize('super_admin
 // @route   GET /api/plans/admin/assigned-subscriptions
 router.get('/admin/assigned-subscriptions', protect, authorize('super_admin', 'sub_admin', 'subadmin', 'admin'), async (req, res, next) => {
   try {
-    const { page = 1, limit = 50, plan } = req.query;
+    const { page = 1, limit = 50, plan, status } = req.query;
     const filter = {};
     if (plan && plan !== 'all') {
       filter.plan = plan;
     }
+    if (status && status !== 'all') {
+      filter.status = status;
+    }
+
+    // Fetch all matching subscriptions sorted by recent update/creation
+    const rawSubs = await Subscription.find(filter)
+      .populate('user', 'name email role isVerified emailType plan planStatus isPlanActive phone')
+      .populate('organization', 'name')
+      .sort({ updatedAt: -1, createdAt: -1 });
+
+    // Deduplicate: Guarantee NO multiple duplicate entries for the same user and same plan
+    // If a user has both an active and cancelled subscription for the same plan, keep the active one
+    const seen = new Map();
+    const deduplicated = [];
+
+    for (const sub of rawSubs) {
+      const userId = sub.user?._id?.toString() || sub.organization?._id?.toString() || sub._id.toString();
+      const planKey = `${userId}_${sub.plan}`;
+
+      if (!seen.has(planKey)) {
+        seen.set(planKey, sub);
+        deduplicated.push(sub);
+      } else {
+        const existing = seen.get(planKey);
+        // Prioritize active subscription over cancelled/expired
+        if (sub.status === 'active' && existing.status !== 'active') {
+          const idx = deduplicated.indexOf(existing);
+          if (idx !== -1) {
+            deduplicated[idx] = sub;
+          }
+          seen.set(planKey, sub);
+        }
+      }
+    }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    const [subscriptions, total] = await Promise.all([
-      Subscription.find(filter)
-        .populate('user', 'name email role isVerified emailType plan planStatus isPlanActive phone')
-        .populate('organization', 'name')
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(parseInt(limit)),
-      Subscription.countDocuments(filter)
-    ]);
+    const paginated = deduplicated.slice(skip, skip + parseInt(limit));
 
     res.status(200).json({
       success: true,
-      data: subscriptions,
-      total
+      data: paginated,
+      total: deduplicated.length
     });
   } catch (error) {
     next(error);
