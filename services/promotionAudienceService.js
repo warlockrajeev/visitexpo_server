@@ -10,6 +10,7 @@ import Lead from '../models/Lead.js';
 import Visitor from '../models/Visitor.js';
 import EventEngagement from '../models/EventEngagement.js';
 import Subscription from '../models/Subscription.js';
+import Organization from '../models/Organization.js';
 
 /**
  * Check if a user / organizer has active Growth Plan access
@@ -47,6 +48,19 @@ export const hasGrowthPromotionAccess = async (userOrId) => {
   return false;
 };
 
+const DISALLOWED_DUMMY_DOMAINS = ['example.com', 'test.com', 'dummy.com', 'gamail.com', 'gamil.com'];
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export const isValidDeliverableEmail = (email) => {
+  if (!email || typeof email !== 'string') return false;
+  const clean = email.toLowerCase().trim();
+  if (!EMAIL_REGEX.test(clean)) return false;
+  const domain = clean.split('@')[1];
+  if (!domain || !domain.includes('.')) return false;
+  if (DISALLOWED_DUMMY_DOMAINS.includes(domain)) return false;
+  return true;
+};
+
 /**
  * Fetch and deduplicate target audience members for an organizer and event
  */
@@ -75,7 +89,7 @@ export const getTargetAudienceForEvent = async ({
   if (normalizedTypes.includes('leads') && eventId) {
     const leads = await Lead.find({ event: eventId });
     for (const l of leads) {
-      if (l.email && l.email.includes('@')) {
+      if (l.email && isValidDeliverableEmail(l.email)) {
         leadsCount++;
         const email = l.email.toLowerCase().trim();
         const realName = (l.name && l.name.trim()) || 'Valued Lead';
@@ -109,7 +123,7 @@ export const getTargetAudienceForEvent = async ({
       registrationStatus: { $ne: 'cancelled' }
     });
     for (const v of visitors) {
-      if (v.email && v.email.includes('@')) {
+      if (v.email && isValidDeliverableEmail(v.email)) {
         visitorsCount++;
         const email = v.email.toLowerCase().trim();
         const realName = (v.name && v.name.trim()) || 'Registered Visitor';
@@ -150,7 +164,7 @@ export const getTargetAudienceForEvent = async ({
     const engagements = await EventEngagement.find(engagementQuery);
 
     for (const eng of engagements) {
-      if (!eng.userEmail || !eng.userEmail.includes('@')) continue;
+      if (!eng.userEmail || !isValidDeliverableEmail(eng.userEmail)) continue;
       const email = eng.userEmail.toLowerCase().trim();
       const isFollower = eng.type === 'follower' || eng.type === 'both' || eng.isFollowed === true;
       const isInterested = eng.type === 'interested' || eng.type === 'both' || eng.isInterested === true;

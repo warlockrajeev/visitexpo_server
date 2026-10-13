@@ -452,30 +452,12 @@ export const DEFAULT_OFFICIAL_PLANS = [
   }
 ];
 
-// Helper: seed default official plans if DB is empty or backfill simplified descriptions
+// Helper: seed default official plans ONLY if DB has no plans
 export const seedDefaultPlansIfEmpty = async () => {
   const count = await Plan.countDocuments();
   if (count === 0) {
     await Plan.insertMany(DEFAULT_OFFICIAL_PLANS);
     console.log('[Plan Service] Initialized 4 default official plans (Free, Starter, Enterprise, Growth).');
-  } else {
-    // Ensure all official core plans have the latest simplified descriptions and inclusions
-    for (const planData of DEFAULT_OFFICIAL_PLANS) {
-      await Plan.updateOne(
-        { planId: planData.planId },
-        {
-          $set: {
-            tagline: planData.tagline,
-            description: planData.description,
-            badge: planData.badge,
-            bestFor: planData.bestFor,
-            keyInclusions: planData.keyInclusions,
-            features: planData.features,
-            comparisonDetails: planData.comparisonDetails
-          }
-        }
-      );
-    }
   }
 };
 
@@ -1555,10 +1537,17 @@ router.get('/my-plan', protect, async (req, res, next) => {
     const isPlanActive = isPaidOrganizer ? true : (sub ? sub.status === 'active' : !!user.isPlanActive);
     const isVerified = isPaidOrganizer ? true : (user.isVerified ?? false);
 
+    const activePlanDoc = await Plan.findOne({ planId: resolvedBasePlan });
+    const defaultFallbackName = resolvedBasePlan === 'enterprise' ? 'Organizer Enterprise' : resolvedBasePlan === 'starter' ? 'Organizer Starter' : 'Free Organizer';
+    const planName = activePlanDoc?.name || defaultFallbackName;
+    const planBadge = activePlanDoc?.badge || (resolvedBasePlan === 'enterprise' ? 'For Large Organizers' : resolvedBasePlan === 'starter' ? '👑 Most Popular →' : 'Get Started');
+
     res.status(200).json({
       success: true,
       plan: resolvedBasePlan,
       basePlan: resolvedBasePlan,
+      planName,
+      planBadge,
       hasGrowthPlan,
       growthSubscription: growthSub,
       planStatus: sub?.status || user.planStatus || 'active',

@@ -34,6 +34,7 @@ import calendarRoutes from './routes/calendarRoutes.js';
 import planRoutes from './routes/planRoutes.js';
 import featuredOrganizerRoutes from './routes/featuredOrganizerRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
+import bannerRoutes from './routes/bannerRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -135,6 +136,7 @@ app.use('/api/calendar', calendarRoutes);
 app.use('/api/plans', planRoutes);
 app.use('/api/featured-organizers', featuredOrganizerRoutes);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/banners', bannerRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {

@@ -8,13 +8,60 @@ import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 dotenv.config();
 
-// Create reusable promotional email transporter
+// Direct default credentials matching server environment dashboard
+const DEFAULT_PROMOTION_SMTP = {
+  host: 'nexus.herosite.pro',
+  port: 465,
+  secure: true,
+  user: 'promotion@client.visitexpo.in',
+  pass: 'nFMznvLC5^Abd*I+',
+  from: '"VisitExpo Promotions" <promotion@client.visitexpo.in>'
+};
+
+/**
+ * Resolve standard RFC 5322 "from" address from environment or parameters.
+ * Guarantees standard RFC format: "VisitExpo Promotions" <promotion@client.visitexpo.in>
+ */
+export const resolvePromotionFromAddress = (fromOverride) => {
+  if (fromOverride && typeof fromOverride === 'string' && fromOverride.trim()) {
+    const trimmed = fromOverride.trim();
+    if (trimmed.includes('@')) return trimmed;
+  }
+
+  const rawEnv = process.env.PROMOTION_SMTP_FROM;
+  let rawFrom = rawEnv && rawEnv.trim() ? rawEnv.trim() : DEFAULT_PROMOTION_SMTP.from;
+
+  // Clean single quotes if wrapped
+  if (rawFrom.startsWith("'") && rawFrom.endsWith("'")) {
+    rawFrom = rawFrom.substring(1, rawFrom.length - 1).trim();
+  }
+
+  // If it already contains Name <email@...>
+  if (rawFrom.includes('@') && rawFrom.includes('<') && rawFrom.includes('>')) {
+    return rawFrom;
+  }
+
+  // If it's a bare email address
+  if (rawFrom.includes('@')) {
+    return `"VisitExpo Promotions" <${rawFrom}>`;
+  }
+
+  // If it's a display name like "VisitExpo Promotions"
+  const displayName = rawFrom.replace(/^["']|["']$/g, '').trim() || 'VisitExpo Promotions';
+  const user = process.env.PROMOTION_SMTP_USER || DEFAULT_PROMOTION_SMTP.user;
+  return `"${displayName}" <${user}>`;
+};
+
+// Create reusable promotional email transporter with direct code defaults
 export const createPromotionTransporter = () => {
-  const host = process.env.PROMOTION_SMTP_HOST || 'nexus.herosite.pro';
-  const port = parseInt(process.env.PROMOTION_SMTP_PORT || '465', 10);
-  const secure = process.env.PROMOTION_SMTP_SECURE !== 'false';
-  const user = process.env.PROMOTION_SMTP_USER || 'promotion@client.visitexpo.in';
-  const pass = process.env.PROMOTION_SMTP_PASS || 'nFMznvLC5^Abd*I+';
+  const host = process.env.PROMOTION_SMTP_HOST || DEFAULT_PROMOTION_SMTP.host;
+  const port = parseInt(process.env.PROMOTION_SMTP_PORT || DEFAULT_PROMOTION_SMTP.port, 10);
+  const secure =
+    process.env.PROMOTION_SMTP_SECURE !== undefined
+      ? String(process.env.PROMOTION_SMTP_SECURE).toLowerCase() === 'true'
+      : DEFAULT_PROMOTION_SMTP.secure;
+  const user = process.env.PROMOTION_SMTP_USER || DEFAULT_PROMOTION_SMTP.user;
+  const pass = process.env.PROMOTION_SMTP_PASS || DEFAULT_PROMOTION_SMTP.pass;
 
   return nodemailer.createTransport({
     host,
@@ -48,6 +95,7 @@ export const verifyPromotionSMTP = async () => {
       host: process.env.PROMOTION_SMTP_HOST || 'nexus.herosite.pro',
       port: process.env.PROMOTION_SMTP_PORT || '465',
       user: process.env.PROMOTION_SMTP_USER || 'promotion@client.visitexpo.in',
+      from: resolvePromotionFromAddress(),
       latencyMs
     };
   } catch (error) {
@@ -55,7 +103,8 @@ export const verifyPromotionSMTP = async () => {
       success: false,
       error: error.message || 'SMTP Authentication Failed',
       host: process.env.PROMOTION_SMTP_HOST || 'nexus.herosite.pro',
-      user: process.env.PROMOTION_SMTP_USER || 'promotion@client.visitexpo.in'
+      user: process.env.PROMOTION_SMTP_USER || 'promotion@client.visitexpo.in',
+      from: resolvePromotionFromAddress()
     };
   }
 };
@@ -233,8 +282,7 @@ export const sendPromotionEmail = async ({
 }) => {
   try {
     const transporter = createPromotionTransporter();
-    const fromAddress =
-      from || process.env.PROMOTION_SMTP_FROM || '"VisitExpo Promotions" <promotion@client.visitexpo.in>';
+    const fromAddress = resolvePromotionFromAddress(from);
 
     const mailOptions = {
       from: fromAddress,
