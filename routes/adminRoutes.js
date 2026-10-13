@@ -20,6 +20,8 @@ import DeletedEvent from '../models/DeletedEvent.js';
 import Category from '../models/Category.js';
 import Ticket from '../models/Ticket.js';
 import FeaturedOrganizer from '../models/FeaturedOrganizer.js';
+import Campaign from '../models/Campaign.js';
+import { verifyPromotionSMTP } from '../services/promotionEmailService.js';
 import mongoose from 'mongoose';
 import { protect, authorize } from '../middlewares/auth.js';
 import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
@@ -3866,4 +3868,202 @@ router.delete('/subadmins/:id', async (req, res, next) => {
   }
 });
 
+// ============================================================================
+// ORGANIZER EMAIL PROMOTIONS & GROWTH CAMPAIGNS REPORTING (SUPER ADMIN)
+// ============================================================================
+
+// @desc    Verify promotional SMTP account connection (promotion@client.visitexpo.in)
+// @route   GET /api/admin/email-promotions/verify-smtp
+router.get('/email-promotions/verify-smtp', async (req, res, next) => {
+  try {
+    const result = await verifyPromotionSMTP();
+    res.status(200).json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message || 'SMTP Verification failed'
+    });
+  }
+});
+
+// @desc    Get comprehensive report of organizer email promotions & KPI statistics
+// @route   GET /api/admin/email-promotions
+router.get('/email-promotions', async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page || '1', 10);
+    const limit = parseInt(req.query.limit || '20', 10);
+    const skip = (page - 1) * limit;
+
+    const { status, organizerId, eventId, search } = req.query;
+
+    const query = {};
+    if (status && status !== 'all') {
+      query.status = status;
+    }
+    if (organizerId && organizerId !== 'all') {
+      query.createdBy = organizerId;
+    }
+    if (eventId && eventId !== 'all') {
+      query.event = eventId;
+    }
+    if (search && search.trim()) {
+      const searchRegex = new RegExp(search.trim(), 'i');
+      query.$or = [
+        { title: searchRegex },
+        { 'content.subject': searchRegex },
+        { 'content.headline': searchRegex }
+      ];
+    }
+
+    // 1. Fetch campaigns with pagination
+    const [campaigns, totalCount] = await Promise.all([
+      Campaign.find(query)
+        .populate('createdBy', 'name email company organization plan hasGrowthPlan')
+        .populate('event', 'title slug city venue dates bannerImage category')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Campaign.countDocuments(query)
+    ]);
+
+    // 2. Compute overall platform-wide promotion metrics
+    const allCampaigns = await Campaign.find({}).lean();
+    const totalCampaigns = allCampaigns.length;
+    let totalTargeted = 0;
+    let totalDelivered = 0;
+    let totalFailed = 0;
+    const organizerIdSet = new Set();
+    const audienceTotals = {
+      leads: 0,
+      visitors: 0,
+      followers: 0,
+      interested: 0
+    };
+
+    for (const c of allCampaigns) {
+      if (c.createdBy) organizerIdSet.add(c.createdBy.toString());
+      totalTargeted += (c.targetAudience?.recipientCount || c.sentCount || 0);
+      totalDelivered += (c.deliveredCount || (c.status === 'completed' ? c.sentCount : 0) || 0);
+      totalFailed += (c.failedCount || 0);
+
+      if (c.targetAudience?.breakdown) {
+        audienceTotals.leads += (c.targetAudience.breakdown.leads || 0);
+        audienceTotals.visitors += (c.targetAudience.breakdown.visitors || 0);
+        audienceTotals.followers += (c.targetAudience.breakdown.followers || 0);
+        audienceTotals.interested += (c.targetAudience.breakdown.interested || 0);
+      }
+    }
+
+    // Count growth plan organizers
+    const growthOrganizersCount = await User.countDocuments({
+      role: 'organizer',
+      $or: [{ hasGrowthPlan: true }, { plan: 'growth' }]
+    });
+
+    const deliveryRate = totalTargeted > 0 ? ((totalDelivered / totalTargeted) * 100).toFixed(1) : '100.0';
+
+    res.status(200).json({
+      success: true,
+      stats: {
+        totalCampaigns,
+        totalTargeted,
+        totalDelivered,
+        totalFailed,
+        uniqueOrganizers: organizerIdSet.size,
+        growthOrganizersCount,
+        deliveryRate: Number(deliveryRate),
+        audienceTotals
+      },
+      campaigns,
+      pagination: {
+        page,
+        limit,
+        totalPages: Math.ceil(totalCount / limit) || 1,
+        totalCount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get detailed campaign report by ID including full recipient delivery log
+// @route   GET /api/admin/email-promotions/:id
+router.get('/email-promotions/:id', async (req, res, next) => {
+  try {
+    const campaign = await Campaign.findById(req.params.id)
+      .populate('createdBy', 'name email company organization plan hasGrowthPlan phone')
+      .populate('event', 'title slug city venue dates bannerImage category description');
+
+    if (!campaign) {
+      return res.status(404).json({ success: false, error: 'Campaign record not found' });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: campaign
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Export organizer email promotions report to CSV
+// @route   GET /api/admin/email-promotions/export-csv
+router.get('/email-promotions/export-csv', async (req, res, next) => {
+  try {
+    const campaigns = await Campaign.find({})
+      .populate('createdBy', 'name email company organization plan')
+      .populate('event', 'title city dates')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const headers = [
+      'Campaign ID',
+      'Date Sent',
+      'Campaign Title',
+      'Subject',
+      'Organizer Name',
+      'Organizer Email',
+      'Organizer Plan',
+      'Event Name',
+      'Event City',
+      'Target Audiences',
+      'Targeted Recipients',
+      'Delivered',
+      'Failed',
+      'Status',
+      'Sender Email'
+    ];
+
+    const rows = campaigns.map(c => [
+      c._id,
+      c.sentAt ? new Date(c.sentAt).toISOString() : new Date(c.createdAt).toISOString(),
+      `"${(c.title || '').replace(/"/g, '""')}"`,
+      `"${(c.content?.subject || c.title || '').replace(/"/g, '""')}"`,
+      `"${(c.createdBy?.name || '').replace(/"/g, '""')}"`,
+      c.createdBy?.email || '',
+      c.createdBy?.plan || 'free',
+      `"${(c.event?.title || '').replace(/"/g, '""')}"`,
+      `"${(c.event?.city || '').replace(/"/g, '""')}"`,
+      `"${(c.targetAudience?.audienceTypes || []).join(', ')}"`,
+      c.targetAudience?.recipientCount || c.sentCount || 0,
+      c.deliveredCount || (c.status === 'completed' ? c.sentCount : 0) || 0,
+      c.failedCount || 0,
+      c.status,
+      c.senderEmail || 'promotion@client.visitexpo.in'
+    ]);
+
+    const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=visitexpo-email-promotions-${Date.now()}.csv`);
+    return res.status(200).send(csvContent);
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;
+
