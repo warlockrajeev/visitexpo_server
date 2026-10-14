@@ -14,6 +14,7 @@ import Session from '../models/Session.js';
 import EventEngagement from '../models/EventEngagement.js';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
+import DeletedEvent from '../models/DeletedEvent.js';
 import DeletedOrganizer from '../models/DeletedOrganizer.js';
 import User from '../models/User.js';
 import Subscription from '../models/Subscription.js';
@@ -1240,7 +1241,7 @@ router.delete('/:id', protect, authorize('super_admin', 'organizer', 'event_mana
         wpPostId: String(req.body?.wpPostId || event?.wpPostId || targetId),
         deletedAt: new Date(),
         deletedBy: req.user.id || null,
-        reason: req.body?.reason || 'Deleted by Super Admin'
+        reason: req.body?.reason || (isSuperAdmin ? 'Deleted by Super Admin' : 'Deleted by Organizer')
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
