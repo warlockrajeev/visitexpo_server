@@ -530,24 +530,58 @@ router.post('/inquire', async (req, res, next) => {
       message
     } = req.body;
 
-    if (!organizerName || !email || !phone) {
+    const trimmedName = (organizerName || '').trim();
+    const trimmedEmail = (email || '').trim().toLowerCase();
+    const trimmedPhone = (phone || '').trim();
+
+    if (!trimmedName || !trimmedEmail || !trimmedPhone) {
       return res.status(400).json({
         success: false,
         message: 'Name, email, and phone number are required.'
       });
     }
 
+    if (trimmedName.length < 2 || !/^[a-zA-Z\s\.\'\-]{2,60}$/.test(trimmedName)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid full name (letters only, at least 2 characters).'
+      });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/i;
+    if (!emailRegex.test(trimmedEmail)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid email address.'
+      });
+    }
+
+    if (/[a-zA-Z]/.test(trimmedPhone)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Phone number cannot contain letters or alphabets.'
+      });
+    }
+
+    const phoneDigits = trimmedPhone.replace(/\D/g, '');
+    if (phoneDigits.length < 10 || phoneDigits.length > 15) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid 10 to 15 digit phone / WhatsApp number.'
+      });
+    }
+
     // Auto-detect corporate vs general email if not specified
     let detectedEmailType = emailType;
-    if (!detectedEmailType && email) {
-      const domain = email.split('@')[1]?.toLowerCase();
+    if (!detectedEmailType && trimmedEmail) {
+      const domain = trimmedEmail.split('@')[1]?.toLowerCase();
       const freeProviders = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com', 'rediffmail.com', 'zoho.com'];
       detectedEmailType = freeProviders.includes(domain) ? 'general' : 'corporate';
     }
 
     // Restriction: Growth plan is only for organizers on Starter or Enterprise base plans. Free plan users cannot take it.
-    if ((planId === 'growth' || planName?.toLowerCase()?.includes('growth')) && email) {
-      const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if ((planId === 'growth' || planName?.toLowerCase()?.includes('growth')) && trimmedEmail) {
+      const existingUser = await User.findOne({ email: trimmedEmail });
       if (existingUser && String(existingUser.plan || 'free').toLowerCase() === 'free') {
         return res.status(403).json({
           success: false,
@@ -561,17 +595,17 @@ router.post('/inquire', async (req, res, next) => {
       planId: planId || 'starter',
       planName: planName || (planId === 'enterprise' ? 'Organizer Enterprise' : planId === 'growth' ? 'Organizer Growth' : planId === 'free' ? 'Free Organizer' : 'Organizer Starter'),
       billingCycle: billingCycle || 'quarterly',
-      organizerName,
-      organizationName: organizationName || 'Individual Organizer',
-      email,
+      organizerName: trimmedName,
+      organizationName: (organizationName || '').trim() || 'Individual Organizer',
+      email: trimmedEmail,
       emailType: detectedEmailType || 'general',
-      phone,
-      city: city || '',
+      phone: trimmedPhone,
+      city: (city || '').trim(),
       eventType: eventType || 'Trade Show / B2B',
-      eventName: eventName || '',
+      eventName: (eventName || '').trim(),
       selectedGrowthServices: Array.isArray(selectedGrowthServices) ? selectedGrowthServices : [],
       estimatedBudget: estimatedBudget || '',
-      message: message || '',
+      message: (message || '').trim(),
       status: 'new'
     });
 
@@ -910,10 +944,18 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
       return res.status(400).json({ success: false, message: 'At least one User ID is required.' });
     }
 
-    // Ensure Custom Duration cannot be negative
-    const parsedDurationDays = durationDays !== undefined && durationDays !== '' && durationDays !== null
-      ? Math.max(0, Number(durationDays))
-      : undefined;
+    // Ensure Custom Duration is between 1 and 366 days if provided
+    let parsedDurationDays = undefined;
+    if (durationDays !== undefined && durationDays !== '' && durationDays !== null) {
+      const numDays = Number(durationDays);
+      if (isNaN(numDays) || numDays < 1) {
+        return res.status(400).json({ success: false, message: 'Custom duration must be at least 1 day.' });
+      }
+      if (numDays > 366) {
+        return res.status(400).json({ success: false, message: 'Custom duration cannot exceed 366 days (maximum 1 leap year).' });
+      }
+      parsedDurationDays = Math.min(366, Math.floor(numDays));
+    }
 
     const targetPlanId = planId || 'free';
 
