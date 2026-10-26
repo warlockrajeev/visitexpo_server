@@ -2536,14 +2536,23 @@ router.get('/invoices', async (req, res, next) => {
 // @route   GET /api/admin/pending-summary
 router.get('/pending-summary', async (req, res, next) => {
   try {
-    const [pendingOrganizers, pendingExhibitors, pendingClaims, pendingEvents, pendingFeatured] = await Promise.all([
+    const [
+      pendingOrganizers,
+      pendingExhibitorsCount,
+      pendingClaims,
+      pendingEvents,
+      pendingFeatured,
+      pendingExhibitorUsersCount
+    ] = await Promise.all([
       User.countDocuments({ role: 'organizer', isVerified: false }),
       Exhibitor.countDocuments({ status: 'pending' }),
       Event.countDocuments({ isClaimed: true, status: 'draft' }),
       Event.countDocuments({ status: 'pending' }),
-      FeaturedOrganizer.countDocuments({ status: 'pending' })
+      FeaturedOrganizer.countDocuments({ status: 'pending' }),
+      User.countDocuments({ role: 'exhibitor', isVerified: false })
     ]);
 
+    const pendingExhibitors = pendingExhibitorsCount + pendingExhibitorUsersCount;
     const totalPending = pendingOrganizers + pendingExhibitors + pendingClaims + pendingEvents + pendingFeatured;
 
     res.status(200).json({
@@ -2569,10 +2578,44 @@ router.get('/moderation/:type/:id', async (req, res, next) => {
     const { type, id } = req.params;
 
     if (type === 'exhibitors') {
-      const exhibitor = await Exhibitor.findById(id)
+      let exhibitor = await Exhibitor.findById(id)
         .populate('event', 'title city startDate endDate venue slug banner logo description organizer');
 
       if (!exhibitor) {
+        // Fallback: check if id belongs to an exhibitor User account
+        const user = await User.findById(id).populate('organization');
+        if (user && user.role === 'exhibitor') {
+          return res.status(200).json({
+            success: true,
+            type: 'exhibitor',
+            data: {
+              _id: user._id,
+              isUserAccount: true,
+              name: user.company || user.organization?.name || user.name,
+              description: `Exhibitor Account Onboarding (${user.name}) - ${user.city || 'Direct Platform Registration'}`,
+              contactEmail: user.email,
+              contactPhone: user.phone || user.organization?.contact?.phone || '',
+              website: user.organization?.website || '',
+              boothNumber: 'Account Review',
+              attendanceType: 'in_person',
+              status: user.isVerified ? 'approved' : 'pending',
+              createdAt: user.createdAt,
+              event: {
+                title: 'Platform Onboarding',
+                city: user.city || 'Direct Registration',
+                venue: 'Platform Registration'
+              },
+              associatedUser: {
+                _id: user._id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                isVerified: user.isVerified,
+                createdAt: user.createdAt
+              }
+            }
+          });
+        }
         return res.status(404).json({ success: false, error: 'Exhibitor application not found' });
       }
 
@@ -2709,7 +2752,7 @@ router.get('/organizer-history', async (req, res, next) => {
   }
 });
 
-// @desc    Get pending exhibitor registrations across all events
+// @desc    Get pending exhibitor registrations across all events & direct user onboarding
 // @route   GET /api/admin/pending-exhibitors
 router.get('/pending-exhibitors', async (req, res, next) => {
   try {
@@ -2717,9 +2760,37 @@ router.get('/pending-exhibitors', async (req, res, next) => {
       .populate('event', 'title city startDate venue')
       .sort({ createdAt: -1 });
 
+    // Also fetch exhibitor users whose account onboarding is pending admin verification
+    const existingEmails = new Set(
+      pendingExhibitors.map(e => (e.contactEmail || '').toLowerCase().trim()).filter(Boolean)
+    );
+
+    const pendingUsers = await User.find({ role: 'exhibitor', isVerified: false })
+      .populate('organization')
+      .sort({ createdAt: -1 });
+
+    const userExhibitorItems = pendingUsers
+      .filter(u => !existingEmails.has((u.email || '').toLowerCase().trim()))
+      .map(u => ({
+        _id: u._id,
+        isUserAccount: true,
+        name: u.company || u.organization?.name || u.name,
+        description: `Exhibitor Account Onboarding (${u.name}) - ${u.city || 'Direct Platform Registration'}`,
+        event: {
+          title: 'Platform Onboarding',
+          city: u.city || 'Direct Registration'
+        },
+        boothNumber: 'Account Review',
+        attendanceType: 'in_person',
+        contactEmail: u.email,
+        contactPhone: u.phone || u.organization?.contact?.phone || 'N/A',
+        status: 'pending',
+        createdAt: u.createdAt
+      }));
+
     res.status(200).json({
       success: true,
-      data: pendingExhibitors
+      data: [...pendingExhibitors, ...userExhibitorItems]
     });
   } catch (error) {
     next(error);
@@ -2736,8 +2807,23 @@ router.put('/exhibitors/:id/status', async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Valid status is required' });
     }
 
-    const exhibitor = await Exhibitor.findById(req.params.id);
+    let exhibitor = await Exhibitor.findById(req.params.id);
     if (!exhibitor) {
+      // Check if this ID belongs to a User account with role 'exhibitor'
+      const user = await User.findById(req.params.id);
+      if (user && user.role === 'exhibitor') {
+        if (status === 'approved') {
+          user.isVerified = true;
+          await user.save();
+        } else if (status === 'rejected') {
+          user.isVerified = false;
+          await user.save();
+        }
+        return res.status(200).json({
+          success: true,
+          message: `Exhibitor account request set to ${status} successfully`
+        });
+      }
       return res.status(404).json({ success: false, error: 'Exhibitor request not found' });
     }
 
@@ -2893,9 +2979,37 @@ router.get('/exhibitor-history', async (req, res, next) => {
       .populate('event', 'title city startDate venue')
       .sort({ updatedAt: -1 });
 
+    const existingEmails = new Set(
+      processedExhibitors.map(e => (e.contactEmail || '').toLowerCase().trim()).filter(Boolean)
+    );
+
+    const verifiedUsers = await User.find({ role: 'exhibitor', isVerified: true })
+      .populate('organization')
+      .sort({ updatedAt: -1 });
+
+    const userHistoryItems = verifiedUsers
+      .filter(u => !existingEmails.has((u.email || '').toLowerCase().trim()))
+      .map(u => ({
+        _id: u._id,
+        isUserAccount: true,
+        name: u.company || u.organization?.name || u.name,
+        description: `Exhibitor Account (${u.name}) - ${u.city || 'Verified'}`,
+        event: {
+          title: 'Platform Account',
+          city: u.city || 'Verified'
+        },
+        boothNumber: 'Verified Account',
+        attendanceType: 'in_person',
+        contactEmail: u.email,
+        contactPhone: u.phone || u.organization?.contact?.phone || 'N/A',
+        status: 'approved',
+        createdAt: u.createdAt,
+        updatedAt: u.updatedAt
+      }));
+
     res.status(200).json({
       success: true,
-      data: processedExhibitors
+      data: [...processedExhibitors, ...userHistoryItems]
     });
   } catch (error) {
     next(error);
@@ -3452,11 +3566,43 @@ router.get('/moderation/:type/:id', async (req, res, next) => {
     }
 
     if (type === 'exhibitors') {
-      const exhibitor = await Exhibitor.findById(id)
+      let exhibitor = await Exhibitor.findById(id)
         .populate('event', 'title city startDate endDate venue slug banner logo description organizer')
         .lean();
 
       if (!exhibitor) {
+        const user = await User.findById(id).populate('organization').lean();
+        if (user && user.role === 'exhibitor') {
+          return res.status(200).json({
+            success: true,
+            data: {
+              _id: user._id,
+              isUserAccount: true,
+              name: user.company || user.organization?.name || user.name,
+              description: `Exhibitor Account Onboarding (${user.name}) - ${user.city || 'Direct Platform Registration'}`,
+              contactEmail: user.email,
+              contactPhone: user.phone || user.organization?.contact?.phone || '',
+              website: user.organization?.website || '',
+              boothNumber: 'Account Review',
+              attendanceType: 'in_person',
+              status: user.isVerified ? 'approved' : 'pending',
+              createdAt: user.createdAt,
+              event: {
+                title: 'Platform Onboarding',
+                city: user.city || 'Direct Registration',
+                venue: 'Platform Registration'
+              },
+              associatedUser: {
+                _id: user._id,
+                name: user.name,
+                email: user.email,
+                role: user.role,
+                isVerified: user.isVerified,
+                createdAt: user.createdAt
+              }
+            }
+          });
+        }
         return res.status(404).json({ success: false, error: 'Exhibitor application record not found' });
       }
 

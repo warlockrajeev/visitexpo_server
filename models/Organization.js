@@ -13,7 +13,7 @@ const TeamMemberSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['organizer', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
+    enum: ['super_admin', 'sub_admin', 'admin', 'organizer', 'exhibitor', 'visitor', 'event_manager', 'marketing_manager', 'sales_team', 'support', 'viewer'],
     required: true
   }
 });
