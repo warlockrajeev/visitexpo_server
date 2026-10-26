@@ -110,7 +110,7 @@ router.get('/my-passes', protect, async (req, res, next) => {
     const passes = await Visitor.find({ email: userEmail })
       .populate({
         path: 'event',
-        select: 'title startDate endDate venue city banner logo shortDescription organizer'
+        select: 'title slug startDate endDate venue city banner logo shortDescription organizer'
       })
       .sort({ createdAt: -1 });
 
