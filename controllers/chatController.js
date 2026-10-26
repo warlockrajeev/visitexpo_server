@@ -374,19 +374,17 @@ export const startOrFetchConversation = async (req, res, next) => {
       resolvedOrgUser = await User.findById(resolvedOrganizerId).select('name email role plan isPlanActive isChatEnabled chatStatus chatWelcomeMessage chatAutoReply');
     }
 
+    if (!resolvedOrganizerId || !mongoose.isValidObjectId(resolvedOrganizerId)) {
+      const adminOrg = await User.findOne({ role: 'super_admin' }).select('_id');
+      if (adminOrg) {
+        resolvedOrganizerId = adminOrg._id;
+      }
+    }
+
     if (!resolvedOrganizerId) {
       return res.status(404).json({
         success: false,
         message: 'Could not find a valid organizer for this exhibition.'
-      });
-    }
-
-    // Check if organizer chat is enabled
-    if (resolvedOrgUser && !resolvedOrgUser.isChatEnabled) {
-      return res.status(403).json({
-        success: false,
-        isChatEnabled: false,
-        message: 'This organizer has temporarily paused live chat. Please use the contact inquiry form.'
       });
     }
 
