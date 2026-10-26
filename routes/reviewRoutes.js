@@ -36,6 +36,23 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const isGibberishOrSymbols = (str) => {
+      if (!str || typeof str !== 'string') return false;
+      const s = str.trim();
+      if (!s) return false;
+      const alphaNum = (s.match(/[a-zA-Z0-9]/g) || []).length;
+      return alphaNum < 2 || /^[^a-zA-Z0-9]+$/.test(s);
+    };
+
+    if (company && isGibberishOrSymbols(company)) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid company name (at least 2 letters/numbers).' });
+    }
+
+    const reviewAlphaNum = (reviewText.match(/[a-zA-Z0-9]/g) || []).length;
+    if (reviewAlphaNum < 4 || /^[^a-zA-Z0-9]+$/.test(reviewText)) {
+      return res.status(400).json({ success: false, error: 'Please enter a meaningful comment or review (avoid pure symbols).' });
+    }
+
     const newReview = await Review.create({
       name: name.trim(),
       email: (email || '').trim(),
@@ -148,6 +165,52 @@ router.post('/:id/helpful', async (req, res) => {
     res.status(200).json({ success: true, data: { helpfulCount: review.helpfulCount } });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to update helpful count.' });
+  }
+});
+
+/**
+ * PUT /api/reviews/:id
+ * Edit an existing comment/review.
+ */
+router.put('/:id', async (req, res) => {
+  try {
+    const { review, comment, company, rating } = req.body;
+    const txt = (review || comment || '').trim();
+    if (!txt) {
+      return res.status(400).json({ success: false, error: 'Review text is required.' });
+    }
+    const updateData = {
+      review: txt,
+      comment: txt
+    };
+    if (company !== undefined) updateData.company = company.trim();
+    if (rating !== undefined) updateData.rating = Math.min(5, Math.max(1, Number(rating) || 5));
+
+    const updated = await Review.findByIdAndUpdate(req.params.id, updateData, { new: true });
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+    res.status(200).json({ success: true, data: updated, message: 'Review updated successfully.' });
+  } catch (err) {
+    console.error('Error updating review:', err);
+    res.status(500).json({ success: false, error: 'Failed to update review.' });
+  }
+});
+
+/**
+ * DELETE /api/reviews/:id
+ * Delete a review (by id).
+ */
+router.delete('/:id', async (req, res) => {
+  try {
+    const review = await Review.findByIdAndDelete(req.params.id);
+    if (!review) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+    res.status(200).json({ success: true, message: 'Review deleted successfully.' });
+  } catch (err) {
+    console.error('Error deleting review:', err);
+    res.status(500).json({ success: false, error: 'Failed to delete review.' });
   }
 });
 

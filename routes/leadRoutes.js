@@ -209,6 +209,28 @@ router.post('/inquire', optionalAuth, async (req, res, next) => {
 
     const leadName = (name || currentUser?.name || leadEmail.split('@')[0]).trim();
 
+    // Validate against pure symbols or gibberish
+    const isGibberishOrSymbols = (str) => {
+      if (!str || typeof str !== 'string') return false;
+      const s = str.trim();
+      if (!s) return false;
+      const alphaNum = (s.match(/[a-zA-Z0-9]/g) || []).length;
+      return alphaNum < 2 || /^[^a-zA-Z0-9]+$/.test(s);
+    };
+
+    if (company && isGibberishOrSymbols(company)) {
+      return res.status(400).json({ success: false, error: 'Please provide a valid company name (at least 2 letters or numbers)' });
+    }
+    if (designation && isGibberishOrSymbols(designation)) {
+      return res.status(400).json({ success: false, error: 'Please provide a valid designation / role' });
+    }
+    if (message) {
+      const alphaNum = (message.trim().match(/[a-zA-Z0-9]/g) || []).length;
+      if (alphaNum < 3 || /^[^a-zA-Z0-9]+$/.test(message.trim())) {
+        return res.status(400).json({ success: false, error: 'Please provide a meaningful message (avoid pure symbols)' });
+      }
+    }
+
     // Resolve event
     let targetEvent = null;
     if (eventId && mongoose.isValidObjectId(eventId)) {
