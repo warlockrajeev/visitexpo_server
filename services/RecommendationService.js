@@ -84,7 +84,7 @@ class RecommendationService {
     timeframe = 'upcoming'
   }) {
     const now = new Date();
-    const parsedLimit = Math.min(50, Math.max(1, parseInt(limit, 10) || 10));
+    const parsedLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 10));
 
     // 1. Gather User Context if logged in
     let userInterests = [];
