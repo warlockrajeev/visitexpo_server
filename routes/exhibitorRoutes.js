@@ -689,14 +689,27 @@ router.post('/inquiry', optionalAuth, async (req, res, next) => {
     let user = null;
     if (userId) {
       user = await User.findById(userId);
-    } else if (senderEmail) {
+    }
+    if (!user && senderEmail) {
       user = await User.findOne({ email: senderEmail.toLowerCase().trim() });
     }
 
     const CREDITS_TO_CHARGE = 10;
     let finalCredits = 90;
 
+    // Optional active credit balance supplied by client from local test credit top-up
+    const clientCredits =
+      req.body.currentCredits !== undefined && req.body.currentCredits !== null
+        ? Number(req.body.currentCredits)
+        : null;
+
     if (user) {
+      // If client supplied their active credit balance that is higher (e.g. from test credit top-up),
+      // synchronize user.credits to reflect the test top-up immediately
+      if (clientCredits !== null && !isNaN(clientCredits) && clientCredits > (user.credits || 0)) {
+        user.credits = clientCredits;
+      }
+
       const currentCredits = user.credits !== undefined ? user.credits : 100;
       if (currentCredits < CREDITS_TO_CHARGE) {
         return res.status(400).json({
@@ -705,9 +718,19 @@ router.post('/inquiry', optionalAuth, async (req, res, next) => {
         });
       }
 
-      user.credits = currentCredits - CREDITS_TO_CHARGE;
+      user.credits = Math.max(0, currentCredits - CREDITS_TO_CHARGE);
       await user.save();
       finalCredits = user.credits;
+    } else {
+      // Demo / Guest organizer fallback
+      const currentCredits = clientCredits !== null && !isNaN(clientCredits) ? clientCredits : 100;
+      if (currentCredits < CREDITS_TO_CHARGE) {
+        return res.status(400).json({
+          success: false,
+          error: `Insufficient credits. 10 credits are required to connect with this exhibitor. Your current balance is ${currentCredits} credits.`
+        });
+      }
+      finalCredits = Math.max(0, currentCredits - CREDITS_TO_CHARGE);
     }
 
     // 3. Save Inquiry record in ContactMessage
@@ -770,14 +793,24 @@ router.post('/topup', optionalAuth, async (req, res, next) => {
     }
 
     let currentCredits;
+    const target = req.body.targetCredits !== undefined ? Number(req.body.targetCredits) : null;
+
     if (user) {
-      const base = user.credits !== undefined ? user.credits : 100;
-      user.credits = base + amount;
+      if (target !== null && !isNaN(target)) {
+        user.credits = target;
+      } else {
+        const base = user.credits !== undefined ? user.credits : 100;
+        user.credits = base + amount;
+      }
       await user.save();
       currentCredits = user.credits;
     } else {
-      const baseCredits = req.body.currentCredits !== undefined ? Number(req.body.currentCredits) : 100;
-      currentCredits = baseCredits + amount;
+      if (target !== null && !isNaN(target)) {
+        currentCredits = target;
+      } else {
+        const baseCredits = req.body.currentCredits !== undefined ? Number(req.body.currentCredits) : 100;
+        currentCredits = baseCredits + amount;
+      }
     }
 
     res.status(200).json({
