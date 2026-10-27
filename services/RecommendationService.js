@@ -29,12 +29,19 @@ const INTEREST_CLUSTERS = {
 
 // Known regional clusters (e.g. Delhi NCR)
 const REGION_CLUSTERS = {
+  'delhi ncr': ['new delhi', 'delhi', 'noida', 'greater noida', 'gurugram', 'gurgaon', 'faridabad', 'ghaziabad'],
   'delhi': ['new delhi', 'delhi', 'noida', 'greater noida', 'gurugram', 'gurgaon', 'faridabad', 'ghaziabad'],
   'new delhi': ['new delhi', 'delhi', 'noida', 'greater noida', 'gurugram', 'gurgaon'],
+  'greater noida': ['greater noida', 'noida', 'new delhi', 'delhi'],
   'mumbai': ['mumbai', 'navi mumbai', 'thane', 'pune'],
   'bengaluru': ['bengaluru', 'bangalore', 'mysuru', 'mysore'],
   'dubai': ['dubai', 'abu dhabi', 'sharjah', 'uae']
 };
+
+// In-memory cache for candidate events to respond in sub-millisecond time
+let candidateEventsCache = null;
+let candidateCacheTimestamp = 0;
+const CANDIDATE_CACHE_TTL = 10 * 60 * 1000; // 10 mins
 
 // Known city coordinates for proximity calculation
 const CITY_COORDS = {
@@ -154,9 +161,31 @@ class RecommendationService {
       ];
     }
 
-    const candidateEvents = await Event.find(query)
-      .populate('organizer', 'name logo website')
-      .lean();
+    const nowTs = Date.now();
+    let candidateEvents = null;
+
+    if (candidateEventsCache && (nowTs - candidateCacheTimestamp < CANDIDATE_CACHE_TTL)) {
+      candidateEvents = candidateEventsCache;
+    } else {
+      try {
+        candidateEvents = await Event.find(query)
+          .populate('organizer', 'name logo website')
+          .lean();
+        if (candidateEvents && candidateEvents.length > 0) {
+          candidateEventsCache = candidateEvents;
+          candidateCacheTimestamp = nowTs;
+        }
+      } catch (dbErr) {
+        console.warn('[RecommendationService] Candidate fetch error:', dbErr.message);
+        candidateEvents = candidateEventsCache || [];
+      }
+    }
+
+    if (excludeEventId && Array.isArray(candidateEvents)) {
+      candidateEvents = candidateEvents.filter(
+        (ev) => String(ev._id) !== String(excludeEventId) && ev.slug !== excludeEventId
+      );
+    }
 
     if (candidateEvents.length === 0) {
       return {
