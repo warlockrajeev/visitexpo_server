@@ -62,7 +62,36 @@ router.post('/register', async (req, res, next) => {
     }
 
     // 1. Verify target event exists
-    const event = await Event.findById(eventId);
+    let event = null;
+    if (eventId && mongoose.Types.ObjectId.isValid(eventId)) {
+      event = await Event.findById(eventId);
+    }
+    if (!event && eventId) {
+      event = await Event.findOne({
+        $or: [
+          { slug: String(eventId) },
+          { wpPostId: parseInt(eventId, 10) || -1 },
+          { wpPostId: String(eventId) },
+          { 'metadata.wpPostId': String(eventId) }
+        ]
+      });
+    }
+    // If target event is a WordPress directory event not yet materialized in Mongo, auto-create it
+    if (!event) {
+      const eventTitle = req.body.eventTitle || req.body.title || (typeof eventId === 'string' ? eventId : 'Exhibition');
+      const eventSlug = req.body.wpSlug || (typeof eventId === 'string' ? eventId : `event-${Date.now()}`);
+      event = await Event.create({
+        title: eventTitle,
+        slug: eventSlug,
+        wpPostId: parseInt(eventId, 10) || undefined,
+        venue: req.body.venue || 'Exhibition Centre',
+        city: req.body.city || 'India',
+        startDate: req.body.startDate ? new Date(req.body.startDate) : new Date(),
+        endDate: req.body.endDate ? new Date(req.body.endDate) : new Date(Date.now() + 86400000 * 3),
+        status: 'published',
+        isClaimed: false
+      });
+    }
     if (!event) {
       return res.status(404).json({ success: false, error: 'Target event not found' });
     }
@@ -90,7 +119,7 @@ router.post('/register', async (req, res, next) => {
             });
           }
           if (userPlan === 'starter') {
-            const count = await Exhibitor.countDocuments({ event: eventId });
+            const count = await Exhibitor.countDocuments({ event: event._id });
             if (count >= 25) {
               return res.status(403).json({
                 success: false,
@@ -106,7 +135,7 @@ router.post('/register', async (req, res, next) => {
     }
 
     // 2. Check if already registered for this event
-    const existing = await Exhibitor.findOne({ event: eventId, name: name.trim() });
+    const existing = await Exhibitor.findOne({ event: event._id, name: name.trim() });
     if (existing) {
       return res.status(400).json({ success: false, error: 'This company is already registered as an exhibitor for this event' });
     }
@@ -119,7 +148,7 @@ router.post('/register', async (req, res, next) => {
       website: website || '',
       contactEmail: contactEmail.toLowerCase(),
       contactPhone,
-      event: eventId,
+      event: event._id,
       attendanceType: attendanceType || 'in_person',
       staff: staff || [],
       status: 'pending'
