@@ -571,8 +571,14 @@ router.get('/discovery', optionalAuth, async (req, res, next) => {
 
     // User credit balance if user is logged in
     let userCredits = 100;
-    if (req.user?.id) {
-      const user = await User.findById(req.user.id).select('credits');
+    const userId = req.user?.id || req.user?._id;
+    if (userId) {
+      const user = await User.findById(userId).select('credits');
+      if (user) {
+        userCredits = user.credits !== undefined ? user.credits : 100;
+      }
+    } else if (req.query?.email) {
+      const user = await User.findOne({ email: String(req.query.email).toLowerCase().trim() }).select('credits');
       if (user) {
         userCredits = user.credits !== undefined ? user.credits : 100;
       }
@@ -599,6 +605,7 @@ router.post('/inquiry', optionalAuth, async (req, res, next) => {
       exhibitorId,
       exhibitorName,
       exhibitorEmail,
+      exhibitorLogo,
       country,
       industry,
       products,
@@ -610,7 +617,7 @@ router.post('/inquiry', optionalAuth, async (req, res, next) => {
       inquiryType
     } = req.body;
 
-    // 1. Mandatory message length validation: min 100 characters, max 300 characters
+    // 1. Mandatory message validation: length, content, and spam detection
     if (!message || typeof message !== 'string') {
       return res.status(400).json({
         success: false,
@@ -630,6 +637,50 @@ router.post('/inquiry', optionalAuth, async (req, res, next) => {
       return res.status(400).json({
         success: false,
         error: `The message cannot exceed 300 characters. Currently has ${trimmedMsg.length} characters.`
+      });
+    }
+
+    // Check for HTML tags or script injection
+    if (/<[a-z][\s\S]*>/i.test(trimmedMsg)) {
+      return res.status(400).json({
+        success: false,
+        error: 'HTML tags and script code are not permitted in enquiry messages.'
+      });
+    }
+
+    // Check for excessive repeated characters (e.g. aaaaa, ......, !!!!!!!)
+    if (/(.)\1{4,}/.test(trimmedMsg)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Excessive repeated characters detected. Please write a genuine B2B inquiry.'
+      });
+    }
+
+    // Check for symbols or gibberish spam (must have at least 60% alphabetic of non-space characters)
+    const nonSpace = trimmedMsg.replace(/\s+/g, '');
+    const letters = trimmedMsg.match(/[a-zA-Z]/g) || [];
+    if (letters.length === 0 || (letters.length / nonSpace.length) < 0.6) {
+      return res.status(400).json({
+        success: false,
+        error: 'Message must consist of genuine text and words, not symbols or random characters.'
+      });
+    }
+
+    // Check for minimum word count (at least 10 words)
+    const words = trimmedMsg.split(/\s+/).filter((w) => /[a-zA-Z]{2,}/.test(w));
+    if (words.length < 10) {
+      return res.status(400).json({
+        success: false,
+        error: `Please write a complete enquiry with at least 10 words (currently ${words.length}).`
+      });
+    }
+
+    // Check for repetitive words spam (e.g. "quote quote quote quote...")
+    const uniqueWords = new Set(words.map((w) => w.toLowerCase()));
+    if (uniqueWords.size < Math.min(6, Math.floor(words.length * 0.4))) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please avoid repetitive words and write a meaningful B2B enquiry.'
       });
     }
 
@@ -672,6 +723,7 @@ router.post('/inquiry', optionalAuth, async (req, res, next) => {
         exhibitorId: exhibitorId || 'unknown',
         exhibitorName: exhibitorName || 'Trade Exhibitor',
         exhibitorEmail: exhibitorEmail || '',
+        exhibitorLogo: exhibitorLogo || '',
         country: country || 'Global',
         industry: industry || 'Trade Exhibition',
         products: Array.isArray(products) ? products.join(', ') : products || '',
@@ -692,8 +744,74 @@ router.post('/inquiry', optionalAuth, async (req, res, next) => {
         creditsCharged: CREDITS_TO_CHARGE,
         remainingCredits: finalCredits,
         exhibitorName,
-        exhibitorEmail
+        exhibitorEmail,
+        exhibitorLogo: exhibitorLogo || ''
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Top up organizer test credits
+// @route   POST /api/exhibitors/topup
+router.post('/topup', optionalAuth, async (req, res, next) => {
+  try {
+    const amount = Number(req.body.amount) || 50;
+    const userId = req.user?.id || req.user?._id;
+    const email = req.body.email;
+
+    let user = null;
+    if (userId) {
+      user = await User.findById(userId);
+    }
+    if (!user && email) {
+      user = await User.findOne({ email: String(email).toLowerCase().trim() });
+    }
+
+    let currentCredits;
+    if (user) {
+      const base = user.credits !== undefined ? user.credits : 100;
+      user.credits = base + amount;
+      await user.save();
+      currentCredits = user.credits;
+    } else {
+      const baseCredits = req.body.currentCredits !== undefined ? Number(req.body.currentCredits) : 100;
+      currentCredits = baseCredits + amount;
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Successfully added ${amount} credits.`,
+      data: {
+        credits: currentCredits,
+        added: amount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Get organizer credit balance
+// @route   GET /api/exhibitors/credits
+router.get('/credits', optionalAuth, async (req, res, next) => {
+  try {
+    const userId = req.user?.id || req.user?._id;
+    const email = req.query?.email;
+
+    let user = null;
+    if (userId) {
+      user = await User.findById(userId).select('credits');
+    }
+    if (!user && email) {
+      user = await User.findOne({ email: String(email).toLowerCase().trim() }).select('credits');
+    }
+
+    const credits = user ? (user.credits !== undefined ? user.credits : 100) : 100;
+    res.status(200).json({
+      success: true,
+      data: { credits }
     });
   } catch (error) {
     next(error);
