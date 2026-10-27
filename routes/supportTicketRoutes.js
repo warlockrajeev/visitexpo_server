@@ -142,11 +142,11 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-// @desc    Update support ticket status, priority, or resolution
+// @desc    Update support ticket status, priority, title, description, or resolution
 // @route   PUT /api/support-tickets/:id
 router.put('/:id', async (req, res, next) => {
   try {
-    const { status, priority, resolutionNotes } = req.body;
+    const { title, description, category, eventId, status, priority, resolutionNotes } = req.body;
     const userId = req.user.id || req.user._id;
 
     const ticket = await SupportTicket.findById(req.params.id);
@@ -154,9 +154,26 @@ router.put('/:id', async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Support ticket not found' });
     }
 
-    // Check authorization
-    if (req.user.role !== 'super_admin' && ticket.user.toString() !== userId.toString()) {
+    // Check authorization: allow ticket owner or super_admin
+    const isOwner = ticket.user?.toString() === userId.toString() || ticket.reporterEmail?.toLowerCase() === req.user.email?.toLowerCase();
+    if (req.user.role !== 'super_admin' && !isOwner) {
       return res.status(403).json({ success: false, error: 'Not authorized to modify this ticket' });
+    }
+
+    if (title !== undefined && title.trim()) {
+      ticket.title = title.trim();
+    }
+
+    if (description !== undefined && description.trim()) {
+      ticket.description = description.trim();
+    }
+
+    if (category) {
+      ticket.category = category;
+    }
+
+    if (eventId !== undefined) {
+      ticket.event = eventId || null;
     }
 
     if (priority) {
@@ -177,10 +194,40 @@ router.put('/:id', async (req, res, next) => {
 
     await ticket.save();
 
+    const populatedTicket = await SupportTicket.findById(ticket._id).populate('event', 'title city');
+
     res.status(200).json({
       success: true,
       message: 'Support ticket updated successfully',
-      ticket
+      ticket: populatedTicket || ticket
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Delete support ticket
+// @route   DELETE /api/support-tickets/:id
+router.delete('/:id', async (req, res, next) => {
+  try {
+    const userId = req.user.id || req.user._id;
+
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) {
+      return res.status(404).json({ success: false, error: 'Support ticket not found' });
+    }
+
+    // Check authorization: allow ticket owner or super_admin
+    const isOwner = ticket.user?.toString() === userId.toString() || ticket.reporterEmail?.toLowerCase() === req.user.email?.toLowerCase();
+    if (req.user.role !== 'super_admin' && !isOwner) {
+      return res.status(403).json({ success: false, error: 'Not authorized to delete this ticket' });
+    }
+
+    await SupportTicket.findByIdAndDelete(req.params.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Support ticket deleted successfully'
     });
   } catch (error) {
     next(error);
