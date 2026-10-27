@@ -71,16 +71,63 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+const INVALID_START_REGEX = /^[^a-zA-Z0-9\s"']/;
+const CONSECUTIVE_SYMBOLS_REGEX = /[!@#$%^&*()_+={}\[\]|\\:;\"'<>,~`]{3,}/;
+const REPEATED_CHARS_REGEX = /(.)\1{4,}/;
+
+export function validateTicketText(text, fieldName = 'Text') {
+  if (!text || typeof text !== 'string' || !text.trim()) {
+    return { valid: false, error: `${fieldName} is required.` };
+  }
+  const trimmed = text.trim();
+  if (trimmed.length < 2) {
+    return { valid: false, error: `${fieldName} must be at least 2 characters.` };
+  }
+  if (INVALID_START_REGEX.test(trimmed)) {
+    return { valid: false, error: `${fieldName} must start with a letter or number, not symbols.` };
+  }
+  const letterMatches = trimmed.match(/[a-zA-Z]/g);
+  if (!letterMatches || letterMatches.length === 0) {
+    return { valid: false, error: `${fieldName} must contain genuine words or text, not just symbols or numbers.` };
+  }
+  const nonSpaceChars = trimmed.replace(/\s+/g, '');
+  if (nonSpaceChars.length >= 4) {
+    const alphaNumMatches = nonSpaceChars.match(/[a-zA-Z0-9]/g) || [];
+    if (alphaNumMatches.length / nonSpaceChars.length < 0.5) {
+      return { valid: false, error: `Too many random symbols in ${fieldName.toLowerCase()}. Please enter meaningful text.` };
+    }
+  }
+  if (CONSECUTIVE_SYMBOLS_REGEX.test(trimmed)) {
+    return { valid: false, error: `Random symbol spam detected in ${fieldName.toLowerCase()}. Please enter genuine text.` };
+  }
+  if (REPEATED_CHARS_REGEX.test(trimmed)) {
+    return { valid: false, error: `Excessive repeated characters detected in ${fieldName.toLowerCase()}.` };
+  }
+  if (/<[a-z][\s\S]*>/i.test(trimmed)) {
+    return { valid: false, error: `HTML tags or code scripts are not allowed in ${fieldName.toLowerCase()}.` };
+  }
+  return { valid: true };
+}
+
 // @desc    Create a new support ticket
 // @route   POST /api/support-tickets
 router.post('/', async (req, res, next) => {
   try {
     const { title, description, category, priority, eventId } = req.body;
 
-    if (!title || !description) {
+    const titleValidation = validateTicketText(title, 'Ticket title');
+    if (!titleValidation.valid) {
       return res.status(400).json({
         success: false,
-        error: 'Title and description are required'
+        error: titleValidation.error
+      });
+    }
+
+    const descValidation = validateTicketText(description, 'Ticket description');
+    if (!descValidation.valid) {
+      return res.status(400).json({
+        success: false,
+        error: descValidation.error
       });
     }
 
@@ -98,8 +145,8 @@ router.post('/', async (req, res, next) => {
       reporterEmail: userDoc?.email || req.user.email || 'client@visitexpo.in',
       organization: userDoc?.organization || req.user.organization || null,
       event: eventId || null,
-      title,
-      description,
+      title: title.trim(),
+      description: description.trim(),
       category: category || 'technical',
       priority: priority || 'medium',
       status: 'open'
@@ -160,11 +207,19 @@ router.put('/:id', async (req, res, next) => {
       return res.status(403).json({ success: false, error: 'Not authorized to modify this ticket' });
     }
 
-    if (title !== undefined && title.trim()) {
+    if (title !== undefined) {
+      const titleValidation = validateTicketText(title, 'Ticket title');
+      if (!titleValidation.valid) {
+        return res.status(400).json({ success: false, error: titleValidation.error });
+      }
       ticket.title = title.trim();
     }
 
-    if (description !== undefined && description.trim()) {
+    if (description !== undefined) {
+      const descValidation = validateTicketText(description, 'Ticket description');
+      if (!descValidation.valid) {
+        return res.status(400).json({ success: false, error: descValidation.error });
+      }
       ticket.description = description.trim();
     }
 
@@ -239,9 +294,9 @@ router.delete('/:id', async (req, res, next) => {
 router.post('/:id/responses', async (req, res, next) => {
   try {
     const { message } = req.body;
-
-    if (!message || !message.trim()) {
-      return res.status(400).json({ success: false, error: 'Response message cannot be empty' });
+    const messageValidation = validateTicketText(message, 'Response message');
+    if (!messageValidation.valid) {
+      return res.status(400).json({ success: false, error: messageValidation.error });
     }
 
     const userId = req.user.id || req.user._id;
