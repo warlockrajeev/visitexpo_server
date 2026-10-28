@@ -358,22 +358,49 @@ router.post('/', async (req, res, next) => {
   try {
     const { eventId, title, channel = 'email', subject, body } = req.body;
 
-    if (!eventId || !title || !body) {
+    const trimmedTitle = (title || '').trim();
+    const trimmedBody = (body || '').trim();
+
+    if (!eventId || !trimmedTitle || !trimmedBody) {
       return res.status(400).json({
         success: false,
         error: 'Event ID, Campaign Title, and Body content are required'
       });
     }
 
+    if (trimmedTitle.length < 3 || !/[a-zA-Z0-9]/.test(trimmedTitle)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Campaign Title must be at least 3 characters and contain letters or numbers'
+      });
+    }
+
+    if (channel === 'email' && subject) {
+      const trimmedSubject = String(subject).trim();
+      if (trimmedSubject && (trimmedSubject.length < 3 || !/[a-zA-Z0-9]/.test(trimmedSubject))) {
+        return res.status(400).json({
+          success: false,
+          error: 'Subject Line must be at least 3 characters and contain letters or numbers'
+        });
+      }
+    }
+
+    if (trimmedBody.length < 10 || !/[a-zA-Z0-9]/.test(trimmedBody)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Message Body must be at least 10 characters and contain readable text'
+      });
+    }
+
     const recipientCount = await Visitor.countDocuments({ event: eventId });
 
     const campaign = await Campaign.create({
-      title,
+      title: trimmedTitle,
       channel,
       status: 'draft',
       content: {
-        subject: channel === 'email' ? (subject || title) : undefined,
-        body
+        subject: channel === 'email' ? ((subject && String(subject).trim()) || trimmedTitle) : undefined,
+        body: trimmedBody
       },
       targetAudience: {
         recipientCount
