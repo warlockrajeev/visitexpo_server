@@ -27,44 +27,71 @@ router.post('/', async (req, res) => {
       rating, headline, review, comment, tags, status
     } = req.body;
 
-    const reviewText = (review || comment || '').trim();
+    const nameText = typeof name === 'string' ? name.trim() : '';
+    const eventTitleText = typeof eventTitle === 'string' ? eventTitle.trim() : '';
+    const titleText = typeof title === 'string' ? title.trim() : '';
+    const companyText = typeof company === 'string' ? company.trim() : '';
+    const headlineText = typeof headline === 'string' ? headline.trim() : '';
+    const reviewValue = review || comment;
+    const reviewText = typeof reviewValue === 'string' ? reviewValue.trim() : '';
 
-    if (!name || !eventTitle || !reviewText) {
+    if (!nameText || !eventTitleText || !reviewText) {
       return res.status(400).json({
         success: false,
         error: 'Name, event title, and review/comment text are required.'
       });
     }
 
-    const isGibberishOrSymbols = (str) => {
-      if (!str || typeof str !== 'string') return false;
-      const s = str.trim();
-      if (!s) return false;
-      const alphaNum = (s.match(/[a-zA-Z0-9]/g) || []).length;
-      return alphaNum < 2 || /^[^a-zA-Z0-9]+$/.test(s);
-    };
+    const allowedHumanText = /^[\p{L}\p{M}\p{N}\s.,!?'"’“”&()/\-:;]+$/u;
+    const hasLetter = (value) => /\p{L}/u.test(value);
+    const alphanumericCount = (value) => (value.match(/[\p{L}\p{N}]/gu) || []).length;
 
-    if (company && isGibberishOrSymbols(company)) {
-      return res.status(400).json({ success: false, error: 'Please enter a valid company name (at least 2 letters/numbers).' });
+    if (
+      nameText.length < 2 ||
+      nameText.length > 120 ||
+      !hasLetter(nameText) ||
+      !/^[\p{L}\p{M}\s.'’-]+$/u.test(nameText)
+    ) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid full name.' });
     }
 
-    const reviewAlphaNum = (reviewText.match(/[a-zA-Z0-9]/g) || []).length;
-    if (reviewAlphaNum < 4 || /^[^a-zA-Z0-9]+$/.test(reviewText)) {
-      return res.status(400).json({ success: false, error: 'Please enter a meaningful comment or review (avoid pure symbols).' });
+    if (
+      eventTitleText.length < 2 ||
+      eventTitleText.length > 160 ||
+      alphanumericCount(eventTitleText) < 2 ||
+      !allowedHumanText.test(eventTitleText)
+    ) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid event or expo name.' });
+    }
+
+    if (titleText && (titleText.length < 2 || titleText.length > 80 || !hasLetter(titleText) || !allowedHumanText.test(titleText))) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid designation or title.' });
+    }
+
+    if (companyText && (companyText.length < 2 || companyText.length > 120 || alphanumericCount(companyText) < 2 || !allowedHumanText.test(companyText))) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid company name.' });
+    }
+
+    if (headlineText && (headlineText.length < 2 || headlineText.length > 300 || alphanumericCount(headlineText) < 2 || !allowedHumanText.test(headlineText))) {
+      return res.status(400).json({ success: false, error: 'Please enter a valid headline.' });
+    }
+
+    if (reviewText.length < 4 || reviewText.length > 2000 || alphanumericCount(reviewText) < 4 || !allowedHumanText.test(reviewText)) {
+      return res.status(400).json({ success: false, error: 'Please enter a meaningful review using letters, numbers, and common punctuation.' });
     }
 
     const newReview = await Review.create({
-      name: name.trim(),
+      name: nameText,
       email: (email || '').trim(),
       role: (role || 'Verified Trade Buyer').trim(),
-      title: (title || 'Trade Professional').trim(),
-      company: (company || '').trim(),
+      title: titleText || 'Trade Professional',
+      company: companyText,
       avatar: avatar || '',
-      eventTitle: eventTitle.trim(),
+      eventTitle: eventTitleText,
       eventSlug: (eventSlug || eventTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '')).trim(),
       venue: (venue || '').trim(),
       rating: Math.min(5, Math.max(1, Number(rating) || 5)),
-      headline: (headline || '').trim(),
+      headline: headlineText,
       review: reviewText,
       tags: Array.isArray(tags) ? tags.map(t => t.trim()).filter(Boolean) : (typeof tags === 'string' ? tags.split(',').map(t => t.trim()).filter(Boolean) : []),
       status: status || 'approved', // Approved so user comments display immediately!
@@ -165,6 +192,27 @@ router.post('/:id/helpful', async (req, res) => {
     res.status(200).json({ success: true, data: { helpfulCount: review.helpfulCount } });
   } catch (err) {
     res.status(500).json({ success: false, error: 'Failed to update helpful count.' });
+  }
+});
+
+/**
+ * POST /api/reviews/:id/not-helpful
+ * Increment not-helpful count (public, no auth).
+ */
+router.post('/:id/not-helpful', async (req, res) => {
+  try {
+    const review = await Review.findByIdAndUpdate(
+      req.params.id,
+      { $inc: { notHelpfulCount: 1 } },
+      { new: true }
+    );
+    if (!review) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+    res.status(200).json({ success: true, data: { notHelpfulCount: review.notHelpfulCount } });
+  } catch (err) {
+    console.error('Error updating not-helpful count:', err);
+    res.status(500).json({ success: false, error: 'Failed to update not-helpful count.' });
   }
 });
 
