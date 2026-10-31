@@ -175,11 +175,24 @@ router.post('/register', async (req, res, next) => {
       message: 'Registration completed successfully',
       visitor: {
         id: visitor._id,
+        passId: `VIS-${visitor._id.toString().toUpperCase()}`,
         name: visitor.name,
         email: visitor.email,
+        phone: visitor.phone,
+        company: visitor.company,
+        designation: visitor.designation,
+        country: visitor.country,
         qrCode: visitor.qrCode,
         registrationStatus: visitor.registrationStatus,
-        attendanceType: visitor.attendanceType
+        attendanceType: visitor.attendanceType,
+        event: {
+          id: event._id,
+          title: event.title,
+          startDate: event.startDate,
+          endDate: event.endDate,
+          venue: event.venue,
+          city: event.city
+        }
       }
     });
   } catch (error) {

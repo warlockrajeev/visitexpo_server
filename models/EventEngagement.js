@@ -47,7 +47,17 @@ const EventEngagementSchema = new mongoose.Schema(
     },
     userDesignation: {
       type: String,
-      default: 'Trade Visitor',
+      default: '',
+      trim: true
+    },
+    userCity: {
+      type: String,
+      default: '',
+      trim: true
+    },
+    userCountry: {
+      type: String,
+      default: '',
       trim: true
     },
     userRole: {

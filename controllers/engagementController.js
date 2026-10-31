@@ -60,10 +60,10 @@ export const toggleEngagement = async (req, res) => {
     const userRole = currentUser.role || 'visitor';
     const userPhone = currentUser.phone || '';
     const userCompany = currentUser.company || currentUser.organization?.name || '';
-    const userDesignation = currentUser.designation || (userRole === 'visitor' ? 'Trade Visitor' : 'Exhibitor Rep');
-    const userAvatar =
-      currentUser.avatar ||
-      `https://ui-avatars.com/api/?name=${encodeURIComponent(userName)}&background=FF2E63&color=fff`;
+    const userDesignation = currentUser.designation || '';
+    const userCity = currentUser.city || '';
+    const userCountry = currentUser.country || '';
+    const userAvatar = currentUser.avatar || '';
 
     // Find existing engagement
     let engagement = await EventEngagement.findOne({
@@ -136,6 +136,8 @@ export const toggleEngagement = async (req, res) => {
       if (userName) engagement.userName = userName;
       if (userCompany) engagement.userCompany = userCompany;
       if (userDesignation) engagement.userDesignation = userDesignation;
+      if (userCity) engagement.userCity = userCity;
+      if (userCountry) engagement.userCountry = userCountry;
 
       await engagement.save();
     } else {
@@ -149,15 +151,17 @@ export const toggleEngagement = async (req, res) => {
         userAvatar,
         userCompany,
         userDesignation,
+        userCity,
+        userCountry,
         userRole,
         eventSlug: cleanSlug,
         eventId: eventId || '',
         eventTitle: eventTitle || cleanSlug.replace(/-/g, ' ').toUpperCase(),
-        eventCity: eventCity || 'India',
-        eventCountry: eventCountry || 'India',
-        eventVenue: eventVenue || 'Main Expo Center',
-        eventDates: eventDates || '2026 Edition',
-        eventCategory: eventCategory || 'Trade Show',
+        eventCity: eventCity || '',
+        eventCountry: eventCountry || '',
+        eventVenue: eventVenue || '',
+        eventDates: eventDates || '',
+        eventCategory: eventCategory || '',
         eventImage: eventImage || '',
         organizerId: organizerId || '',
         organizerName: organizerName || '',
@@ -300,17 +304,32 @@ export const getEventEngagements = async (req, res) => {
     const emailQuery = (req.query.email || '').toLowerCase().trim();
     const userIdQuery = req.query.userId || (req.user ? req.user.id || req.user._id : null);
 
+    const networkQuery = {
+      eventSlug: cleanSlug,
+      status: 'active',
+      $or: [
+        { isInterested: true },
+        { isFollowed: true },
+        { type: { $in: ['interested', 'follower', 'both'] } }
+      ]
+    };
     const [attendees, interestedCount, followersCount] = await Promise.all([
-      EventEngagement.find({ eventSlug: cleanSlug, status: 'active' }).sort({ createdAt: -1 }),
+      EventEngagement.find(networkQuery).sort({ createdAt: -1 }),
       EventEngagement.countDocuments({
         eventSlug: cleanSlug,
         status: 'active',
-        type: { $in: ['interested', 'both'] }
+        $or: [
+          { isInterested: true },
+          { type: { $in: ['interested', 'both'] } }
+        ]
       }),
       EventEngagement.countDocuments({
         eventSlug: cleanSlug,
         status: 'active',
-        type: { $in: ['follower', 'both'] }
+        $or: [
+          { isFollowed: true },
+          { type: { $in: ['follower', 'both'] } }
+        ]
       })
     ]);
 
@@ -324,15 +343,13 @@ export const getEventEngagements = async (req, res) => {
       );
     }
 
-    const isInterested = userEngagement
-      ? userEngagement.status === 'active' &&
-        (userEngagement.type === 'interested' || userEngagement.type === 'both')
-      : false;
+    const isInterested = Boolean(userEngagement?.status === 'active' && (
+      userEngagement.isInterested || userEngagement.type === 'interested' || userEngagement.type === 'both'
+    ));
 
-    const isFollower = userEngagement
-      ? userEngagement.status === 'active' &&
-        (userEngagement.type === 'follower' || userEngagement.type === 'both')
-      : false;
+    const isFollower = Boolean(userEngagement?.status === 'active' && (
+      userEngagement.isFollowed || userEngagement.type === 'follower' || userEngagement.type === 'both'
+    ));
 
     return res.status(200).json({
       success: true,
@@ -633,4 +650,3 @@ export const deleteEngagement = async (req, res) => {
     return res.status(status).json({ success: false, error: error.message, message: error.message });
   }
 };
-
