@@ -3062,15 +3062,42 @@ router.put('/claims/:id/status', async (req, res, next) => {
     if (!event) {
       return res.status(404).json({ success: false, error: 'Claimed event record not found' });
     }
+    event.claimRequests = event.claimRequests || [];
 
     if (action === 'approve') {
       event.status = 'published';
+      const matchingRequest = [...event.claimRequests]
+        .reverse()
+        .find((request) => String(request.user) === String(event.claimedBy));
+      if (matchingRequest) {
+        matchingRequest.status = 'approved';
+      } else if (event.claimedBy) {
+        event.claimRequests.push({
+          user: event.claimedBy,
+          submittedAt: event.claimedAt || new Date(),
+          status: 'approved'
+        });
+      }
       await event.save();
       // Also verify claiming user if exists
       if (event.claimedBy) {
         await User.findByIdAndUpdate(event.claimedBy, { isVerified: true });
       }
     } else if (action === 'reject') {
+      if (event.claimedBy) {
+        const matchingRequest = [...event.claimRequests]
+          .reverse()
+          .find((request) => String(request.user) === String(event.claimedBy));
+        if (matchingRequest) {
+          matchingRequest.status = 'rejected';
+        } else {
+          event.claimRequests.push({
+            user: event.claimedBy,
+            submittedAt: event.claimedAt || new Date(),
+            status: 'rejected'
+          });
+        }
+      }
       event.isClaimed = false;
       event.claimedBy = null;
       event.claimedAt = null;
@@ -4212,4 +4239,3 @@ router.get('/email-promotions/export-csv', async (req, res, next) => {
 });
 
 export default router;
-

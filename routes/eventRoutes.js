@@ -1122,7 +1122,7 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
       return res.status(400).json({ success: false, error: priceError });
     }
 
-    const event = await EventService.createEvent(req.body, req.user.organization);
+    const event = await EventService.createEvent(req.body, req.user.organization, req.user.id);
 
     // Auto-create default ticket tier if ticketing data is provided
     await syncDefaultTicketTier(event._id, req.body);
@@ -1151,7 +1151,11 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
       return res.status(400).json({ success: false, error: priceError });
     }
 
-    const event = await EventService.updateEvent(req.params.id, req.body, req.user.organization);
+    const event = await EventService.updateEvent(req.params.id, req.body, {
+      userId: req.user.id,
+      organizationId: req.user.organization,
+      role: req.user.role
+    });
 
     // Sync default ticket tier if ticketing data changed
     await syncDefaultTicketTier(event._id, req.body);

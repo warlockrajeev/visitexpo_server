@@ -82,6 +82,12 @@ const EventSchema = new mongoose.Schema(
       default: null,
       index: true
     },
+    createdBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null,
+      index: true
+    },
     wpPostId: {
       type: String,
       default: '',
@@ -106,6 +112,13 @@ const EventSchema = new mongoose.Schema(
       default: null,
       index: true
     },
+    claimRequests: [
+      {
+        user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+        submittedAt: { type: Date, default: Date.now },
+        status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' }
+      }
+    ],
     website: String,
     orgName: { type: String, default: '' },
     orgEmail: { type: String, default: '' },

@@ -266,14 +266,45 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
 router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_manager', 'support'), async (req, res, next) => {
   try {
     const { qrCode, eventId } = req.body;
+    let badgeToken = typeof qrCode === 'string' ? qrCode.trim() : '';
+    let badgeEventId = eventId;
 
-    if (!qrCode || !eventId) {
-      return res.status(400).json({ success: false, error: 'QR Code and Event ID are required' });
+    if (badgeToken.startsWith('http://') || badgeToken.startsWith('https://')) {
+      try {
+        const scannedUrl = new URL(badgeToken);
+        badgeToken = scannedUrl.searchParams.get('badgeToken') || badgeToken;
+        badgeEventId = badgeEventId || scannedUrl.searchParams.get('eventId');
+      } catch {
+        return res.status(400).json({ success: false, error: 'The scanned badge URL is invalid.' });
+      }
     }
 
-    const visitor = await Visitor.findOne({ event: eventId, qrCode });
+    if (!badgeToken) {
+      return res.status(400).json({ success: false, error: 'A valid visitor badge token is required' });
+    }
+
+    const visitorQuery = { qrCode: badgeToken };
+    if (badgeEventId) {
+      visitorQuery.event = badgeEventId;
+    }
+
+    const visitor = await Visitor.findOne(visitorQuery);
     if (!visitor) {
-      return res.status(404).json({ success: false, error: 'Visitor not found with matching QR Code' });
+      return res.status(404).json({ success: false, error: 'Visitor not found with matching badge token' });
+    }
+
+    if (visitor.registrationStatus !== 'confirmed') {
+      return res.status(400).json({
+        success: false,
+        error: 'This visitor registration is not confirmed and cannot be checked in.'
+      });
+    }
+
+    if (visitor.attendanceType === 'virtual') {
+      return res.status(400).json({
+        success: false,
+        error: 'This visitor has a virtual pass and cannot use an in-person entry badge.'
+      });
     }
 
     if (visitor.checkInStatus === 'checked_in') {
@@ -301,7 +332,8 @@ router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_ma
         name: visitor.name,
         email: visitor.email,
         company: visitor.company,
-        checkInTime: visitor.checkInTime
+        checkInTime: visitor.checkInTime,
+        eventTitle: (await Event.findById(visitor.event).select('title'))?.title || ''
       }
     });
   } catch (error) {

@@ -18,6 +18,23 @@ import { wordpressLimiter } from '../middlewares/rateLimiter.js';
 
 const router = express.Router();
 
+function isEventConcluded(event, now = new Date()) {
+  const rawEndDate = event?.endDate || event?.startDate;
+  if (!rawEndDate) return false;
+
+  let endDate = new Date(rawEndDate);
+  if (Number.isNaN(endDate.getTime())) return false;
+
+  if (endDate.getUTCHours() === 0 && endDate.getUTCMinutes() === 0) {
+    endDate = new Date(endDate.getUTCFullYear(), endDate.getUTCMonth(), endDate.getUTCDate());
+    endDate.setHours(23, 59, 59, 999);
+  } else if (endDate.getHours() === 0 && endDate.getMinutes() === 0) {
+    endDate.setHours(23, 59, 59, 999);
+  }
+
+  return endDate.getTime() < now.getTime();
+}
+
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 import fs from 'fs';
 import path from 'path';
@@ -154,9 +171,19 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
 router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
   try {
     const { search, city, limit = 2500, page = 1 } = req.query;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
 
     const query = {
       isClaimed: { $ne: true },
+      $and: [
+        {
+          $or: [
+            { endDate: { $gte: todayStart } },
+            { endDate: null, startDate: { $gte: todayStart } }
+          ]
+        }
+      ],
       title: { $not: /cart|checkout|my account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about us|blog|home/i },
       slug: { $not: /cart|checkout|my-account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about-us|blog|home/i }
     };
@@ -358,6 +385,75 @@ router.get('/claim-quota', async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/wordpress/claim-history
+ * Returns the authenticated organizer's event claim requests and their review status.
+ */
+router.get('/claim-history', async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.split(' ')[1]
+      : req.cookies?.token;
+    if (!token) {
+      return res.status(401).json({ success: false, error: 'Authentication is required to view claim history.' });
+    }
+
+    const decoded = verifyAccessToken(token);
+    if (!decoded?.id) {
+      return res.status(401).json({ success: false, error: 'A valid login is required to view claim history.' });
+    }
+
+    const claims = await Event.find({
+      $or: [
+        { 'claimRequests.user': decoded.id },
+        { claimedBy: decoded.id, isClaimed: true }
+      ]
+    })
+      .select('title slug venue city startDate endDate status claimedAt claimedBy isClaimed claimRequests')
+      .sort({ claimedAt: -1, updatedAt: -1 })
+      .lean();
+
+    const history = claims.flatMap((event) => {
+      const requests = (event.claimRequests || [])
+        .filter((request) => String(request.user) === String(decoded.id))
+        .map((request) => ({
+          id: String(request._id),
+          title: event.title,
+          slug: event.slug,
+          venue: event.venue,
+          city: event.city,
+          startDate: event.startDate,
+          endDate: event.endDate,
+          status: request.status || (event.status === 'published' ? 'approved' : 'pending'),
+          claimedAt: request.submittedAt || event.claimedAt
+        }));
+
+      if (requests.length || String(event.claimedBy) !== String(decoded.id) || !event.isClaimed) {
+        return requests;
+      }
+
+      return [{
+        id: String(event._id),
+        title: event.title,
+        slug: event.slug,
+        venue: event.venue,
+        city: event.city,
+        startDate: event.startDate,
+        endDate: event.endDate,
+        status: event.status === 'published' ? 'approved' : 'pending',
+        claimedAt: event.claimedAt
+      }];
+    }).sort((a, b) => new Date(b.claimedAt || 0) - new Date(a.claimedAt || 0));
+
+    return res.status(200).json({
+      success: true,
+      data: history
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // ==========================================
 // 3. ORGANIZER ONBOARDING ENDPOINT
 // ==========================================
@@ -419,13 +515,6 @@ router.post('/onboard-organizer', async (req, res, next) => {
       return res.status(400).json({
         success: false,
         error: 'Please enter a valid phone number (10 to 15 digits, numbers only, no letters).'
-      });
-    }
-
-    if (claimType === 'claim_existing' && (!proofFileName || !proofFileName.trim())) {
-      return res.status(400).json({
-        success: false,
-        error: 'Upload proof of ownership document (incorporation cert or authorization letter) is mandatory.'
       });
     }
 
@@ -584,6 +673,14 @@ router.post('/onboard-organizer', async (req, res, next) => {
       }
 
       if (event) {
+        if (isEventConcluded(event)) {
+          return res.status(400).json({
+            success: false,
+            error: 'This show has concluded and is no longer available to claim.',
+            eventConcluded: true
+          });
+        }
+
         // Prevent claiming an event that is already claimed by another organizer
         if (event.isClaimed && event.claimedBy && String(event.claimedBy) !== String(userId)) {
           return res.status(400).json({
@@ -613,6 +710,11 @@ router.post('/onboard-organizer', async (req, res, next) => {
         event.claimedBy = userId;
         event.claimedAt = new Date();
         event.status = 'draft'; // Pending admin review
+        event.claimRequests.push({
+          user: userId,
+          submittedAt: event.claimedAt,
+          status: 'pending'
+        });
 
         if (officialEmail || effectiveEmail) {
           event.orgEmail = officialEmail || effectiveEmail;

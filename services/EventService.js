@@ -5,10 +5,17 @@
 
 import EventRepository from '../repositories/EventRepository.js';
 import Category from '../models/Category.js';
+import Organization from '../models/Organization.js';
 import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
 
+function getId(value) {
+  if (!value) return null;
+  const id = value._id || value.id || value;
+  return id?.toString?.() || null;
+}
+
 class EventService {
-  async createEvent(eventData, organizerId) {
+  async createEvent(eventData, organizerId, creatorId = null) {
     const trimmedTitle = eventData.title?.trim();
     if (!trimmedTitle || trimmedTitle.length < 3) {
       const err = new Error('Event title is required and must be at least 3 characters');
@@ -183,6 +190,8 @@ class EventService {
       slug,
       organizer: organizerId
     };
+    delete payload.createdBy;
+    if (creatorId) payload.createdBy = creatorId;
 
     // Auto-register category if not existing
     const rawCat = (eventData.category || '').trim();
@@ -213,7 +222,7 @@ class EventService {
     return await EventRepository.create(payload);
   }
 
-  async updateEvent(eventId, eventData, organizerId) {
+  async updateEvent(eventId, eventData, actor = {}) {
     // Verify event ownership
     const event = await EventRepository.findById(eventId);
     if (!event) {
@@ -222,15 +231,40 @@ class EventService {
       throw err;
     }
 
-    if (event.organizer && organizerId && event.organizer.toString() !== organizerId.toString()) {
+    const userId = getId(actor.userId);
+    const organizationId = getId(actor.organizationId);
+    const eventOrganizerId = getId(event.organizer);
+    const isSuperAdmin = actor.role === 'super_admin';
+    const directOwner =
+      (userId && getId(event.createdBy) === userId) ||
+      (userId && getId(event.claimedBy) === userId) ||
+      (userId && eventOrganizerId === userId) ||
+      (organizationId && eventOrganizerId === organizationId);
+    const isOrganizationMember =
+      userId &&
+      eventOrganizerId &&
+      await Organization.exists({
+        _id: eventOrganizerId,
+        'teamMembers.user': userId
+      });
+
+    if (!isSuperAdmin && !directOwner && !isOrganizationMember) {
       const err = new Error('Unauthorized to modify this event');
       err.statusCode = 403;
       throw err;
     }
 
+    const updates = { ...eventData };
+    delete updates.organizer;
+    delete updates.createdBy;
+    delete updates.claimedBy;
+    delete updates.claimedAt;
+    delete updates.isClaimed;
+    delete updates.claimRequests;
+
     // Duplicate title check if title is changing
-    if (eventData.title && eventData.title.trim().toLowerCase() !== event.title.toLowerCase()) {
-      const trimmedTitle = eventData.title.trim();
+    if (updates.title && updates.title.trim().toLowerCase() !== event.title.toLowerCase()) {
+      const trimmedTitle = updates.title.trim();
       const escapedTitle = trimmedTitle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const duplicateEvent = await EventRepository.findOne({
         _id: { $ne: eventId },
@@ -251,19 +285,19 @@ class EventService {
     }
 
     // Slug checks if title changes and user didn't supply custom slug
-    if (eventData.title && eventData.title !== event.title && !eventData.slug) {
-      let slug = this._slugify(eventData.title);
+    if (updates.title && updates.title !== event.title && !updates.slug) {
+      let slug = this._slugify(updates.title);
       let existing = await EventRepository.findOne({ slug, _id: { $ne: eventId } });
       let counter = 1;
       while (existing) {
-        slug = `${this._slugify(eventData.title)}-${counter}`;
+        slug = `${this._slugify(updates.title)}-${counter}`;
         existing = await EventRepository.findOne({ slug, _id: { $ne: eventId } });
         counter++;
       }
-      eventData.slug = slug;
+      updates.slug = slug;
     }
 
-    return await EventRepository.update(eventId, eventData);
+    return await EventRepository.update(eventId, updates);
   }
 
   async deleteEvent(eventId, organizerId) {

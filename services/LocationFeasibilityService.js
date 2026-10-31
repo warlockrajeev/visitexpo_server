@@ -32,6 +32,29 @@ const CITY_CLUSTERS = {
   'goa': ['goa', 'panaji']
 };
 
+const KNOWN_CITIES = new Set([
+  ...Object.keys(CITY_CLUSTERS),
+  ...Object.values(CITY_CLUSTERS).flat(),
+  'agra', 'amritsar', 'bhopal', 'bhubaneswar', 'coimbatore', 'dehradun',
+  'dubai', 'guwahati', 'jodhpur', 'kanpur', 'kozhikode', 'ludhiana',
+  'madurai', 'mangaluru', 'mysuru', 'nagpur', 'nashik', 'patna',
+  'raipur', 'rajkot', 'ranchi', 'thiruvananthapuram', 'tiruchirappalli',
+  'udaipur', 'vadodara', 'varanasi', 'vijayawada', 'visakhapatnam'
+]);
+
+function normalizeCityName(city) {
+  return city
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Known top venues per major exhibition city
 const CITY_VENUES = {
   'delhi': [
@@ -103,8 +126,32 @@ class LocationFeasibilityService {
     }
 
     const cleanCity = city.trim();
-    const cityVariants = this.getCityVariants(cleanCity);
-    const cityRegexList = cityVariants.map(v => new RegExp(v, 'i'));
+    const normalizedCity = normalizeCityName(cleanCity);
+    if (normalizedCity.length < 3 || /\d/.test(cleanCity)) {
+      const error = new Error('City not found. Please enter a valid city name.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const cityCluster = CITY_CLUSTERS[normalizedCity] || [normalizedCity];
+    const publishedCities = await Event.distinct('city', { status: 'published' });
+    const knownPublishedCities = new Set(
+      publishedCities.filter(cityName => typeof cityName === 'string').map(normalizeCityName)
+    );
+    if (
+      !KNOWN_CITIES.has(normalizedCity) &&
+      !knownPublishedCities.has(normalizedCity)
+    ) {
+      const error = new Error('City not found. Please enter a valid city name.');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const cityVariants = Array.from(new Set([normalizedCity, ...cityCluster]));
+    const cityRegexList = cityVariants.map(v => new RegExp(`^${escapeRegex(v)}$`, 'i'));
+    const venueRegexList = cityVariants.map(
+      v => new RegExp(`(?:^|[^a-z])${escapeRegex(v)}(?:$|[^a-z])`, 'i')
+    );
 
     // Check Plan / Access Rights:
     // Starter & Enterprise: Included (Free of extra charge)
@@ -121,9 +168,10 @@ class LocationFeasibilityService {
 
     // 1. Query existing events present in this city
     const eventQuery = {
+      status: 'published',
       $or: [
         { city: { $in: cityRegexList } },
-        { venue: { $in: cityRegexList } }
+        { venue: { $in: venueRegexList } }
       ]
     };
 
@@ -141,6 +189,9 @@ class LocationFeasibilityService {
     const upcomingEvents = presentEvents.filter(e => e.startDate && new Date(e.startDate) >= now);
     const ongoingEvents = presentEvents.filter(e => e.startDate && e.endDate && new Date(e.startDate) <= now && new Date(e.endDate) >= now);
     const pastEvents = presentEvents.filter(e => e.endDate && new Date(e.endDate) < now);
+    const activeCompetitionCount = presentEvents.filter(
+      e => !e.endDate || new Date(e.endDate) >= now
+    ).length;
 
     // 2. Query delegate & trade visitor interest
     const eventSlugs = presentEvents.map(e => e.slug).filter(Boolean);
@@ -163,10 +214,9 @@ class LocationFeasibilityService {
       })
     ]);
 
-    // Baseline demand calculation + platform scale factor for the city
+    // Demand is based on measured platform activity rather than a fixed city baseline.
     const isTopMetro = ['delhi', 'new delhi', 'mumbai', 'bengaluru', 'bangalore', 'hyderabad', 'chennai', 'ahmedabad', 'pune', 'kolkata'].includes(cleanCity.toLowerCase());
-    const baseAudienceMultiplier = isTopMetro ? 850 : 420;
-    const computedAudienceInterest = (localUserCount * 45) + (registeredVisitorCount * 12) + (engagementCount * 8) + (leadInquiriesCount * 15) + (totalEventsPresent * baseAudienceMultiplier) + 1250;
+    const computedAudienceInterest = (localUserCount * 45) + (registeredVisitorCount * 12) + (engagementCount * 8) + (leadInquiriesCount * 15);
 
     // 3. Category distribution in this location
     const categoryCounts = {};
@@ -186,51 +236,57 @@ class LocationFeasibilityService {
       .sort((a, b) => b.count - a.count)
       .slice(0, 6);
 
-    // 4. Calculate Market Feasibility Score (0-100)
-    let score = 50;
+    // Score each city from its observed audience, active event competition,
+    // known venue capacity, and sector coverage. The demand curve is logarithmic
+    // so large cities do not all max out the score.
+    const audienceDemandPoints = Math.min(
+      35,
+      Math.round((35 * Math.log1p(computedAudienceInterest)) / Math.log1p(10000))
+    );
 
-    // A. Visitor Interest Factor (up to 30 pts)
-    if (computedAudienceInterest > 10000) score += 30;
-    else if (computedAudienceInterest > 5000) score += 24;
-    else if (computedAudienceInterest > 2000) score += 18;
-    else score += 10;
-
-    // B. Competition / Market Saturation Factor (up to 25 pts)
-    // 0 events -> Blue ocean (18 pts)
-    // 1-4 events -> Proven demand, low saturation (25 pts - Sweet spot!)
-    // 5-9 events -> Active competition, healthy (18 pts)
-    // 10+ events -> High competition / saturation (8 pts)
-    if (totalEventsPresent >= 1 && totalEventsPresent <= 4) {
-      score += 25;
-    } else if (totalEventsPresent >= 5 && totalEventsPresent <= 9) {
-      score += 18;
-    } else if (totalEventsPresent === 0) {
-      score += 18;
+    let competitionPoints;
+    if (activeCompetitionCount === 0) {
+      competitionPoints = 25;
+    } else if (activeCompetitionCount <= 4) {
+      competitionPoints = 22;
+    } else if (activeCompetitionCount <= 9) {
+      competitionPoints = 15;
     } else {
-      score += 8;
+      competitionPoints = Math.max(3, 15 - (activeCompetitionCount - 9));
     }
 
-    // C. Metro Infrastructure & Venue Readiness (up to 25 pts)
-    if (isTopMetro) score += 25;
-    else score += 16;
+    const knownVenueCount = (CITY_VENUES[normalizedCity] || []).length;
+    const actualVenueCount = new Set(
+      presentEvents.map(event => (event.venue || '').trim().toLowerCase()).filter(Boolean)
+    ).size;
+    const venueCount = Math.max(knownVenueCount, actualVenueCount);
+    const venueReadinessPoints = Math.min(20, 6 + venueCount * 4);
 
-    // D. Category Focus Adjustment (up to 20 pts)
-    if (category && category !== 'all') {
-      const catCount = categoryCounts[category] || 0;
-      if (catCount === 0) {
-        // High opportunity: unserved demand in this city
-        score += 18;
-      } else if (catCount <= 2) {
-        score += 15;
+    let sectorFitPoints;
+    if (category && category.trim() !== '' && category.toLowerCase() !== 'all') {
+      if (activeCompetitionCount === 0) {
+        sectorFitPoints = 20;
+      } else if (activeCompetitionCount <= 2) {
+        sectorFitPoints = 16;
+      } else if (activeCompetitionCount <= 5) {
+        sectorFitPoints = 11;
       } else {
-        score += 8;
+        sectorFitPoints = Math.max(2, 11 - (activeCompetitionCount - 5));
       }
     } else {
-      score += 15;
+      sectorFitPoints = Math.min(20, 8 + Math.round(Object.keys(categoryCounts).length * 1.5));
     }
 
-    // Clamp score
-    const feasibilityScore = Math.min(98, Math.max(35, score));
+    const scoreBreakdown = {
+      audienceDemand: { score: audienceDemandPoints, maximum: 35 },
+      competition: { score: competitionPoints, maximum: 25 },
+      venueReadiness: { score: venueReadinessPoints, maximum: 20 },
+      sectorFit: { score: sectorFitPoints, maximum: 20 }
+    };
+    const feasibilityScore = Object.values(scoreBreakdown).reduce(
+      (total, factor) => total + factor.score,
+      0
+    );
 
     // 5. Formulate Feasibility Verdict and Go/No-Go Decision Report
     let verdict = 'HIGH POTENTIAL — RECOMMENDED TO LAUNCH';
@@ -244,19 +300,19 @@ class LocationFeasibilityService {
       verdictBadge = 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20';
       verdictColor = 'emerald';
       recommendationHeadline = `High demand and receptive trade buyer base in ${cleanCity}.`;
-      decisionRationale = `Our intelligence indicates strong buyer demand (${computedAudienceInterest.toLocaleString()} potential trade interest) coupled with ${totalEventsPresent === 0 ? 'an untapped zero-competitor blue ocean' : `manageable competition (${totalEventsPresent} existing expos)`}. Launching an exhibition in ${cleanCity} provides maximum organizer ROI.`;
+      decisionRationale = `Our intelligence indicates ${computedAudienceInterest.toLocaleString()} weighted platform demand signals and ${activeCompetitionCount === 0 ? 'an untapped market with no active competing expos' : `competition from ${activeCompetitionCount} active expos`}. Launching an exhibition in ${cleanCity} provides maximum organizer ROI.`;
     } else if (feasibilityScore >= 62) {
       verdict = 'MODERATE VIABILITY — TARGET A NICHE THEME';
       verdictBadge = 'bg-amber-500/10 text-amber-500 border-amber-500/20';
       verdictColor = 'amber';
       recommendationHeadline = `Viable with distinctive positioning in ${cleanCity}.`;
-      decisionRationale = `${cleanCity} has an established exhibition footprint with ${totalEventsPresent} scheduled expos. Launching is viable if the event targets a specific high-growth niche subsector or brings differentiated international exhibitors.`;
+      decisionRationale = `${cleanCity} has ${activeCompetitionCount} active competing expos. Launching is viable if the event targets a specific high-growth niche subsector or brings differentiated international exhibitors.`;
     } else {
       verdict = 'HIGH COMPETITION — CAREFUL TIMING REQUIRED';
       verdictBadge = 'bg-rose-500/10 text-rose-500 border-rose-500/20';
       verdictColor = 'rose';
       recommendationHeadline = `Competitive market with high saturation in ${cleanCity}.`;
-      decisionRationale = `Multiple active expos (${totalEventsPresent} events) are already competing for the same exhibitor budgets and visitor calendars in ${cleanCity}. Organizers should avoid overlapping dates and secure proprietary sponsor commitments prior to launch.`;
+      decisionRationale = `Multiple active expos (${activeCompetitionCount} events) are already competing for the same exhibitor budgets and visitor calendars in ${cleanCity}. Organizers should avoid overlapping dates and secure proprietary sponsor commitments prior to launch.`;
     }
 
     // 6. Optimal launch timing & economic projections
@@ -302,7 +358,8 @@ class LocationFeasibilityService {
         ongoingEventsCount: ongoingEvents.length,
         pastEventsCount: pastEvents.length,
         audienceInterestVolume: computedAudienceInterest,
-        competitionDensity: totalEventsPresent > 8 ? 'High' : totalEventsPresent > 3 ? 'Moderate' : 'Low (Blue Ocean)',
+        competitionDensity: activeCompetitionCount > 8 ? 'High' : activeCompetitionCount > 3 ? 'Moderate' : 'Low (Blue Ocean)',
+        scoreBreakdown,
         projectedFootfallRange: `${minFootfall.toLocaleString()} – ${maxFootfall.toLocaleString()} Trade Visitors`,
         projectedExhibitorCapacity: `${estimatedExhibitors} – ${Math.round(estimatedExhibitors * 1.5)} Booths`,
         optimalLaunchWindow: `${optimalMonths[0]} to ${optimalMonths[optimalMonths.length - 1]} (Peak Procurement Season)`,
@@ -310,11 +367,11 @@ class LocationFeasibilityService {
       },
       // Detailed metrics (unlocked or blurred for free users)
       metrics: {
-        buyerDemandIndex: Math.min(97, Math.round(feasibilityScore * 0.95 + 4)),
-        competitionSaturationIndex: Math.min(95, Math.round(totalEventsPresent * 10 + 15)),
-        venueAvailabilityScore: isTopMetro ? 92 : 74,
-        exhibitorBookingReadiness: Math.min(96, Math.round(feasibilityScore * 0.92 + 6)),
-        registeredBuyersInRegion: (localUserCount * 18) + (registeredVisitorCount * 5) + (isTopMetro ? 4200 : 1500),
+        buyerDemandIndex: Math.round((audienceDemandPoints / 35) * 100),
+        competitionSaturationIndex: Math.min(100, activeCompetitionCount * 10),
+        venueAvailabilityScore: Math.round((venueReadinessPoints / 20) * 100),
+        exhibitorBookingReadiness: Math.round((feasibilityScore / 100) * 100),
+        registeredBuyersInRegion: localUserCount + registeredVisitorCount,
         corporateProcurementIntent: '87.4% High Intent',
         topCategoriesInLocation
       },
