@@ -4,13 +4,101 @@
  */
 
 import express from 'express';
+import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
+import Session from '../models/Session.js';
 import Lead from '../models/Lead.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
 
 const router = express.Router();
+
+function getSafeHttpUrl(value) {
+  if (!value || typeof value !== 'string') return '';
+  try {
+    const parsedUrl = new URL(value);
+    return ['http:', 'https:'].includes(parsedUrl.protocol) ? parsedUrl.toString() : '';
+  } catch {
+    return '';
+  }
+}
+
+router.get('/virtual-access/:visitorId', async (req, res, next) => {
+  try {
+    const { visitorId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(visitorId)) {
+      return res.status(400).json({ success: false, error: 'Invalid visitor link.' });
+    }
+
+    const visitor = await Visitor.findById(visitorId).populate(
+      'event',
+      'title slug startDate endDate eventType status venue city livestream'
+    );
+    if (!visitor || !visitor.event) {
+      return res.status(404).json({ success: false, error: 'Visitor registration was not found.' });
+    }
+    if (visitor.registrationStatus !== 'confirmed') {
+      return res.status(403).json({ success: false, error: 'This visitor registration is not confirmed.' });
+    }
+    if (!['virtual', 'hybrid'].includes(visitor.attendanceType) ||
+        !['virtual', 'hybrid'].includes(visitor.event.eventType)) {
+      return res.status(403).json({
+        success: false,
+        error: 'This registration does not include virtual event access.'
+      });
+    }
+
+    const sessions = await Session.find({ event: visitor.event._id })
+      .select('title description startTime endTime streamProvider streamUrl zoomMeetingId isLiveNow')
+      .sort({ startTime: 1 })
+      .lean();
+    const streamUrl = getSafeHttpUrl(visitor.event.livestream?.streamUrl);
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        visitor: {
+          id: String(visitor._id),
+          name: visitor.name,
+          virtualJoinStatus: visitor.virtualJoinStatus,
+          virtualJoinTime: visitor.virtualJoinTime
+        },
+        event: {
+          id: String(visitor.event._id),
+          title: visitor.event.title,
+          slug: visitor.event.slug,
+          startDate: visitor.event.startDate,
+          endDate: visitor.event.endDate,
+          eventType: visitor.event.eventType,
+          status: visitor.event.status,
+          venue: visitor.event.venue,
+          city: visitor.event.city
+        },
+        stream: {
+          enabled: visitor.event.livestream?.enabled === true,
+          provider: visitor.event.livestream?.provider || '',
+          status: visitor.event.livestream?.status || 'upcoming',
+          streamUrl,
+          zoomMeetingId: visitor.event.livestream?.zoomMeetingId || ''
+        },
+        sessions: sessions.map((session) => ({
+          id: String(session._id),
+          title: session.title,
+          description: session.description || '',
+          startTime: session.startTime,
+          endTime: session.endTime,
+          provider: session.streamProvider || '',
+          streamUrl: getSafeHttpUrl(session.streamUrl),
+          zoomMeetingId: session.zoomMeetingId || '',
+          isLiveNow: session.isLiveNow === true
+        }))
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 // ==========================================
 // PUBLIC VISITOR REGISTRATION API (WordPress compatible)
@@ -344,15 +432,43 @@ router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_ma
 // Register Virtual Event Join
 router.post('/virtual-join', async (req, res, next) => {
   try {
-    const { email, eventId, viewerTimezone } = req.body;
+    const { email, eventId, visitorId, viewerTimezone } = req.body;
 
-    if (!email || !eventId) {
-      return res.status(400).json({ success: false, error: 'Email and Event ID are required' });
+    if (!visitorId && (!email || !eventId)) {
+      return res.status(400).json({ success: false, error: 'Visitor ID or email and event ID are required' });
     }
 
-    const visitor = await Visitor.findOne({ event: eventId, email: email.toLowerCase().trim() });
+    let visitor;
+    if (visitorId) {
+      if (!mongoose.Types.ObjectId.isValid(visitorId)) {
+        return res.status(400).json({ success: false, error: 'Invalid visitor link.' });
+      }
+      visitor = await Visitor.findById(visitorId);
+      if (!visitor) {
+        return res.status(404).json({ success: false, error: 'Visitor registration was not found.' });
+      }
+      if (eventId && String(visitor.event) !== String(eventId)) {
+        return res.status(403).json({ success: false, error: 'Visitor registration does not match this event.' });
+      }
+    } else {
+      visitor = await Visitor.findOne({ event: eventId, email: email.toLowerCase().trim() });
+    }
     if (!visitor) {
       return res.status(404).json({ success: false, error: 'Visitor registration not found for this email and event' });
+    }
+    const visitorEvent = await Event.findById(visitor.event).select('eventType');
+    if (!visitorEvent || !['virtual', 'hybrid'].includes(visitorEvent.eventType)) {
+      return res.status(403).json({
+        success: false,
+        error: 'This event does not provide virtual access.'
+      });
+    }
+    if (visitor.registrationStatus !== 'confirmed' ||
+        !['virtual', 'hybrid'].includes(visitor.attendanceType)) {
+      return res.status(403).json({
+        success: false,
+        error: 'A confirmed virtual or hybrid visitor registration is required to join.'
+      });
     }
 
     if (visitor.virtualJoinStatus === 'checked_in') {
@@ -368,6 +484,7 @@ router.post('/virtual-join', async (req, res, next) => {
       });
     }
 
+    const targetEventId = visitor.event;
     visitor.virtualJoinStatus = 'checked_in';
     visitor.virtualJoinTime = new Date();
     if (viewerTimezone) {
@@ -377,7 +494,7 @@ router.post('/virtual-join', async (req, res, next) => {
 
     // Increment event virtual attendance stats
     try {
-      await Event.findByIdAndUpdate(eventId, {
+      await Event.findByIdAndUpdate(targetEventId, {
         $inc: {
           'virtualAttendanceStats.totalVirtualVisitors': 1,
           'virtualAttendanceStats.liveStreamViews': 1
@@ -389,7 +506,7 @@ router.post('/virtual-join', async (req, res, next) => {
 
     // Trigger Web Push notification to Organizer (Enterprise plan only)
     notifyOrganizerOnVisitor({
-      event: eventId,
+      event: targetEventId,
       visitor,
       type: 'virtual'
     }).catch(pushErr => console.warn('[VisitorRoutes] Virtual join push error:', pushErr.message));
