@@ -268,7 +268,7 @@ router.post('/quick-setup', protect, async (req, res, next) => {
       website: website || '',
       contactEmail,
       contactPhone: contactPhone || req.user.phone || '+91 98765 43210',
-      boothNumber: boothNumber || 'TBD',
+      boothNumber: boothNumber?.trim() || '',
       event: eventId,
       attendanceType: attendanceType || 'in_person',
       staff: initialStaff,

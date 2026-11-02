@@ -8,6 +8,7 @@ import Visitor from '../models/Visitor.js';
 import Event from '../models/Event.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
+import { createVisitorQrCode, ensureVisitorQrCode } from './visitorBadgeService.js';
 
 class CalendarService {
   /**
@@ -258,6 +259,7 @@ class CalendarService {
           existingVis.calendarProvider = provider;
           existingVis.calendarSyncedAt = new Date();
           existingVis.viewerTimezone = timezone || 'Asia/Kolkata';
+          await ensureVisitorQrCode(existingVis);
           await existingVis.save();
         } else {
           await Visitor.create({
@@ -265,6 +267,7 @@ class CalendarService {
             email: cleanEmail,
             name: userName || cleanEmail.split('@')[0],
             phone: 'Not provided',
+            qrCode: createVisitorQrCode(),
             registrationStatus: 'confirmed',
             calendarSynced: true,
             calendarProvider: provider,

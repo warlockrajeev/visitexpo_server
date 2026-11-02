@@ -155,6 +155,21 @@ class EventRepository extends BaseRepository {
       }
     }
 
+    if (filters.upcoming === 'true' || filters.upcoming === true) {
+      const today = new Date();
+      today.setUTCHours(0, 0, 0, 0);
+      filter.status = 'published';
+      filter.$and = [
+        ...(filter.$and || []),
+        {
+          $or: [
+            { endDate: { $gte: today } },
+            { endDate: { $exists: false }, startDate: { $gte: today } }
+          ]
+        }
+      ];
+    }
+
     return await this.paginate(filter, options);
   }
 }

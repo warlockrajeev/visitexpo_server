@@ -25,6 +25,7 @@ import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
 import RecommendationService from '../services/RecommendationService.js';
 import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
+import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBadgeService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import LocationFeasibilityService from '../services/LocationFeasibilityService.js';
 
@@ -121,9 +122,9 @@ async function syncDefaultTicketTier(eventId, body) {
 // Get events list with pagination, search, sorting and filtering
 router.get('/', wordpressLimiter, async (req, res, next) => {
   try {
-    const { search, category, city, venue, page, limit, sort, organizerId, status, all } = req.query;
+    const { search, category, city, venue, page, limit, sort, organizerId, status, all, upcoming } = req.query;
     
-    const filters = { search, category, city, venue, organizerId, status, all };
+    const filters = { search, category, city, venue, organizerId, status, all, upcoming };
     
     // Default options
     const options = {
@@ -831,9 +832,9 @@ router.post('/:slug/virtual-attend', async (req, res, next) => {
         visitor.virtualJoinStatus = 'checked_in';
         visitor.virtualJoinTime = new Date();
         visitor.viewerTimezone = userTimezone;
+        await ensureVisitorQrCode(visitor);
         await visitor.save();
       } else {
-        const mockQRCode = `visitexpo-${event._id}-${cleanEmail.replace(/[^a-z0-9]/g, '')}`;
         visitor = await Visitor.create({
           name: cleanName,
           email: cleanEmail,
@@ -841,7 +842,7 @@ router.post('/:slug/virtual-attend', async (req, res, next) => {
           company: company || 'Virtual Participant',
           designation: designation || 'Trade Visitor',
           country: country || 'International',
-          qrCode: mockQRCode,
+          qrCode: createVisitorQrCode(),
           event: event._id,
           attendanceType: 'virtual',
           registrationStatus: 'confirmed',
@@ -956,7 +957,7 @@ router.post('/:slug/sessions/:sessionId/attend', async (req, res, next) => {
           company: 'Virtual Participant',
           designation: 'Session Attendee',
           country: 'International',
-          qrCode: `visitexpo-${event._id}-${cleanEmail.replace(/[^a-z0-9]/g, '')}`,
+          qrCode: createVisitorQrCode(),
           event: event._id,
           attendanceType: 'virtual',
           virtualJoinStatus: 'checked_in',
@@ -970,6 +971,7 @@ router.post('/:slug/sessions/:sessionId/attend', async (req, res, next) => {
         joinedAt: new Date(),
         viewerTimezone: userTimezone
       });
+      await ensureVisitorQrCode(visitor);
       await visitor.save();
     }
 

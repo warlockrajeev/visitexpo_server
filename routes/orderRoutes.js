@@ -16,6 +16,7 @@ import Organization from '../models/Organization.js';
 import User from '../models/User.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
+import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBadgeService.js';
 
 const router = express.Router();
 
@@ -173,7 +174,6 @@ router.post('/checkout', async (req, res, next) => {
     // 2. Ensure Visitor is registered for this event
     let visitor = await Visitor.findOne({ event: targetEventId, email: buyer.email.toLowerCase() });
     if (!visitor) {
-      const mockQRCode = `visitexpo-${targetEventId}-${buyer.email.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
       visitor = await Visitor.create({
         name: buyer.name,
         email: buyer.email.toLowerCase(),
@@ -181,7 +181,7 @@ router.post('/checkout', async (req, res, next) => {
         company: buyer.company || 'Individual',
         designation: buyer.designation || 'Visitor',
         country: buyer.country || 'India',
-        qrCode: mockQRCode,
+        qrCode: createVisitorQrCode(),
         attendanceType: attendanceType || (ticket.type === 'vip' || ticket.price > 0 ? 'in_person' : 'virtual'),
         event: targetEventId
       });
@@ -214,6 +214,7 @@ router.post('/checkout', async (req, res, next) => {
         type: 'registered'
       }).catch(pushErr => console.warn('[OrderRoutes] Checkout push error:', pushErr.message));
     }
+    await ensureVisitorQrCode(visitor);
 
     // 3. Create Order
     const totalAmount = ticket.price * quantity;

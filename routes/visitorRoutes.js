@@ -11,6 +11,7 @@ import Session from '../models/Session.js';
 import Lead from '../models/Lead.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
+import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBadgeService.js';
 
 const router = express.Router();
 
@@ -128,7 +129,6 @@ router.post('/register', async (req, res, next) => {
     }
 
     // 3. Create Visitor
-    const mockQRCode = `visitexpo-${eventId}-${email.toLowerCase().replace(/[^a-z0-9]/g, '')}`;
     const visitor = await Visitor.create({
       name,
       email: email.toLowerCase(),
@@ -136,7 +136,7 @@ router.post('/register', async (req, res, next) => {
       company,
       designation,
       country: country || 'India',
-      qrCode: mockQRCode,
+      qrCode: createVisitorQrCode(),
       event: eventId,
       notes,
       attendanceType: attendanceType || 'in_person'
@@ -214,6 +214,10 @@ router.get('/my-passes', protect, async (req, res, next) => {
         select: 'title slug startDate endDate venue city banner logo shortDescription organizer timings'
       })
       .sort({ createdAt: -1 });
+
+    for (const pass of passes) {
+      await ensureVisitorQrCode(pass);
+    }
 
     res.status(200).json({
       success: true,
