@@ -28,24 +28,18 @@ export const hasGrowthPromotionAccess = async (userOrId) => {
     return true;
   }
 
-  // Direct growth flag or plan string
-  if (user.hasGrowthPlan === true || String(user.plan).toLowerCase().trim() === 'growth') {
-    return true;
-  }
+  const organizationId = user.organization?._id || user.organization;
+  const subscriptionScope = [
+    { user: user._id || user.id },
+    ...(organizationId ? [{ organization: organizationId }] : [])
+  ];
 
-  // Active subscription with plan === 'growth'
-  try {
-    const growthSub = await Subscription.findOne({
-      user: user._id,
-      plan: 'growth',
-      status: { $in: ['active', 'trialing'] }
-    });
-    if (growthSub) return true;
-  } catch (err) {
-    console.warn('[AudienceService] Error checking growth subscription:', err.message);
-  }
-
-  return false;
+  return Boolean(await Subscription.exists({
+    $or: subscriptionScope,
+    plan: 'growth',
+    status: 'active',
+    endDate: { $gt: new Date() }
+  }));
 };
 
 const DISALLOWED_DUMMY_DOMAINS = ['example.com', 'test.com', 'dummy.com', 'gamail.com', 'gamil.com'];

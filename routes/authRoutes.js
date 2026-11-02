@@ -342,9 +342,10 @@ router.get('/me', protect, async (req, res, next) => {
           { user: userDoc._id }
         ],
         plan: 'growth',
-        status: 'active'
+        status: 'active',
+        endDate: { $gt: new Date() }
       });
-      hasGrowthPlan = Boolean(userDoc.hasGrowthPlan || hasGrowthSub);
+      hasGrowthPlan = Boolean(hasGrowthSub);
 
       let needsSave = false;
       const isCorporate = isCorporateEmail(userDoc.email);

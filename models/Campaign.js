@@ -31,6 +31,27 @@ const RecipientLogSchema = new mongoose.Schema(
       type: String,
       default: null
     },
+    trackingTokenHash: {
+      type: String,
+      select: false
+    },
+    openedAt: {
+      type: Date,
+      default: undefined
+    },
+    clickedAt: {
+      type: Date,
+      default: undefined
+    },
+    convertedAt: {
+      type: Date,
+      default: undefined
+    },
+    conversionOrderIds: {
+      type: [String],
+      default: [],
+      select: false
+    },
     sentAt: {
       type: Date,
       default: Date.now

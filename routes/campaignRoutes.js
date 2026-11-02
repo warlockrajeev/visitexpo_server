@@ -5,9 +5,7 @@
 
 import express from 'express';
 import Campaign from '../models/Campaign.js';
-import Visitor from '../models/Visitor.js';
 import Event from '../models/Event.js';
-import User from '../models/User.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import {
   hasGrowthPromotionAccess,
@@ -17,10 +15,99 @@ import {
   sendPromotionEmail,
   dispatchCampaignBatch,
   buildPromotionEmailHtml,
-  verifyPromotionSMTP
+  getPromotionTrackingBaseUrl
 } from '../services/promotionEmailService.js';
+import campaignTrackingRoutes from './campaignTrackingRoutes.js';
 
 const router = express.Router();
+
+const withCampaignAnalytics = (campaign) => {
+  const data = campaign.toObject ? campaign.toObject() : campaign;
+  const recipients = data.recipientsLog || [];
+  const deliveredRecipients = recipients.filter((recipient) => recipient.status === 'sent');
+  const uniqueDeliveredEmails = new Set(
+    deliveredRecipients.map((recipient) => recipient.email.toLowerCase())
+  );
+
+  return {
+    ...data,
+    sentCount: deliveredRecipients.length,
+    deliveredCount: deliveredRecipients.length,
+    failedCount: recipients.filter((recipient) => recipient.status === 'failed').length,
+    openCount: deliveredRecipients.filter((recipient) => recipient.openedAt).length,
+    clickCount: deliveredRecipients.filter((recipient) => recipient.clickedAt).length,
+    conversionCount: deliveredRecipients.reduce(
+      (count, recipient) => count + (recipient.conversionOrderIds?.length || (recipient.convertedAt ? 1 : 0)),
+      0
+    ),
+    targetAudience: {
+      ...data.targetAudience,
+      recipientCount: data.status === 'draft'
+        ? (data.targetAudience?.recipientCount || 0)
+        : uniqueDeliveredEmails.size
+    },
+    recipientsLog: recipients.map((recipient) => {
+      const safeRecipient = { ...recipient };
+      delete safeRecipient.trackingTokenHash;
+      delete safeRecipient.conversionOrderIds;
+      return safeRecipient;
+    })
+  };
+};
+
+const persistRecipientResult = async (campaignId, recipient) => {
+  const increments = recipient.status === 'sent'
+    ? { sentCount: 1, deliveredCount: 1 }
+    : { failedCount: 1 };
+  const result = await Campaign.updateOne(
+    { _id: campaignId, status: 'sending' },
+    { $push: { recipientsLog: recipient }, $inc: increments }
+  );
+
+  if (result.matchedCount !== 1) {
+    throw new Error('Campaign stopped while recipient delivery was in progress');
+  }
+};
+
+const dispatchAndPersistCampaign = async ({ campaign, event, organizer, recipients }) => {
+  let batchResult;
+  try {
+    batchResult = await dispatchCampaignBatch({
+      campaign,
+      event,
+      organizer,
+      recipients,
+      delayMs: 250,
+      trackingBaseUrl: getPromotionTrackingBaseUrl(),
+      onRecipientResult: (recipient) => persistRecipientResult(campaign._id, recipient)
+    });
+  } catch (error) {
+    await Campaign.updateOne(
+      { _id: campaign._id, status: 'sending' },
+      { $set: { status: 'failed', sentAt: new Date() } }
+    );
+    throw error;
+  }
+
+  const updatedCampaign = await Campaign.findByIdAndUpdate(
+    campaign._id,
+    {
+      $set: {
+        status: batchResult.deliveredCount > 0 ? 'completed' : 'failed',
+        sentAt: new Date()
+      }
+    },
+    { new: true }
+  ).select('+recipientsLog.conversionOrderIds');
+
+  return {
+    batchResult,
+    campaign: withCampaignAnalytics(updatedCampaign)
+  };
+};
+
+
+router.use('/track', campaignTrackingRoutes);
 
 // Require organizer/manager auth
 router.use(protect);
@@ -47,6 +134,21 @@ router.get('/growth-access', async (req, res, next) => {
         targetAudiences: ['leads', 'visitors', 'followers', 'interested']
       }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.use(async (req, res, next) => {
+  try {
+    if (!(await hasGrowthPromotionAccess(req.user))) {
+      return res.status(403).json({
+        success: false,
+        error: 'Growth Plan Required',
+        message: 'Marketing Campaigns are available only with an active Growth Plan add-on.'
+      });
+    }
+    next();
   } catch (error) {
     next(error);
   }
@@ -248,36 +350,18 @@ router.post('/send-promotion', async (req, res, next) => {
     });
 
     // 3. Dispatch batch through promotion@client.visitexpo.in
-    const batchResult = await dispatchCampaignBatch({
+    const { batchResult, campaign: campaignAnalytics } = await dispatchAndPersistCampaign({
       campaign,
       event,
       organizer: req.user,
-      recipients: audienceData.recipients,
-      delayMs: 250 // rate-limit spacing
+      recipients: audienceData.recipients
     });
-
-    // 4. Update campaign with final metrics & recipients audit log
-    campaign.status = batchResult.deliveredCount > 0 ? 'completed' : 'failed';
-    campaign.sentCount = batchResult.totalRecipients;
-    campaign.deliveredCount = batchResult.deliveredCount;
-    campaign.failedCount = batchResult.failedCount;
-    campaign.recipientsLog = batchResult.recipientsLog;
-    campaign.sentAt = new Date();
-
-    await campaign.save();
 
     res.status(201).json({
       success: true,
       message: `Promotional email campaign dispatched! Successfully delivered to ${batchResult.deliveredCount} recipients.`,
       campaign: {
-        _id: campaign._id,
-        title: campaign.title,
-        status: campaign.status,
-        sentCount: campaign.sentCount,
-        deliveredCount: campaign.deliveredCount,
-        failedCount: campaign.failedCount,
-        targetAudience: campaign.targetAudience,
-        sentAt: campaign.sentAt,
+        ...campaignAnalytics,
         senderEmail: campaign.senderEmail,
         recipientsSummary: batchResult.recipientsLog.map(r => ({
           name: r.name,
@@ -309,13 +393,14 @@ router.get('/', async (req, res, next) => {
     }
 
     const campaigns = await Campaign.find(filter)
+      .select('+recipientsLog.conversionOrderIds')
       .populate('createdBy', 'name email company')
       .populate('event', 'title slug city bannerImage dates')
       .sort({ createdAt: -1 });
 
     res.status(200).json({
       success: true,
-      data: campaigns
+      data: campaigns.map(withCampaignAnalytics)
     });
   } catch (error) {
     next(error);
@@ -327,6 +412,7 @@ router.get('/', async (req, res, next) => {
 router.get('/:id', async (req, res, next) => {
   try {
     const campaign = await Campaign.findById(req.params.id)
+      .select('+recipientsLog.conversionOrderIds')
       .populate('createdBy', 'name email company organization plan')
       .populate('event', 'title slug city venue dates bannerImage');
 
@@ -345,7 +431,7 @@ router.get('/:id', async (req, res, next) => {
 
     res.status(200).json({
       success: true,
-      data: campaign
+      data: withCampaignAnalytics(campaign)
     });
   } catch (error) {
     next(error);
@@ -358,13 +444,20 @@ router.post('/', async (req, res, next) => {
   try {
     const { eventId, title, channel = 'email', subject, body } = req.body;
 
-    const trimmedTitle = (title || '').trim();
-    const trimmedBody = (body || '').trim();
+    const trimmedTitle = String(title || '').trim();
+    const trimmedBody = String(body || '').trim();
 
     if (!eventId || !trimmedTitle || !trimmedBody) {
       return res.status(400).json({
         success: false,
         error: 'Event ID, Campaign Title, and Body content are required'
+      });
+    }
+
+    if (channel !== 'email') {
+      return res.status(400).json({
+        success: false,
+        error: 'Only email campaigns are supported because delivery and engagement tracking require email events.'
       });
     }
 
@@ -392,18 +485,25 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    const recipientCount = await Visitor.countDocuments({ event: eventId });
+    const audienceTypes = ['leads', 'visitors', 'followers', 'interested'];
+    const audienceData = await getTargetAudienceForEvent({
+      organizerUser: req.user,
+      eventId,
+      audienceTypes
+    });
 
     const campaign = await Campaign.create({
       title: trimmedTitle,
       channel,
       status: 'draft',
       content: {
-        subject: channel === 'email' ? ((subject && String(subject).trim()) || trimmedTitle) : undefined,
+        subject: (subject && String(subject).trim()) || trimmedTitle,
         body: trimmedBody
       },
       targetAudience: {
-        recipientCount
+        audienceTypes,
+        recipientCount: audienceData.totalUnique,
+        breakdown: audienceData.breakdown
       },
       event: eventId,
       createdBy: req.user._id
@@ -419,7 +519,7 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// @desc    Broadcast / Send Campaign (Simulated broadcast fallback)
+// @desc    Send an email campaign and record recipient delivery/engagement events
 // @route   POST /api/campaigns/:id/send
 router.post('/:id/send', async (req, res, next) => {
   try {
@@ -428,46 +528,72 @@ router.post('/:id/send', async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Campaign not found' });
     }
 
-    if (campaign.status === 'completed') {
-      return res.status(400).json({ success: false, error: 'Campaign has already been sent' });
+    if (
+      req.user.role !== 'super_admin' &&
+      req.user.role !== 'admin' &&
+      campaign.createdBy.toString() !== req.user._id.toString()
+    ) {
+      return res.status(403).json({ success: false, error: 'Access denied' });
     }
 
-    const recipientCount = await Visitor.countDocuments({ event: campaign.event });
-
-    let openRate = 0.25;
-    let clickRate = 0.08;
-    let convRate = 0.02;
-
-    if (campaign.channel === 'whatsapp') {
-      openRate = 0.90;
-      clickRate = 0.20;
-      convRate = 0.05;
-    } else if (campaign.channel === 'sms') {
-      openRate = 0.70;
-      clickRate = 0.05;
-      convRate = 0.01;
+    if (campaign.status !== 'draft') {
+      return res.status(400).json({ success: false, error: 'Only draft campaigns can be sent.' });
+    }
+    if (campaign.channel !== 'email') {
+      return res.status(400).json({
+        success: false,
+        error: 'Only email campaigns can be sent because other delivery channels are not configured.'
+      });
     }
 
-    const sentCount = recipientCount || 12;
-    const openCount = Math.round(sentCount * openRate);
-    const clickCount = Math.round(openCount * (clickRate / openRate));
-    const conversionCount = Math.round(clickCount * (convRate / clickRate));
+    const event = await Event.findById(campaign.event);
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Campaign event not found' });
+    }
 
-    campaign.status = 'completed';
-    campaign.targetAudience.recipientCount = sentCount;
-    campaign.sentCount = sentCount;
-    campaign.deliveredCount = sentCount;
-    campaign.openCount = openCount;
-    campaign.clickCount = clickCount;
-    campaign.conversionCount = conversionCount;
-    campaign.sentAt = new Date();
+    const audienceTypes = campaign.targetAudience?.audienceTypes?.length
+      ? campaign.targetAudience.audienceTypes
+      : ['leads', 'visitors', 'followers', 'interested'];
+    const audienceData = await getTargetAudienceForEvent({
+      organizerUser: req.user,
+      eventId: campaign.event,
+      audienceTypes
+    });
 
-    await campaign.save();
+    if (!audienceData.recipients.length) {
+      return res.status(400).json({
+        success: false,
+        error: 'No eligible email recipients were found for this campaign.'
+      });
+    }
+
+    const sendingCampaign = await Campaign.findOneAndUpdate(
+      { _id: campaign._id, status: 'draft' },
+      {
+        $set: {
+          status: 'sending',
+          'targetAudience.recipientCount': audienceData.totalUnique,
+          'targetAudience.breakdown': audienceData.breakdown,
+          'targetAudience.audienceTypes': audienceTypes
+        }
+      },
+      { new: true }
+    );
+    if (!sendingCampaign) {
+      return res.status(409).json({ success: false, error: 'Campaign is no longer available to send.' });
+    }
+
+    const { campaign: campaignAnalytics, batchResult } = await dispatchAndPersistCampaign({
+      campaign: sendingCampaign,
+      event,
+      organizer: req.user,
+      recipients: audienceData.recipients
+    });
 
     res.status(200).json({
       success: true,
-      message: 'Campaign broadcast completed successfully',
-      campaign
+      message: `Campaign dispatch completed for ${batchResult.deliveredCount} recipients.`,
+      campaign: campaignAnalytics
     });
   } catch (error) {
     next(error);
@@ -488,6 +614,10 @@ router.delete('/:id', async (req, res, next) => {
       campaign.createdBy.toString() !== req.user._id.toString()
     ) {
       return res.status(403).json({ success: false, error: 'Access denied' });
+    }
+
+    if (campaign.status === 'sending') {
+      return res.status(409).json({ success: false, error: 'Campaign delivery is still in progress.' });
     }
 
     await Campaign.findByIdAndDelete(req.params.id);

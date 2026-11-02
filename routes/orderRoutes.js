@@ -4,10 +4,12 @@
  */
 
 import express from 'express';
+import { createHash } from 'crypto';
 import Ticket from '../models/Ticket.js';
 import Order from '../models/Order.js';
 import Payment from '../models/Payment.js';
 import Event from '../models/Event.js';
+import Campaign from '../models/Campaign.js';
 import Visitor from '../models/Visitor.js';
 import Lead from '../models/Lead.js';
 import Organization from '../models/Organization.js';
@@ -16,6 +18,49 @@ import { protect, authorize } from '../middlewares/auth.js';
 import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
 
 const router = express.Router();
+
+const recordCampaignConversion = async ({ campaignId, recipientToken, eventId, email, orderId }) => {
+  if (
+    !campaignId ||
+    !/^[a-f0-9]{64}$/i.test(recipientToken || '') ||
+    !/^[a-f\d]{24}$/i.test(String(campaignId))
+  ) {
+    return false;
+  }
+
+  const recipientMatch = {
+    trackingTokenHash: createHash('sha256').update(recipientToken).digest('hex'),
+    status: 'sent',
+    email: String(email).toLowerCase(),
+    conversionOrderIds: { $ne: String(orderId) }
+  };
+  const campaignMatch = { _id: campaignId, event: eventId };
+  const updateResult = await Campaign.updateOne(
+    {
+      ...campaignMatch,
+      recipientsLog: { $elemMatch: recipientMatch }
+    },
+    {
+      $addToSet: { 'recipientsLog.$.conversionOrderIds': String(orderId) },
+      $set: { 'recipientsLog.$.convertedAt': new Date() },
+      $inc: { conversionCount: 1 }
+    }
+  );
+
+  if (updateResult.modifiedCount === 1) return true;
+
+  return Boolean(await Campaign.exists({
+    ...campaignMatch,
+    recipientsLog: {
+      $elemMatch: {
+        trackingTokenHash: recipientMatch.trackingTokenHash,
+        status: recipientMatch.status,
+        email: recipientMatch.email,
+        conversionOrderIds: String(orderId)
+      }
+    }
+  }));
+};
 
 // ==========================================
 // PUBLIC BUYER TICKET PURCHASE CHECKOUT API
@@ -168,12 +213,40 @@ router.post('/checkout', async (req, res, next) => {
     }
     await ticket.save();
 
+    const campaignId = req.body.campaignAttribution?.campaignId ||
+      req.body.campaignId ||
+      req.query.ve_campaign;
+    const recipientToken = req.body.campaignAttribution?.recipientToken ||
+      req.body.campaignRecipientToken ||
+      req.query.ve_recipient;
+    let campaignAttributionTracked = false;
+    let campaignAttributionWarning = '';
+    if (campaignId || recipientToken) {
+      try {
+        campaignAttributionTracked = await recordCampaignConversion({
+          campaignId,
+          recipientToken,
+          eventId: targetEventId,
+          email: buyer.email,
+          orderId: order._id
+        });
+        if (!campaignAttributionTracked) {
+          campaignAttributionWarning = 'The order completed, but its campaign attribution could not be verified.';
+        }
+      } catch (trackingError) {
+        console.error('[OrderRoutes] Could not record campaign conversion:', trackingError.message);
+        campaignAttributionWarning = 'The order completed, but campaign analytics could not be updated.';
+      }
+    }
+
     res.status(201).json({
       success: true,
       message: 'Checkout completed successfully',
       orderNumber: order.orderNumber,
       totalPaid: totalAmount,
       status: order.status,
+      campaignAttributionTracked,
+      ...(campaignAttributionWarning ? { campaignAttributionWarning } : {}),
       visitorDetails: {
         name: visitor.name,
         qrCode: visitor.qrCode,

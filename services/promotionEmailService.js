@@ -6,15 +6,14 @@
 
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
+import { createHash, randomBytes } from 'crypto';
 dotenv.config();
 
-// Direct default credentials matching server environment dashboard
 const DEFAULT_PROMOTION_SMTP = {
   host: 'nexus.herosite.pro',
   port: 465,
   secure: true,
   user: 'promotion@client.visitexpo.in',
-  pass: 'nFMznvLC5^Abd*I+',
   from: '"VisitExpo Promotions" <promotion@client.visitexpo.in>'
 };
 
@@ -52,7 +51,14 @@ export const resolvePromotionFromAddress = (fromOverride) => {
   return `"${displayName}" <${user}>`;
 };
 
-// Create reusable promotional email transporter with direct code defaults
+export const getPromotionTrackingBaseUrl = () => {
+  const configuredUrl = process.env.PUBLIC_API_URL || process.env.API_URL;
+  const serverUrl = configuredUrl ||
+    (process.env.NODE_ENV === 'production' ? 'https://api.visitexpo.in' : 'http://localhost:5000');
+  return `${serverUrl.replace(/\/+$/, '').replace(/\/api$/i, '')}/api`;
+};
+
+// Create reusable promotional email transporter using server-side credentials.
 export const createPromotionTransporter = () => {
   const host = process.env.PROMOTION_SMTP_HOST || DEFAULT_PROMOTION_SMTP.host;
   const port = parseInt(process.env.PROMOTION_SMTP_PORT || DEFAULT_PROMOTION_SMTP.port, 10);
@@ -61,7 +67,10 @@ export const createPromotionTransporter = () => {
       ? String(process.env.PROMOTION_SMTP_SECURE).toLowerCase() === 'true'
       : DEFAULT_PROMOTION_SMTP.secure;
   const user = process.env.PROMOTION_SMTP_USER || DEFAULT_PROMOTION_SMTP.user;
-  const pass = process.env.PROMOTION_SMTP_PASS || DEFAULT_PROMOTION_SMTP.pass;
+  const pass = process.env.PROMOTION_SMTP_PASS;
+  if (!pass) {
+    throw new Error('PROMOTION_SMTP_PASS must be configured to send promotional email.');
+  }
 
   return nodemailer.createTransport({
     host,
@@ -117,7 +126,8 @@ export const buildPromotionEmailHtml = ({
   event,
   organizer,
   recipientName = 'Valued Attendee',
-  recipientType = 'visitor'
+  recipientType = 'visitor',
+  tracking
 }) => {
   const title = campaign.title || 'Special Exhibition Invitation';
   const headline = campaign.content?.headline || campaign.content?.subject || title;
@@ -135,6 +145,12 @@ export const buildPromotionEmailHtml = ({
   const defaultCtaUrl = event?.slug ? `${wpUrl}/event/${event.slug}` : `${clientUrl}/events`;
   const ctaUrl = campaign.content?.ctaUrl || defaultCtaUrl;
   const ctaText = campaign.content?.ctaText || 'Explore Exhibition Passes';
+  const trackedCtaUrl = tracking
+    ? `${tracking.baseUrl}/campaigns/track/click/${campaign._id}/${tracking.token}`
+    : ctaUrl;
+  const openPixelUrl = tracking
+    ? `${tracking.baseUrl}/campaigns/track/open/${campaign._id}/${tracking.token}`
+    : '';
 
   // Format paragraphs from bodyText
   const formattedBody = bodyText
@@ -231,7 +247,7 @@ export const buildPromotionEmailHtml = ({
 
         <!-- Call to Action -->
         <div class="btn-wrap">
-          <a href="${ctaUrl}" class="cta-button" target="_blank">${ctaText} &rarr;</a>
+          <a href="${trackedCtaUrl}" class="cta-button" target="_blank">${ctaText} &rarr;</a>
         </div>
 
         <!-- Organizer Profile Box -->
@@ -264,6 +280,7 @@ export const buildPromotionEmailHtml = ({
       </div>
     </div>
   </div>
+  ${openPixelUrl ? `<img src="${openPixelUrl}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0" />` : ''}
 </body>
 </html>
   `.trim();
@@ -298,7 +315,15 @@ export const sendPromotionEmail = async ({
     };
 
     const info = await transporter.sendMail(mailOptions);
-    console.log(`[PromotionEmail] Sent successfully to ${to}. MessageId: ${info.messageId}`);
+    const accepted = Array.isArray(info.accepted) &&
+      info.accepted.some((address) => String(address).toLowerCase() === String(to).toLowerCase());
+    if (!accepted) {
+      const error = `SMTP did not accept ${to} as a recipient.`;
+      console.error(`[PromotionEmail] ${error}`);
+      return { success: false, error };
+    }
+
+    console.log(`[PromotionEmail] Accepted for delivery to ${to}. MessageId: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error(`[PromotionEmail] Error sending to ${to}:`, error.message);
@@ -314,7 +339,9 @@ export const dispatchCampaignBatch = async ({
   event,
   organizer,
   recipients = [],
-  delayMs = 300
+  delayMs = 300,
+  trackingBaseUrl = getPromotionTrackingBaseUrl(),
+  onRecipientResult
 }) => {
   const recipientsLog = [];
   let deliveredCount = 0;
@@ -324,12 +351,17 @@ export const dispatchCampaignBatch = async ({
 
   for (let i = 0; i < recipients.length; i++) {
     const r = recipients[i];
+    const trackingToken = randomBytes(32).toString('hex');
     const html = buildPromotionEmailHtml({
       campaign,
       event,
       organizer,
       recipientName: r.name || 'Valued Attendee',
-      recipientType: r.audienceType || 'visitor'
+      recipientType: r.audienceType || 'visitor',
+      tracking: {
+        baseUrl: trackingBaseUrl,
+        token: trackingToken
+      }
     });
 
     const replyTo = organizer?.email || process.env.PROMOTION_SMTP_USER || 'promotion@client.visitexpo.in';
@@ -343,14 +375,16 @@ export const dispatchCampaignBatch = async ({
 
     if (sendRes.success) {
       deliveredCount++;
-      recipientsLog.push({
+      const recipientLog = {
         email: r.email,
         name: r.name || '',
         audienceType: r.audienceType || 'visitor',
         status: 'sent',
         error: null,
         sentAt: new Date()
-      });
+      };
+      recipientLog.trackingTokenHash = createHash('sha256').update(trackingToken).digest('hex');
+      recipientsLog.push(recipientLog);
     } else {
       failedCount++;
       recipientsLog.push({
@@ -361,6 +395,10 @@ export const dispatchCampaignBatch = async ({
         error: sendRes.error || 'Delivery rejected',
         sentAt: new Date()
       });
+    }
+
+    if (onRecipientResult) {
+      await onRecipientResult(recipientsLog[recipientsLog.length - 1]);
     }
 
     // Gentle delay to respect cPanel SMTP connections
@@ -379,6 +417,7 @@ export const dispatchCampaignBatch = async ({
 
 export default {
   createPromotionTransporter,
+  getPromotionTrackingBaseUrl,
   verifyPromotionSMTP,
   buildPromotionEmailHtml,
   sendPromotionEmail,
