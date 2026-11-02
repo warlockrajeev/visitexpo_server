@@ -176,8 +176,14 @@ router.get('/:id', async (req, res, next) => {
     }
 
     // Access check: super admin or ticket owner
-    if (req.user.role !== 'super_admin' && ticket.user._id.toString() !== userId.toString()) {
+    const ticketOwnerId = ticket.user?._id || ticket.user;
+    if (req.user.role !== 'super_admin' && String(ticketOwnerId) !== String(userId)) {
       return res.status(403).json({ success: false, error: 'Not authorized to view this ticket' });
+    }
+
+    if (String(ticketOwnerId) === String(userId) && ticket.unreadByReporter > 0) {
+      ticket.unreadByReporter = 0;
+      await ticket.save();
     }
 
     res.status(200).json({
@@ -232,6 +238,9 @@ router.put('/:id', async (req, res, next) => {
     }
 
     if (priority) {
+      if (!['low', 'medium', 'high', 'urgent'].includes(priority)) {
+        return res.status(400).json({ success: false, error: 'Select a valid ticket priority.' });
+      }
       ticket.priority = priority;
     }
 
@@ -240,10 +249,16 @@ router.put('/:id', async (req, res, next) => {
     }
 
     if (status) {
+      if (!['open', 'in_progress', 'resolved', 'closed'].includes(status)) {
+        return res.status(400).json({ success: false, error: 'Select a valid ticket status.' });
+      }
       ticket.status = status;
       if (status === 'resolved' || status === 'closed') {
         ticket.resolvedAt = new Date();
         ticket.resolvedBy = userId;
+      } else {
+        ticket.resolvedAt = undefined;
+        ticket.resolvedBy = undefined;
       }
     }
 
@@ -307,6 +322,12 @@ router.post('/:id/responses', async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Support ticket not found' });
     }
 
+    const isOwner = ticket.user?.toString() === userId.toString() ||
+      ticket.reporterEmail?.toLowerCase() === req.user.email?.toLowerCase();
+    if (!isOwner && !['super_admin', 'admin'].includes(req.user.role)) {
+      return res.status(403).json({ success: false, error: 'Not authorized to reply to this ticket' });
+    }
+
     // Add response
     ticket.responses.push({
       sender: userId,
@@ -316,8 +337,15 @@ router.post('/:id/responses', async (req, res, next) => {
       createdAt: new Date()
     });
 
+    const isAdminReply = ['super_admin', 'admin'].includes(req.user.role);
+    if (isAdminReply) {
+      ticket.unreadByReporter = (ticket.unreadByReporter || 0) + 1;
+    } else {
+      ticket.unreadByReporter = 0;
+    }
+
     // If admin responds and ticket was 'open', set status to 'in_progress'
-    if (req.user.role === 'super_admin' && ticket.status === 'open') {
+    if (isAdminReply && ticket.status === 'open') {
       ticket.status = 'in_progress';
     }
 

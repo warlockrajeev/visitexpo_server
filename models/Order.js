@@ -39,7 +39,14 @@ const OrderSchema = new mongoose.Schema(
     buyer: {
       name: { type: String, required: true },
       email: { type: String, required: true },
-      phone: String
+      phone: String,
+      company: String,
+      designation: String,
+      country: String
+    },
+    entryQrCode: {
+      type: String,
+      default: ''
     },
     items: [OrderItemSchema],
     totalAmount: {

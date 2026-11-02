@@ -27,6 +27,49 @@ const TicketSchema = new mongoose.Schema(
       type: String,
       default: 'INR'
     },
+    salesStart: {
+      type: Date,
+      default: null
+    },
+    salesEnd: {
+      type: Date,
+      default: null
+    },
+    minQuantity: {
+      type: Number,
+      default: 1,
+      min: 1
+    },
+    maxQuantity: {
+      type: Number,
+      default: 10,
+      min: -1
+    },
+    perUserLimit: {
+      type: Number,
+      default: 10,
+      min: -1
+    },
+    benefits: {
+      type: [String],
+      default: []
+    },
+    accessDetails: {
+      type: String,
+      default: '',
+      maxlength: 1000
+    },
+    visibility: {
+      type: String,
+      enum: ['public', 'private'],
+      default: 'public',
+      index: true
+    },
+    refundPolicy: {
+      type: String,
+      default: '',
+      maxlength: 1000
+    },
     capacity: {
       type: Number,
       required: [true, 'Ticket capacity is required'],

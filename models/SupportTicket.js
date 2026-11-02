@@ -60,6 +60,11 @@ const SupportTicketSchema = new mongoose.Schema(
       default: 'open',
       index: true
     },
+    unreadByReporter: {
+      type: Number,
+      default: 0,
+      min: 0
+    },
     responses: [
       {
         sender: {

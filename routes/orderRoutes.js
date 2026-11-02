@@ -82,6 +82,60 @@ router.post('/checkout', async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Ticket tier not found' });
     }
 
+    const requestedQuantity = Number(quantity);
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1) {
+      return res.status(400).json({ success: false, error: 'Ticket quantity must be a positive whole number.' });
+    }
+    if (ticket.status === 'paused') {
+      return res.status(409).json({ success: false, error: 'This ticket tier is inactive and cannot be purchased.' });
+    }
+    if (
+      ticket.status === 'sold_out' ||
+      (ticket.capacity !== -1 && ticket.soldCount >= ticket.capacity)
+    ) {
+      return res.status(409).json({ success: false, error: 'This ticket tier is sold out.' });
+    }
+    if (requestedQuantity < Number(ticket.minQuantity || 1)) {
+      return res.status(400).json({
+        success: false,
+        error: `The minimum quantity for this ticket tier is ${ticket.minQuantity || 1}.`
+      });
+    }
+    if (Number(ticket.maxQuantity) !== -1 && requestedQuantity > Number(ticket.maxQuantity || 10)) {
+      return res.status(400).json({
+        success: false,
+        error: `The maximum quantity per order for this ticket tier is ${ticket.maxQuantity || 10}.`
+      });
+    }
+    const now = new Date();
+    if (ticket.salesStart && now < ticket.salesStart) {
+      return res.status(409).json({ success: false, error: 'Ticket sales have not started yet.' });
+    }
+    if (ticket.salesEnd && now >= ticket.salesEnd) {
+      return res.status(409).json({ success: false, error: 'Ticket sales for this tier have ended.' });
+    }
+    if (Number(ticket.perUserLimit) !== -1) {
+      const buyerEmail = String(buyer.email).trim().toLowerCase();
+      const previousOrders = await Order.find({
+        'buyer.email': buyerEmail,
+        'items.ticket': ticket._id,
+        status: { $in: ['pending', 'completed'] }
+      }).select('items').lean();
+      const previouslyPurchased = previousOrders.reduce((sum, order) => (
+        sum + order.items.reduce((ticketQuantity, item) => (
+          String(item.ticket) === String(ticket._id)
+            ? ticketQuantity + Number(item.quantity || 0)
+            : ticketQuantity
+        ), 0)
+      ), 0);
+      if (previouslyPurchased + requestedQuantity > Number(ticket.perUserLimit)) {
+        return res.status(409).json({
+          success: false,
+          error: `This ticket tier has a limit of ${ticket.perUserLimit} ticket(s) per buyer. You have already purchased ${previouslyPurchased}.`
+        });
+      }
+    }
+
     // Determine target event
     const targetEventId = eventId || ticket.event;
     if (!targetEventId) {
@@ -94,8 +148,11 @@ router.post('/checkout', async (req, res, next) => {
     }
 
     // Check capacity if limited
-    if (ticket.capacity !== -1 && ticket.soldCount + quantity > ticket.capacity) {
-      return res.status(400).json({ success: false, error: 'Selected ticket tier has insufficient capacity remaining' });
+    if (ticket.capacity !== -1 && ticket.soldCount + requestedQuantity > ticket.capacity) {
+      return res.status(409).json({
+        success: false,
+        error: `Only ${Math.max(0, ticket.capacity - ticket.soldCount)} ticket(s) remain in this tier.`
+      });
     }
 
     // Resolve organizer if available
@@ -169,14 +226,18 @@ router.post('/checkout', async (req, res, next) => {
       buyer: {
         name: buyer.name,
         email: buyer.email.toLowerCase(),
-        phone: buyer.phone || '9999900000'
+        phone: buyer.phone || '9999900000',
+        company: buyer.company || '',
+        designation: buyer.designation || '',
+        country: buyer.country || ''
       },
+      entryQrCode: visitor.qrCode || '',
       items: [
         {
           ticket: ticketId,
           title: ticket.title,
           price: ticket.price,
-          quantity
+          quantity: requestedQuantity
         }
       ],
       totalAmount,
@@ -207,7 +268,7 @@ router.post('/checkout', async (req, res, next) => {
     }
 
     // 5. Update Ticket Sales Metrics
-    ticket.soldCount += quantity;
+    ticket.soldCount += requestedQuantity;
     if (ticket.capacity !== -1 && ticket.soldCount >= ticket.capacity) {
       ticket.status = 'sold_out';
     }
@@ -283,11 +344,29 @@ router.get('/', async (req, res, next) => {
     const [docs, total] = await Promise.all([
       Order.find(query)
         .populate('items.ticket', 'title type')
+        .populate({
+          path: 'event',
+          select: 'title startDate endDate venue city country timings organizer',
+          populate: { path: 'organizer', select: 'name' }
+        })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pgLimit),
       Order.countDocuments(query)
     ]);
+
+    const buyerEmails = [...new Set(docs.map(order => order.buyer?.email?.toLowerCase()).filter(Boolean))];
+    const visitors = buyerEmails.length
+      ? await Visitor.find({ event: eventId, email: { $in: buyerEmails } }).select('email qrCode').lean()
+      : [];
+    const entryCodeByEmail = new Map(visitors.map(visitor => [visitor.email.toLowerCase(), visitor.qrCode]));
+    const orderDocs = docs.map(order => {
+      const orderData = order.toObject();
+      orderData.entryQrCode = orderData.entryQrCode ||
+        entryCodeByEmail.get(orderData.buyer?.email?.toLowerCase()) ||
+        '';
+      return orderData;
+    });
 
     // Sum revenue for KPIs
     const completedOrders = await Order.find({ event: eventId, status: 'completed' });
@@ -296,7 +375,7 @@ router.get('/', async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: {
-        docs,
+        docs: orderDocs,
         total,
         totalRevenue,
         page: pgNum,
