@@ -20,6 +20,50 @@ import {
 import campaignTrackingRoutes from './campaignTrackingRoutes.js';
 
 const router = express.Router();
+const ALLOWED_AUDIENCE_TYPES = ['leads', 'visitors', 'followers', 'interested'];
+const ALLOWED_TEMPLATE_TYPES = ['modern', 'invitation', 'showcase', 'earlybird', 'announcement', 'custom'];
+
+const isValidCampaignUrl = (value) => {
+  if (!value) return true;
+  try {
+    const url = new URL(value);
+    return ['http:', 'https:'].includes(url.protocol);
+  } catch {
+    return false;
+  }
+};
+
+const validateCampaignDraft = ({
+  title = '',
+  subject = '',
+  body = '',
+  ctaText = '',
+  preheader = '',
+  headline = '',
+  ctaUrl = '',
+  bannerUrl = ''
+}) => {
+  if (!title || title.length < 3 || title.length > 100 || !/[a-zA-Z0-9]/.test(title)) {
+    return 'Campaign title must be 3–100 characters and contain letters or numbers.';
+  }
+  if (subject && (subject.length < 3 || subject.length > 150 || !/[a-zA-Z0-9]/.test(subject))) {
+    return 'Subject line must be 3–150 characters and contain letters or numbers.';
+  }
+  if (!body || body.length < 10 || body.length > 3000 || !/[a-zA-Z0-9]/.test(body)) {
+    return 'Message body must be 10–3,000 characters and contain readable text.';
+  }
+  if (/<[a-z][\s\S]*>/i.test(body)) {
+    return 'HTML tags are not allowed in the message body.';
+  }
+  if (preheader.length > 150 || headline.length > 150 || ctaText.length > 80) {
+    return 'Preview text and headline are limited to 150 characters; button text is limited to 80 characters.';
+  }
+  if (ctaUrl.length > 2048 || bannerUrl.length > 2048 ||
+      !isValidCampaignUrl(ctaUrl) || !isValidCampaignUrl(bannerUrl)) {
+    return 'Button and banner URLs must be valid http or https URLs under 2,048 characters.';
+  }
+  return null;
+};
 
 const withCampaignAnalytics = (campaign) => {
   const data = campaign.toObject ? campaign.toObject() : campaign;
@@ -442,10 +486,29 @@ router.get('/:id', async (req, res, next) => {
 // @route   POST /api/campaigns
 router.post('/', async (req, res, next) => {
   try {
-    const { eventId, title, channel = 'email', subject, body } = req.body;
+    const {
+      eventId,
+      title,
+      channel = 'email',
+      subject,
+      preheader = '',
+      headline = '',
+      body,
+      ctaText = 'View Exhibition Passes',
+      ctaUrl = '',
+      bannerUrl = '',
+      templateType = 'modern',
+      audienceTypes: requestedAudienceTypes
+    } = req.body;
 
     const trimmedTitle = String(title || '').trim();
     const trimmedBody = String(body || '').trim();
+    const trimmedSubject = String(subject || '').trim();
+    const trimmedPreheader = String(preheader || '').trim();
+    const trimmedHeadline = String(headline || '').trim();
+    const trimmedCtaText = String(ctaText || '').trim();
+    const trimmedCtaUrl = String(ctaUrl || '').trim();
+    const trimmedBannerUrl = String(bannerUrl || '').trim();
 
     if (!eventId || !trimmedTitle || !trimmedBody) {
       return res.status(400).json({
@@ -461,31 +524,32 @@ router.post('/', async (req, res, next) => {
       });
     }
 
-    if (trimmedTitle.length < 3 || !/[a-zA-Z0-9]/.test(trimmedTitle)) {
+    const contentError = validateCampaignDraft({
+      title: trimmedTitle,
+      subject: trimmedSubject,
+      body: trimmedBody,
+      ctaText: trimmedCtaText,
+      preheader: trimmedPreheader,
+      headline: trimmedHeadline,
+      ctaUrl: trimmedCtaUrl,
+      bannerUrl: trimmedBannerUrl
+    });
+    if (contentError) {
+      return res.status(400).json({ success: false, error: contentError });
+    }
+    if (!ALLOWED_TEMPLATE_TYPES.includes(templateType)) {
+      return res.status(400).json({ success: false, error: 'Select a valid email template.' });
+    }
+
+    const audienceTypes = Array.isArray(requestedAudienceTypes)
+      ? [...new Set(requestedAudienceTypes.map((type) => String(type).trim().toLowerCase()))]
+      : ALLOWED_AUDIENCE_TYPES;
+    if (!audienceTypes.length || audienceTypes.some((type) => !ALLOWED_AUDIENCE_TYPES.includes(type))) {
       return res.status(400).json({
         success: false,
-        error: 'Campaign Title must be at least 3 characters and contain letters or numbers'
+        error: 'Select at least one valid recipient audience.'
       });
     }
-
-    if (channel === 'email' && subject) {
-      const trimmedSubject = String(subject).trim();
-      if (trimmedSubject && (trimmedSubject.length < 3 || !/[a-zA-Z0-9]/.test(trimmedSubject))) {
-        return res.status(400).json({
-          success: false,
-          error: 'Subject Line must be at least 3 characters and contain letters or numbers'
-        });
-      }
-    }
-
-    if (trimmedBody.length < 10 || !/[a-zA-Z0-9]/.test(trimmedBody)) {
-      return res.status(400).json({
-        success: false,
-        error: 'Message Body must be at least 10 characters and contain readable text'
-      });
-    }
-
-    const audienceTypes = ['leads', 'visitors', 'followers', 'interested'];
     const audienceData = await getTargetAudienceForEvent({
       organizerUser: req.user,
       eventId,
@@ -497,8 +561,14 @@ router.post('/', async (req, res, next) => {
       channel,
       status: 'draft',
       content: {
-        subject: (subject && String(subject).trim()) || trimmedTitle,
-        body: trimmedBody
+        subject: trimmedSubject || trimmedTitle,
+        preheader: trimmedPreheader,
+        headline: trimmedHeadline,
+        body: trimmedBody,
+        ctaText: trimmedCtaText || 'View Exhibition Passes',
+        ctaUrl: trimmedCtaUrl,
+        bannerUrl: trimmedBannerUrl,
+        templateType
       },
       targetAudience: {
         audienceTypes,
@@ -513,6 +583,110 @@ router.post('/', async (req, res, next) => {
       success: true,
       message: 'Campaign draft created successfully',
       campaign
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Update campaign content and audience while it is still a draft
+// @route   PATCH /api/campaigns/:id
+router.patch('/:id', async (req, res, next) => {
+  try {
+    const ownerFilter = req.user.role === 'super_admin' || req.user.role === 'admin'
+      ? { _id: req.params.id }
+      : { _id: req.params.id, createdBy: req.user._id };
+    const campaign = await Campaign.findOne(ownerFilter);
+    if (!campaign) {
+      return res.status(404).json({ success: false, error: 'Campaign not found.' });
+    }
+    if (campaign.status !== 'draft') {
+      return res.status(409).json({
+        success: false,
+        error: 'Only draft campaigns can be edited. Sent campaign content is locked.'
+      });
+    }
+    if (req.body.eventId && String(req.body.eventId) !== String(campaign.event)) {
+      return res.status(400).json({
+        success: false,
+        error: 'A draft can only be edited from its associated event.'
+      });
+    }
+
+    const title = String(req.body.title || '').trim();
+    const subject = String(req.body.subject || '').trim();
+    const preheader = String(req.body.preheader || '').trim();
+    const headline = String(req.body.headline || '').trim();
+    const body = String(req.body.body || '').trim();
+    const ctaText = String(req.body.ctaText || '').trim();
+    const ctaUrl = String(req.body.ctaUrl || '').trim();
+    const bannerUrl = String(req.body.bannerUrl || '').trim();
+    const templateType = String(req.body.templateType || campaign.content?.templateType || 'modern');
+    const contentError = validateCampaignDraft({
+      title,
+      subject,
+      preheader,
+      headline,
+      body,
+      ctaText,
+      ctaUrl,
+      bannerUrl
+    });
+    if (contentError) {
+      return res.status(400).json({ success: false, error: contentError });
+    }
+    if (!ALLOWED_TEMPLATE_TYPES.includes(templateType)) {
+      return res.status(400).json({ success: false, error: 'Select a valid email template.' });
+    }
+
+    const audienceTypes = Array.isArray(req.body.audienceTypes)
+      ? [...new Set(req.body.audienceTypes.map((type) => String(type).trim().toLowerCase()))]
+      : campaign.targetAudience?.audienceTypes?.length
+        ? campaign.targetAudience.audienceTypes
+        : ALLOWED_AUDIENCE_TYPES;
+    if (!audienceTypes.length || audienceTypes.some((type) => !ALLOWED_AUDIENCE_TYPES.includes(type))) {
+      return res.status(400).json({
+        success: false,
+        error: 'Select at least one valid recipient audience.'
+      });
+    }
+
+    const audienceData = await getTargetAudienceForEvent({
+      organizerUser: req.user,
+      eventId: campaign.event,
+      audienceTypes
+    });
+    const updatedCampaign = await Campaign.findOneAndUpdate(
+      { ...ownerFilter, status: 'draft' },
+      {
+        $set: {
+          title,
+          'content.subject': subject || title,
+          'content.preheader': preheader,
+          'content.headline': headline,
+          'content.body': body,
+          'content.ctaText': ctaText || 'View Exhibition Passes',
+          'content.ctaUrl': ctaUrl,
+          'content.bannerUrl': bannerUrl,
+          'content.templateType': templateType,
+          'targetAudience.audienceTypes': audienceTypes,
+          'targetAudience.recipientCount': audienceData.totalUnique,
+          'targetAudience.breakdown': audienceData.breakdown
+        }
+      },
+      { new: true, runValidators: true }
+    );
+    if (!updatedCampaign) {
+      return res.status(409).json({
+        success: false,
+        error: 'Campaign is no longer a draft and cannot be edited.'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Campaign draft updated successfully.',
+      campaign: withCampaignAnalytics(updatedCampaign)
     });
   } catch (error) {
     next(error);

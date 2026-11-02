@@ -9,6 +9,7 @@ import app from './app.js';
 import connectDB from './config/db.js';
 import CalendarService from './services/CalendarService.js';
 import WordPressDirectorySyncService from './services/WordPressDirectorySyncService.js';
+import { sendExhibitorEnquiryReminders } from './services/exhibitorEnquiryReminderService.js';
 
 const PORT = process.env.PORT || 5000;
 
@@ -33,6 +34,14 @@ const runScheduledEventReminders = async () => {
   }
 };
 
+const runExhibitorEnquiryReminders = async () => {
+  try {
+    await sendExhibitorEnquiryReminders();
+  } catch (err) {
+    console.error('[ExhibitorEnquiryReminder] Scheduled reminder error:', err.message);
+  }
+};
+
 // Start Server
 const server = app.listen(PORT, () => {
   console.log(`VisitExpo API Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
@@ -44,6 +53,9 @@ const server = app.listen(PORT, () => {
   setInterval(runScheduledEventReminders, 30 * 60 * 1000);
   // Initial check 10 seconds after boot
   setTimeout(runScheduledEventReminders, 10 * 1000);
+  // Follow up with exhibitors after four business days without a response
+  setInterval(runExhibitorEnquiryReminders, 60 * 60 * 1000);
+  setTimeout(runExhibitorEnquiryReminders, 15 * 1000);
 });
 
 // Handle unhandled promise rejections (e.g. lost db connection)

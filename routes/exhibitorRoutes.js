@@ -13,8 +13,10 @@ import ContactMessage from '../models/ContactMessage.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { CURATED_DISCOVERY_EXHIBITORS } from '../data/curatedDiscoveryExhibitors.js';
+import exhibitorEnquiryRoutes, { createExhibitorEnquiry } from './exhibitorEnquiryRoutes.js';
 
 const router = express.Router();
+router.use('/enquiries', exhibitorEnquiryRoutes);
 
 // Optional JWT authentication helper for discovery endpoints
 const optionalAuth = (req, res, next) => {
@@ -599,6 +601,7 @@ router.get('/discovery', optionalAuth, async (req, res, next) => {
 
 // @desc    Connect & Send B2B Inquiry to an Exhibitor (Charges 10 Credits)
 // @route   POST /api/exhibitors/inquiry
+router.post('/inquiry', protect, authorize('organizer', 'event_manager'), createExhibitorEnquiry);
 router.post('/inquiry', optionalAuth, async (req, res, next) => {
   try {
     const {

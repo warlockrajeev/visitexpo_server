@@ -49,8 +49,21 @@ export const sendEmail = async ({ to, subject, html, text }) => {
     };
 
     const info = await transporter.sendMail(mailOptions);
+    if (Array.isArray(info.accepted) && info.accepted.length === 0) {
+      return {
+        success: false,
+        error: 'The mail server did not accept any recipients.',
+        accepted: info.accepted,
+        rejected: info.rejected || []
+      };
+    }
     console.log(`[EmailService] Email successfully sent to ${to}. MessageId: ${info.messageId}`);
-    return { success: true, messageId: info.messageId };
+    return {
+      success: true,
+      messageId: info.messageId,
+      accepted: info.accepted,
+      rejected: info.rejected || []
+    };
   } catch (error) {
     console.error(`[EmailService] Error sending email to ${to}:`, error.message);
     return { success: false, error: error.message };

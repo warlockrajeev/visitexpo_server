@@ -17,6 +17,22 @@ const DEFAULT_PROMOTION_SMTP = {
   from: '"VisitExpo Promotions" <promotion@client.visitexpo.in>'
 };
 
+const escapeHtml = (value) => String(value || '').replace(/[&<>"']/g, (character) => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;'
+})[character]);
+
+const isHttpUrl = (value) => {
+  try {
+    return ['http:', 'https:'].includes(new URL(value).protocol);
+  } catch {
+    return false;
+  }
+};
+
 /**
  * Resolve standard RFC 5322 "from" address from environment or parameters.
  * Guarantees standard RFC format: "VisitExpo Promotions" <promotion@client.visitexpo.in>
@@ -129,22 +145,27 @@ export const buildPromotionEmailHtml = ({
   recipientType = 'visitor',
   tracking
 }) => {
-  const title = campaign.title || 'Special Exhibition Invitation';
-  const headline = campaign.content?.headline || campaign.content?.subject || title;
+  const rawTitle = campaign.title || 'Special Exhibition Invitation';
+  const title = escapeHtml(rawTitle);
+  const headline = escapeHtml(campaign.content?.headline || campaign.content?.subject || rawTitle);
   const bodyText = campaign.content?.body || '';
-  const preheader = campaign.content?.preheader || `Official update from ${organizer?.name || 'the event organizer'}`;
-  const bannerUrl =
-    campaign.content?.bannerUrl ||
+  const preheader = escapeHtml(campaign.content?.preheader || `Official update from ${organizer?.name || 'the event organizer'}`);
+  const defaultBannerUrl =
     event?.bannerImage ||
     event?.featuredImage ||
     event?.logo ||
     'https://images.unsplash.com/photo-1540575467063-178a50c2df87?w=1200&auto=format&fit=crop&q=80';
+  const requestedBannerUrl = campaign.content?.bannerUrl;
+  const bannerUrl = requestedBannerUrl && isHttpUrl(requestedBannerUrl)
+    ? requestedBannerUrl
+    : defaultBannerUrl;
 
   const clientUrl = process.env.CLIENT_URL || 'https://client.visitexpo.in';
   const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
   const defaultCtaUrl = event?.slug ? `${wpUrl}/event/${event.slug}` : `${clientUrl}/events`;
-  const ctaUrl = campaign.content?.ctaUrl || defaultCtaUrl;
-  const ctaText = campaign.content?.ctaText || 'Explore Exhibition Passes';
+  const requestedCtaUrl = campaign.content?.ctaUrl;
+  const ctaUrl = requestedCtaUrl && isHttpUrl(requestedCtaUrl) ? requestedCtaUrl : defaultCtaUrl;
+  const ctaText = escapeHtml(campaign.content?.ctaText || 'Explore Exhibition Passes');
   const trackedCtaUrl = tracking
     ? `${tracking.baseUrl}/campaigns/track/click/${campaign._id}/${tracking.token}`
     : ctaUrl;
@@ -156,9 +177,8 @@ export const buildPromotionEmailHtml = ({
   const formattedBody = bodyText
     .split('\n\n')
     .filter(p => p.trim())
-    .map(p => `<p style="margin: 0 0 16px 0; font-size: 15px; line-height: 1.7; color: #334155;">${p.replace(/\n/g, '<br>')}</p>`)
+    .map(p => `<p style="margin: 0 0 16px 0; font-size: 15px; line-height: 1.7; color: #334155;">${escapeHtml(p).replace(/\n/g, '<br>')}</p>`)
     .join('');
-
   const audienceBadgeText = {
     lead: 'VIP Invited Lead',
     visitor: 'Registered Trade Visitor',
@@ -216,16 +236,16 @@ export const buildPromotionEmailHtml = ({
       <div class="header-bar">
         <div style="overflow: hidden;">
           <span class="brand-tag">⚡ VisitExpo Verified Promotion</span>
-          <span class="audience-tag">${audienceBadgeText}</span>
+          <span class="audience-tag">${escapeHtml(audienceBadgeText)}</span>
         </div>
       </div>
 
       <!-- Banner if present -->
-      ${bannerUrl ? `<img src="${bannerUrl}" alt="${event?.title || title}" class="hero-banner" />` : ''}
+      ${bannerUrl ? `<img src="${escapeHtml(bannerUrl)}" alt="${escapeHtml(event?.title || rawTitle)}" class="hero-banner" />` : ''}
 
       <!-- Main Body -->
       <div class="main-body">
-        <div class="greeting">Hello ${recipientName || 'Trade Visitor'},</div>
+        <div class="greeting">Hello ${escapeHtml(recipientName || 'Trade Visitor')},</div>
         <h1 class="headline">${headline}</h1>
 
         <!-- Custom Content Body -->
@@ -236,26 +256,26 @@ export const buildPromotionEmailHtml = ({
         <!-- Event Summary Box -->
         ${event?.title ? `
         <div class="event-card">
-          <h3 class="event-title">🏛️ ${event.title}</h3>
+          <h3 class="event-title">🏛️ ${escapeHtml(event.title)}</h3>
           <div class="event-meta">
-            <div>📍 <strong>Venue:</strong> ${eventVenue}, ${eventCity}</div>
-            <div>📅 <strong>Dates:</strong> ${eventDates}</div>
-            ${event.category ? `<div>🏷️ <strong>Category:</strong> ${event.category}</div>` : ''}
+            <div>📍 <strong>Venue:</strong> ${escapeHtml(eventVenue)}, ${escapeHtml(eventCity)}</div>
+            <div>📅 <strong>Dates:</strong> ${escapeHtml(eventDates)}</div>
+            ${event.category ? `<div>🏷️ <strong>Category:</strong> ${escapeHtml(event.category)}</div>` : ''}
           </div>
         </div>
         ` : ''}
 
         <!-- Call to Action -->
         <div class="btn-wrap">
-          <a href="${trackedCtaUrl}" class="cta-button" target="_blank">${ctaText} &rarr;</a>
+          <a href="${escapeHtml(trackedCtaUrl)}" class="cta-button" target="_blank" rel="noopener noreferrer">${ctaText} &rarr;</a>
         </div>
 
         <!-- Organizer Profile Box -->
         <div class="organizer-box">
-          <div class="organizer-name">${organizer?.name || 'Event Management Team'}</div>
+          <div class="organizer-name">${escapeHtml(organizer?.name || 'Event Management Team')}</div>
           <div class="organizer-role">
-            Official Organizer · ${organizer?.organization?.name || organizer?.company || 'Verified Expo Partner'}
-            ${organizer?.email ? ` · Contact: ${organizer.email}` : ''}
+            Official Organizer · ${escapeHtml(organizer?.organization?.name || organizer?.company || 'Verified Expo Partner')}
+            ${organizer?.email ? ` · Contact: ${escapeHtml(organizer.email)}` : ''}
           </div>
         </div>
       </div>
