@@ -6,9 +6,44 @@
 
 import express from 'express';
 import Review from '../models/Review.js';
+import Venue from '../models/Venue.js';
 import { protect, authorize } from '../middlewares/auth.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 
 const router = express.Router();
+
+function optionalProtect(req, _res, next) {
+  const token =
+    (req.headers.authorization?.startsWith('Bearer ')
+      ? req.headers.authorization.slice(7)
+      : null) ||
+    req.cookies?.token;
+  if (token) {
+    try {
+      const decoded = verifyAccessToken(token);
+      if (decoded) req.user = { id: decoded.id, _id: decoded.id, email: decoded.email };
+    } catch (error) {
+      // Public review browsing remains available if an optional session has expired.
+    }
+  }
+  next();
+}
+
+async function getVenueReviewAggregate(venueSlug) {
+  const [aggregate] = await Review.aggregate([
+    {
+      $match: {
+        venueSlug,
+        status: { $in: ['approved', 'featured'] }
+      }
+    },
+    { $group: { _id: null, count: { $sum: 1 }, averageRating: { $avg: '$rating' } } }
+  ]);
+  return {
+    count: aggregate?.count || 0,
+    averageRating: aggregate?.averageRating || 0
+  };
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // PUBLIC ROUTES
@@ -172,6 +207,183 @@ router.get('/event/:slug', async (req, res) => {
   } catch (err) {
     console.error('Error fetching event reviews:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch event reviews.' });
+  }
+});
+
+/**
+ * GET /api/reviews/venue/:slug
+ * Fetch published reviews and their aggregate rating for a venue.
+ */
+router.get('/venue/:slug', optionalProtect, async (req, res) => {
+  try {
+    const venueSlug = String(req.params.slug || '').toLowerCase().trim();
+    const filter = { venueSlug, status: { $in: ['approved', 'featured'] } };
+    const [reviews, aggregate] = await Promise.all([
+      Review.find(filter).sort({ createdAt: -1 }).limit(100).lean(),
+      getVenueReviewAggregate(venueSlug)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      count: aggregate.count,
+      averageRating: aggregate.averageRating,
+      data: reviews.map(({ email: _email, userId, ...review }) => ({
+        ...review,
+        isOwner: Boolean(req.user?.id && userId === String(req.user.id))
+      }))
+    });
+  } catch (error) {
+    console.error('Error fetching venue reviews:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch venue reviews.' });
+  }
+});
+
+/**
+ * POST /api/reviews/venue
+ * Submit a venue review for immediate publication.
+ */
+router.post('/venue', protect, async (req, res) => {
+  try {
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    const designation = typeof req.body.designation === 'string' ? req.body.designation.trim() : '';
+    const headline = typeof req.body.headline === 'string' ? req.body.headline.trim() : '';
+    const reviewText = typeof req.body.review === 'string' ? req.body.review.trim() : '';
+    const venueSlug = typeof req.body.venueSlug === 'string' ? req.body.venueSlug.trim().toLowerCase() : '';
+    const rating = Number(req.body.rating);
+    const venue = venueSlug ? await Venue.findOne({ slug: venueSlug }).select('name slug').lean() : null;
+
+    if (!venue) {
+      return res.status(404).json({ success: false, error: 'Venue not found. Refresh the page and try again.' });
+    }
+    if (name.length < 2 || name.length > 120) {
+      return res.status(400).json({ success: false, error: 'Enter a name between 2 and 120 characters.' });
+    }
+    if (designation.length < 2 || designation.length > 80) {
+      return res.status(400).json({ success: false, error: 'Enter a designation between 2 and 80 characters.' });
+    }
+    if (headline.length < 3 || headline.length > 160) {
+      return res.status(400).json({ success: false, error: 'Enter a review title between 3 and 160 characters.' });
+    }
+    if (reviewText.length < 4 || reviewText.length > 2000) {
+      return res.status(400).json({ success: false, error: 'Enter feedback between 4 and 2,000 characters.' });
+    }
+    if (![1, 2, 3, 4, 5].includes(rating)) {
+      return res.status(400).json({ success: false, error: 'Select a rating from 1 to 5.' });
+    }
+
+    const review = await Review.create({
+      name,
+      email: String(req.user.email || '').toLowerCase(),
+      userId: String(req.user.id),
+      title: designation,
+      role: designation,
+      eventTitle: venue.name,
+      venue: venue.name,
+      venueSlug: venue.slug,
+      rating,
+      headline,
+      review: reviewText,
+      status: 'approved',
+      submittedAt: new Date()
+    });
+    const aggregate = await getVenueReviewAggregate(venue.slug);
+
+    res.status(201).json({
+      success: true,
+      message: 'Venue review submitted successfully.',
+      data: { ...review.toObject(), isOwner: true },
+      count: aggregate.count,
+      averageRating: aggregate.averageRating
+    });
+  } catch (error) {
+    console.error('Error submitting venue review:', error);
+    res.status(500).json({ success: false, error: 'Failed to submit venue review.' });
+  }
+});
+
+/**
+ * PUT /api/reviews/venue/:id
+ * Update a venue review owned by the authenticated user.
+ */
+router.put('/venue/:id', protect, async (req, res) => {
+  try {
+    const review = await Review.findById(req.params.id);
+    if (!review || !review.venueSlug) {
+      return res.status(404).json({ success: false, error: 'Venue review not found.' });
+    }
+    if (review.userId !== String(req.user.id)) {
+      return res.status(403).json({ success: false, error: 'You can only edit your own review.' });
+    }
+
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    const designation = typeof req.body.designation === 'string' ? req.body.designation.trim() : '';
+    const headline = typeof req.body.headline === 'string' ? req.body.headline.trim() : '';
+    const reviewText = typeof req.body.review === 'string' ? req.body.review.trim() : '';
+    const rating = Number(req.body.rating);
+    if (name.length < 2 || name.length > 120) {
+      return res.status(400).json({ success: false, error: 'Enter a name between 2 and 120 characters.' });
+    }
+    if (designation.length < 2 || designation.length > 80) {
+      return res.status(400).json({ success: false, error: 'Enter a designation between 2 and 80 characters.' });
+    }
+    if (headline.length < 3 || headline.length > 160) {
+      return res.status(400).json({ success: false, error: 'Enter a review title between 3 and 160 characters.' });
+    }
+    if (reviewText.length < 4 || reviewText.length > 2000) {
+      return res.status(400).json({ success: false, error: 'Enter feedback between 4 and 2,000 characters.' });
+    }
+    if (![1, 2, 3, 4, 5].includes(rating)) {
+      return res.status(400).json({ success: false, error: 'Select a rating from 1 to 5.' });
+    }
+
+    review.name = name;
+    review.title = designation;
+    review.role = designation;
+    review.headline = headline;
+    review.review = reviewText;
+    review.rating = rating;
+    await review.save();
+
+    const aggregate = await getVenueReviewAggregate(review.venueSlug);
+    res.status(200).json({
+      success: true,
+      message: 'Venue review updated successfully.',
+      data: { ...review.toObject(), isOwner: true },
+      count: aggregate.count,
+      averageRating: aggregate.averageRating
+    });
+  } catch (error) {
+    console.error('Error updating venue review:', error);
+    res.status(500).json({ success: false, error: 'Failed to update venue review.' });
+  }
+});
+
+/**
+ * DELETE /api/reviews/venue/:id
+ * Delete a venue review owned by the authenticated user.
+ */
+router.delete('/venue/:id', protect, async (req, res) => {
+  try {
+    const review = await Review.findById(req.params.id);
+    if (!review || !review.venueSlug) {
+      return res.status(404).json({ success: false, error: 'Venue review not found.' });
+    }
+    if (review.userId !== String(req.user.id)) {
+      return res.status(403).json({ success: false, error: 'You can only delete your own review.' });
+    }
+
+    const venueSlug = review.venueSlug;
+    await review.deleteOne();
+    const aggregate = await getVenueReviewAggregate(venueSlug);
+    res.status(200).json({
+      success: true,
+      message: 'Venue review deleted successfully.',
+      count: aggregate.count,
+      averageRating: aggregate.averageRating
+    });
+  } catch (error) {
+    console.error('Error deleting venue review:', error);
+    res.status(500).json({ success: false, error: 'Failed to delete venue review.' });
   }
 });
 

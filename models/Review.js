@@ -20,6 +20,11 @@ const ReviewSchema = new mongoose.Schema(
       lowercase: true,
       default: ''
     },
+    userId: {
+      type: String,
+      default: '',
+      index: true
+    },
     role: {
       type: String,
       default: 'Verified Trade Buyer',
@@ -54,6 +59,13 @@ const ReviewSchema = new mongoose.Schema(
       type: String,
       default: '',
       trim: true
+    },
+    venueSlug: {
+      type: String,
+      default: '',
+      trim: true,
+      lowercase: true,
+      index: true
     },
     rating: {
       type: Number,
