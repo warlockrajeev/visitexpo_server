@@ -3747,6 +3747,7 @@ export const ADMIN_PERMISSION_MODULES = [
       { id: 'chat_organizers.manage', label: 'Manage Live Chat Organizers', description: 'Toggle live chat status, inspect visitor messages, and modify greetings' },
       { id: 'exhibitors.view', label: 'View Exhibitors', description: 'Browse exhibitors, booths, and stalls' },
       { id: 'exhibitors.manage', label: 'Manage Exhibitors', description: 'Update booth allocation and exhibitor status' },
+      { id: 'venues.manage', label: 'Review Venue Reports', description: 'Review visitor-submitted venue information corrections' },
       { id: 'visitors.view', label: 'View Visitors', description: 'View attendee passholders and registration lists' },
       { id: 'attendees.view', label: 'View Followers & Attendees', description: 'Browse event bookmarks and followers' },
       { id: 'users.view', label: 'View Platform Users', description: 'Search and inspect user dossiers across all roles' },
