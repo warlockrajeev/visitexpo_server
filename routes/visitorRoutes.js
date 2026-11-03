@@ -9,11 +9,68 @@ import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
 import Session from '../models/Session.js';
 import Lead from '../models/Lead.js';
+import User from '../models/User.js';
+import Subscription from '../models/Subscription.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
 import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBadgeService.js';
 
 const router = express.Router();
+const FREE_VISITOR_REGISTRATION_LIMIT = 3;
+
+async function getOrganizerEventIds(user) {
+  const ownershipQuery = {
+    $or: [
+      ...(user.organization ? [{ organizer: user.organization }] : []),
+      { claimedBy: user._id }
+    ]
+  };
+  return Event.distinct('_id', ownershipQuery);
+}
+
+async function getOrganizerBasePlan(user) {
+  const subscriptionQuery = {
+    $or: [
+      ...(user.organization ? [{ organization: user.organization }] : []),
+      { user: user._id }
+    ],
+    plan: { $ne: 'growth' }
+  };
+  let subscription = await Subscription.findOne({
+    ...subscriptionQuery,
+    status: 'active'
+  }).sort({ createdAt: -1 });
+  if (!subscription) {
+    subscription = await Subscription.findOne(subscriptionQuery).sort({ createdAt: -1 });
+  }
+  return subscription?.plan || (user.plan === 'growth' ? 'free' : user.plan || 'free');
+}
+
+router.get('/usage', protect, authorize('super_admin', 'organizer'), async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select('plan organization');
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
+    }
+
+    const eventIds = await getOrganizerEventIds(user);
+    const [used, plan] = await Promise.all([
+      Visitor.countDocuments({ event: { $in: eventIds } }),
+      getOrganizerBasePlan(user)
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        used,
+        limit: plan === 'free' ? FREE_VISITOR_REGISTRATION_LIMIT : null,
+        plan
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 function getSafeHttpUrl(value) {
   if (!value || typeof value !== 'string') return '';
@@ -104,7 +161,7 @@ router.get('/virtual-access/:visitorId', async (req, res, next) => {
 // ==========================================
 // PUBLIC VISITOR REGISTRATION API (WordPress compatible)
 // ==========================================
-router.post('/register', async (req, res, next) => {
+const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } = {}) => {
   try {
     const { eventId, name, email, phone, company, designation, country, notes, attendanceType } = req.body;
 
@@ -120,6 +177,42 @@ router.post('/register', async (req, res, next) => {
 
     if (!event.registrationSettings.isOpen) {
       return res.status(400).json({ success: false, error: 'Registrations are currently closed for this event' });
+    }
+
+    if (enforceFreePlanLimit && req.user.role !== 'super_admin') {
+      const eventOwner =
+        (event.organizer && req.user.organization &&
+          event.organizer.toString() === req.user.organization.toString()) ||
+        (event.claimedBy && event.claimedBy.toString() === req.user.id.toString()) ||
+        (!event.organizer && !event.claimedBy);
+
+      if (!eventOwner) {
+        return res.status(403).json({ success: false, error: 'Not authorized to register visitors for this event' });
+      }
+
+      const user = await User.findById(req.user.id).select('plan organization');
+      if (!user) {
+        return res.status(404).json({ success: false, error: 'User not found' });
+      }
+
+      const plan = await getOrganizerBasePlan(user);
+
+      if (plan === 'free') {
+        const eventIds = await getOrganizerEventIds(user);
+        if (!eventIds.some(id => id.toString() === event._id.toString())) {
+          eventIds.push(event._id);
+        }
+        const registrationCount = await Visitor.countDocuments({ event: { $in: eventIds } });
+        if (registrationCount >= FREE_VISITOR_REGISTRATION_LIMIT) {
+          return res.status(403).json({
+            success: false,
+            code: 'FREE_PLAN_VISITOR_LIMIT',
+            error: 'Free Plan limit reached. Upgrade your plan to register more visitors.',
+            limit: FREE_VISITOR_REGISTRATION_LIMIT,
+            used: registrationCount
+          });
+        }
+      }
     }
 
     // 2. Check if already registered
@@ -198,7 +291,13 @@ router.post('/register', async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+};
+
+router.post('/onboard', protect, authorize('super_admin', 'organizer'), (req, res, next) =>
+  registerVisitor(req, res, next, { enforceFreePlanLimit: true })
+);
+
+router.post('/register', (req, res, next) => registerVisitor(req, res, next));
 
 // Get logged-in visitor's registered passes & badges
 router.get('/my-passes', protect, async (req, res, next) => {
