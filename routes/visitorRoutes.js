@@ -163,19 +163,105 @@ router.get('/virtual-access/:visitorId', async (req, res, next) => {
 // ==========================================
 const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } = {}) => {
   try {
-    const { eventId, name, email, phone, company, designation, country, notes, attendanceType } = req.body;
+    const {
+      eventId,
+      eventSlug,
+      eventTitle,
+      eventVenue,
+      eventCity,
+      eventStartDate,
+      eventEndDate,
+      name,
+      email,
+      phone,
+      company,
+      designation,
+      country,
+      notes,
+      attendanceType
+    } = req.body;
 
     if (!eventId || !name || !email || !phone) {
       return res.status(400).json({ success: false, error: 'Event ID, Name, Email, and Phone are required' });
     }
 
-    // 1. Verify event exists and is open
-    const event = await Event.findById(eventId);
+    // 1. Verify event exists and is open (supports MongoDB ObjectId, slug, wpPostId, or title)
+    let event = null;
+    if (mongoose.Types.ObjectId.isValid(eventId) && String(new mongoose.Types.ObjectId(eventId)) === String(eventId)) {
+      event = await Event.findById(eventId);
+    }
     if (!event) {
-      return res.status(404).json({ success: false, error: 'Target event not found' });
+      const rawIdStr = String(eventId).trim();
+      const orConditions = [
+        { slug: rawIdStr.toLowerCase() },
+        { slug: rawIdStr },
+        { wpPostId: rawIdStr }
+      ];
+      if (eventSlug) {
+        const cleanSlug = String(eventSlug).trim();
+        orConditions.push({ slug: cleanSlug.toLowerCase() }, { slug: cleanSlug }, { wpPostId: cleanSlug });
+      }
+      if (eventTitle) {
+        orConditions.push({ title: String(eventTitle).trim() });
+      }
+      event = await Event.findOne({ $or: orConditions });
     }
 
-    if (!event.registrationSettings.isOpen) {
+    if (!event && (eventSlug || eventTitle)) {
+      const regexOr = [];
+      if (eventSlug) {
+        const escapedSlug = String(eventSlug).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (escapedSlug) regexOr.push({ slug: new RegExp(`^${escapedSlug}$`, 'i') });
+      }
+      if (eventTitle) {
+        const escapedTitle = String(eventTitle).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (escapedTitle) regexOr.push({ title: new RegExp(`^${escapedTitle}$`, 'i') });
+      }
+      if (regexOr.length > 0) {
+        event = await Event.findOne({ $or: regexOr });
+      }
+    }
+
+    // Auto-provision directory/WordPress event if not yet synced to MongoDB during visitor self-registration
+    if (!event && !enforceFreePlanLimit && (eventTitle || eventSlug || eventId)) {
+      const fallbackTitle = String(eventTitle || eventSlug || eventId).trim();
+      const baseSlug = String(eventSlug || fallbackTitle)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '') || `expo-${Date.now()}`;
+      const startDt = eventStartDate && !isNaN(new Date(eventStartDate).getTime())
+        ? new Date(eventStartDate)
+        : new Date(Date.now() + 30 * 86400000);
+      const endDt = eventEndDate && !isNaN(new Date(eventEndDate).getTime())
+        ? new Date(eventEndDate)
+        : new Date(startDt.getTime() + 2 * 86400000);
+
+      try {
+        event = await Event.create({
+          title: fallbackTitle,
+          slug: `${baseSlug}-${Date.now().toString(36)}`,
+          description: `Official trade exhibition listing for ${fallbackTitle}.`,
+          venue: eventVenue || 'Exhibition & Convention Centre',
+          city: eventCity || 'India',
+          country: country || 'India',
+          startDate: startDt,
+          endDate: endDt,
+          wpPostId: String(eventId).trim(),
+          status: 'published',
+          registrationSettings: { isOpen: true }
+        });
+      } catch (_) {
+        event = await Event.findOne({ title: fallbackTitle });
+      }
+    }
+
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Target event could not be found for registration.' });
+    }
+
+    const resolvedEventId = event._id;
+
+    if (event.registrationSettings && event.registrationSettings.isOpen === false) {
       return res.status(400).json({ success: false, error: 'Registrations are currently closed for this event' });
     }
 
@@ -216,9 +302,38 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
     }
 
     // 2. Check if already registered
-    const existing = await Visitor.findOne({ event: eventId, email: email.toLowerCase() });
+    const existing = await Visitor.findOne({ event: resolvedEventId, email: email.toLowerCase() });
     if (existing) {
-      return res.status(400).json({ success: false, error: 'You are already registered for this event' });
+      if (enforceFreePlanLimit) {
+        return res.status(400).json({ success: false, error: 'You are already registered for this event' });
+      }
+      await ensureVisitorQrCode(existing);
+      return res.status(200).json({
+        success: true,
+        alreadyRegistered: true,
+        message: 'Your visitor registration and pass are confirmed',
+        visitor: {
+          id: existing._id,
+          passId: `VIS-${existing._id.toString().toUpperCase()}`,
+          name: existing.name,
+          email: existing.email,
+          phone: existing.phone,
+          company: existing.company,
+          designation: existing.designation,
+          country: existing.country,
+          qrCode: existing.qrCode,
+          registrationStatus: existing.registrationStatus,
+          attendanceType: existing.attendanceType,
+          event: {
+            id: event._id,
+            title: event.title,
+            startDate: event.startDate,
+            endDate: event.endDate,
+            venue: event.venue,
+            city: event.city
+          }
+        }
+      });
     }
 
     // 3. Create Visitor
@@ -230,7 +345,7 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       designation,
       country: country || 'India',
       qrCode: createVisitorQrCode(),
-      event: eventId,
+      event: resolvedEventId,
       notes,
       attendanceType: attendanceType || 'in_person'
     });
@@ -246,7 +361,7 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       leadScore: 30, // Start score for self-registration
       source: 'website',
       status: 'new',
-      event: eventId,
+      event: resolvedEventId,
       notes: notes || `Registered online (${attendanceType || 'in_person'}) via WordPress integration.`,
       activityTimeline: [
         {

@@ -46,6 +46,11 @@ const ChatConversationSchema = new mongoose.Schema(
       required: true,
       index: true
     },
+    organizerName: {
+      type: String,
+      default: '',
+      trim: true
+    },
     event: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Event',
@@ -58,6 +63,16 @@ const ChatConversationSchema = new mongoose.Schema(
       trim: true
     },
     eventSlug: {
+      type: String,
+      default: '',
+      trim: true
+    },
+    eventDates: {
+      type: String,
+      default: '',
+      trim: true
+    },
+    eventVenue: {
       type: String,
       default: '',
       trim: true

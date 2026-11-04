@@ -987,7 +987,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
 
   const [mongoEvents, mongoOrgs, deletedOrgs, deletedEvents] = await Promise.all([
     Event.find()
-      .select('title slug description venue city country startDate endDate banner wpPostId wpUrl isClaimed organizer orgName orgEmail orgPhone orgWebsite orgDesc orgLogo categories')
+      .select('title slug description venue city country startDate endDate timings banner wpPostId wpUrl isClaimed claimedBy organizer orgName orgEmail orgPhone orgWebsite orgDesc orgLogo categories')
       .lean(),
     Organization.find().lean(),
     DeletedOrganizer.find().lean(),
@@ -1176,16 +1176,17 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     if (me.slug && processedSlugs.has(me.slug)) return;
     if (me.slug) processedSlugs.add(me.slug);
 
-    // Only process Mongo events that belong to a specific tenant or have an explicit organizer
-    let orgName = me.organizerName;
-    if (me.organization) {
-      const parentOrg = mongoOrgs.find(o => String(o._id) === String(me.organization));
-      if (parentOrg) {
+    // Resolve Mongo event organizer from me.orgName or me.organizer (Organization ref)
+    let orgName = me.orgName || me.organizerName;
+    const orgRefId = me.organizer || me.organization;
+    if (orgRefId) {
+      const parentOrg = mongoOrgs.find(o => String(o._id) === String(orgRefId));
+      if (parentOrg && parentOrg.name) {
         orgName = parentOrg.name;
       }
     }
 
-    if (!orgName || orgName === 'Platform Tenant') {
+    if (!orgName || orgName === 'Platform Tenant' || orgName === 'Verified Organizer') {
       orgName = 'VisitExpo Verified Partner Expos';
     }
 
@@ -1200,32 +1201,52 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
         shortName: resolvedName,
         brandColor: colors.brand,
         accentColor: colors.accent,
-        website: '',
-        logoUrl: null,
+        website: me.orgWebsite || '',
+        logoUrl: me.orgLogo || null,
         badge: 'Platform Tenant',
         type: 'independent',
-        scope: 'Platform registered organizer hosting verified conventions.',
-        email: '',
-        phone: '',
+        scope: me.orgDesc || 'Platform registered organizer hosting verified conventions.',
+        email: me.orgEmail || '',
+        phone: me.orgPhone || '',
         isRegisteredTenant: true,
         events: []
       };
+    } else {
+      if (!orgMap[orgKey].website && me.orgWebsite) orgMap[orgKey].website = me.orgWebsite;
+      if (!orgMap[orgKey].email && me.orgEmail) orgMap[orgKey].email = me.orgEmail;
+      if (!orgMap[orgKey].phone && me.orgPhone) orgMap[orgKey].phone = me.orgPhone;
+      if ((!orgMap[orgKey].scope || orgMap[orgKey].scope.length < 30) && me.orgDesc) {
+        orgMap[orgKey].scope = me.orgDesc;
+      }
     }
 
     const realMongoImg = me.banner || me.coverImage || me.thumbnail || me.image || getWpImage(me.slug, me._id, me.wpPostId, me.title);
+    const formattedDates = me.startDate
+      ? me.endDate && new Date(me.endDate).toDateString() !== new Date(me.startDate).toDateString()
+        ? `${new Date(me.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} – ${new Date(me.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+        : new Date(me.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      : 'Upcoming';
+
     orgMap[orgKey].events.push({
       id: String(me._id),
       title: me.title,
       slug: me.slug,
-      category: Array.isArray(me.categories) ? me.categories[0] : (me.categories || 'Trade & Industry'),
+      category: Array.isArray(me.categories) && me.categories[0] ? me.categories[0] : (me.categories || 'Trade & Industry'),
       venue: me.venue || 'Convention Center',
       city: me.city || 'India',
+      country: me.country || 'India',
+      timings: me.timings || '09:00 AM - 06:00 PM',
       image: realMongoImg,
       banner: realMongoImg,
       startDate: me.startDate,
       endDate: me.endDate,
-      dates: me.startDate ? new Date(me.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming',
+      dates: formattedDates,
       organizer: resolvedName,
+      orgName: (me.orgName && me.orgName !== 'Verified Organizer') ? me.orgName : resolvedName,
+      orgEmail: me.orgEmail || orgMap[orgKey].email || '',
+      orgPhone: me.orgPhone || orgMap[orgKey].phone || '',
+      claimedBy: me.claimedBy ? String(me.claimedBy) : null,
+      organizerId: me.claimedBy ? String(me.claimedBy) : (orgRefId ? String(orgRefId) : (orgMap[orgKey].tenantId || orgKey)),
       status: me.status || 'published',
       wpUrl: me.wpUrl || '',
       isWordPress: false

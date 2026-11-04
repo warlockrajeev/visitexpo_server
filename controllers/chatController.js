@@ -7,6 +7,7 @@ import mongoose from 'mongoose';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
 import Event from '../models/Event.js';
+import Lead from '../models/Lead.js';
 import ChatConversation from '../models/ChatConversation.js';
 import { getAggregatedOrganizers } from '../routes/adminRoutes.js';
 
@@ -336,9 +337,12 @@ export const startOrFetchConversation = async (req, res, next) => {
   try {
     const {
       organizerId,
+      organizerName = '',
       eventId,
       eventSlug,
       eventTitle,
+      eventDates = '',
+      eventVenue = '',
       participantRole = 'visitor',
       participantName,
       participantEmail,
@@ -356,28 +360,113 @@ export const startOrFetchConversation = async (req, res, next) => {
       });
     }
 
-    // Resolve organizer
-    let resolvedOrganizerId = organizerId;
+    // 1. Resolve target Event document if eventId, eventSlug, or eventTitle is provided
+    let eventDoc = null;
+    if (eventId && mongoose.isValidObjectId(eventId)) {
+      eventDoc = await Event.findById(eventId)
+        .select('title slug venue city startDate endDate claimedBy organizer orgName orgEmail')
+        .lean();
+    }
+    if (!eventDoc && eventSlug && String(eventSlug).trim()) {
+      const cleanSlug = String(eventSlug).toLowerCase().trim();
+      eventDoc = await Event.findOne({
+        $or: [
+          { slug: cleanSlug },
+          { wpPostId: String(eventSlug).trim() }
+        ]
+      })
+        .select('title slug venue city startDate endDate claimedBy organizer orgName orgEmail')
+        .lean();
+    }
+    if (!eventDoc && eventId && !mongoose.isValidObjectId(eventId)) {
+      eventDoc = await Event.findOne({
+        $or: [
+          { wpPostId: String(eventId).trim() },
+          { slug: String(eventId).toLowerCase().trim() }
+        ]
+      })
+        .select('title slug venue city startDate endDate claimedBy organizer orgName orgEmail')
+        .lean();
+    }
+    if (!eventDoc && eventTitle && String(eventTitle).trim()) {
+      eventDoc = await Event.findOne({ title: String(eventTitle).trim() })
+        .select('title slug venue city startDate endDate claimedBy organizer orgName orgEmail')
+        .lean();
+    }
+
+    const resolvedEventId = eventDoc?._id || (eventId && mongoose.isValidObjectId(eventId) ? eventId : null);
+    const resolvedEventTitle = (eventTitle || eventDoc?.title || '').trim();
+    const resolvedEventSlug = (eventSlug || eventDoc?.slug || '').trim();
+    const resolvedEventVenue = (
+      eventVenue ||
+      [eventDoc?.venue, eventDoc?.city].filter(Boolean).join(', ') ||
+      ''
+    ).trim();
+    const resolvedEventDates = (
+      eventDates ||
+      (eventDoc?.startDate
+        ? new Date(eventDoc.startDate).toLocaleDateString('en-US', {
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric'
+          })
+        : '')
+    ).trim();
+
+    // 2. Resolve organizer (prioritize the selected event's specific claimedBy / organizer / orgEmail)
+    let resolvedOrganizerId = null;
     let resolvedOrgUser = null;
 
-    if (!resolvedOrganizerId || !mongoose.isValidObjectId(resolvedOrganizerId)) {
-      const resolved = await resolveOrganizerUser({
-        organizerId,
-        eventId,
-        slug: eventSlug
+    if (eventDoc) {
+      const eventResolved = await resolveOrganizerUser({
+        eventId: eventDoc._id,
+        slug: eventDoc.slug,
+        orgEmail: eventDoc.orgEmail
       });
-      if (resolved.user) {
-        resolvedOrganizerId = resolved.user._id;
-        resolvedOrgUser = resolved.user;
+      if (eventResolved.user && mongoose.isValidObjectId(eventResolved.user._id)) {
+        const candidateUser = await User.findById(eventResolved.user._id).select(
+          'name email role plan isPlanActive isChatEnabled chatStatus chatWelcomeMessage chatAutoReply'
+        );
+        if (candidateUser) {
+          resolvedOrganizerId = candidateUser._id;
+          resolvedOrgUser = candidateUser;
+        }
       }
-    } else {
-      resolvedOrgUser = await User.findById(resolvedOrganizerId).select('name email role plan isPlanActive isChatEnabled chatStatus chatWelcomeMessage chatAutoReply');
+    }
+
+    if (!resolvedOrganizerId) {
+      if (organizerId && mongoose.isValidObjectId(organizerId)) {
+        const directUser = await User.findById(organizerId).select(
+          'name email role plan isPlanActive isChatEnabled chatStatus chatWelcomeMessage chatAutoReply'
+        );
+        if (directUser) {
+          resolvedOrganizerId = directUser._id;
+          resolvedOrgUser = directUser;
+        }
+      }
+      if (!resolvedOrganizerId) {
+        const resolved = await resolveOrganizerUser({
+          organizerId,
+          eventId: resolvedEventId,
+          slug: resolvedEventSlug
+        });
+        if (resolved.user && mongoose.isValidObjectId(resolved.user._id)) {
+          const fallbackUser = await User.findById(resolved.user._id).select(
+            'name email role plan isPlanActive isChatEnabled chatStatus chatWelcomeMessage chatAutoReply'
+          );
+          if (fallbackUser) {
+            resolvedOrganizerId = fallbackUser._id;
+            resolvedOrgUser = fallbackUser;
+          }
+        }
+      }
     }
 
     if (!resolvedOrganizerId || !mongoose.isValidObjectId(resolvedOrganizerId)) {
-      const adminOrg = await User.findOne({ role: 'super_admin' }).select('_id');
+      const adminOrg = await User.findOne({ role: 'super_admin' }).select('_id name email role plan isPlanActive isChatEnabled chatStatus chatWelcomeMessage chatAutoReply');
       if (adminOrg) {
         resolvedOrganizerId = adminOrg._id;
+        if (!resolvedOrgUser) resolvedOrgUser = adminOrg;
       }
     }
 
@@ -388,17 +477,31 @@ export const startOrFetchConversation = async (req, res, next) => {
       });
     }
 
+    const resolvedOrganizerName = (
+      organizerName ||
+      (eventDoc?.orgName && eventDoc.orgName !== 'Verified Organizer' ? eventDoc.orgName : '') ||
+      resolvedOrgUser?.name ||
+      'Verified Organizer'
+    ).trim();
+
     const cleanEmail = participantEmail.toLowerCase().trim();
     const cleanRole = participantRole === 'exhibitor' ? 'exhibitor' : 'visitor';
 
-    // Find existing active conversation between this participant and organizer
+    // 3. Find existing active conversation scoped to this specific expo & organizer
     const query = {
       organizer: resolvedOrganizerId,
       participantEmail: cleanEmail,
       status: { $ne: 'archived' }
     };
-    if (eventId && mongoose.isValidObjectId(eventId)) {
-      query.event = eventId;
+    if (resolvedEventId) {
+      query.event = resolvedEventId;
+    } else if (resolvedEventSlug) {
+      query.eventSlug = resolvedEventSlug;
+    } else if (resolvedEventTitle) {
+      query.eventTitle = resolvedEventTitle;
+    } else {
+      query.event = null;
+      query.eventTitle = '';
     }
 
     let conversation = await ChatConversation.findOne(query);
@@ -408,9 +511,12 @@ export const startOrFetchConversation = async (req, res, next) => {
     if (!conversation) {
       conversation = new ChatConversation({
         organizer: resolvedOrganizerId,
-        event: eventId && mongoose.isValidObjectId(eventId) ? eventId : null,
-        eventTitle: eventTitle || '',
-        eventSlug: eventSlug || '',
+        organizerName: resolvedOrganizerName,
+        event: resolvedEventId,
+        eventTitle: resolvedEventTitle,
+        eventSlug: resolvedEventSlug,
+        eventDates: resolvedEventDates,
+        eventVenue: resolvedEventVenue,
         participantRole: cleanRole,
         participantName: participantName.trim(),
         participantEmail: cleanEmail,
@@ -423,7 +529,6 @@ export const startOrFetchConversation = async (req, res, next) => {
       });
 
       // ONLY for Enterprise plan will the automated welcome message be sent!
-      // Starter plan and Free organizers do not send auto welcome messages.
       const isOrgEnterprise = resolvedOrgUser && (
         resolvedOrgUser.role === 'super_admin' ||
         (resolvedOrgUser.isPlanActive !== false && ['enterprise', 'growth'].includes(String(resolvedOrgUser.plan || '').toLowerCase()))
@@ -435,13 +540,21 @@ export const startOrFetchConversation = async (req, res, next) => {
           'Hello! Welcome to our exhibition desk. How can we assist you today?';
         conversation.messages.push({
           senderRole: 'organizer',
-          senderName: resolvedOrgUser.name || 'Organizer',
+          senderName: resolvedOrganizerName || resolvedOrgUser.name || 'Organizer',
           senderId: String(resolvedOrganizerId),
           text: welcomeText,
           timestamp: new Date(),
           read: true
         });
       }
+    } else {
+      // Ensure expo & organizer metadata stay linked on existing thread
+      if (resolvedEventId && !conversation.event) conversation.event = resolvedEventId;
+      if (resolvedEventTitle && !conversation.eventTitle) conversation.eventTitle = resolvedEventTitle;
+      if (resolvedEventSlug && !conversation.eventSlug) conversation.eventSlug = resolvedEventSlug;
+      if (resolvedEventDates && !conversation.eventDates) conversation.eventDates = resolvedEventDates;
+      if (resolvedEventVenue && !conversation.eventVenue) conversation.eventVenue = resolvedEventVenue;
+      if (resolvedOrganizerName && !conversation.organizerName) conversation.organizerName = resolvedOrganizerName;
     }
 
     // Append initial user message if provided
@@ -460,6 +573,50 @@ export const startOrFetchConversation = async (req, res, next) => {
     }
 
     await conversation.save();
+
+    // 4. Also link/record the inquiry in Lead CRM when tied to a specific Event
+    if (resolvedEventId && mongoose.isValidObjectId(resolvedEventId)) {
+      try {
+        const inquirySummary = `[${cleanRole === 'exhibitor' ? 'Exhibitor/Booth Inquiry' : 'Visitor/Attendee Inquiry'} - ${resolvedEventTitle || 'Expo'} (${resolvedOrganizerName})]: ${(message || '').trim()}`;
+        const existingLead = await Lead.findOne({
+          event: resolvedEventId,
+          email: cleanEmail
+        });
+        if (existingLead) {
+          existingLead.phone = existingLead.phone || (participantPhone || '').trim();
+          existingLead.company = existingLead.company || (participantCompany || '').trim();
+          existingLead.notes = inquirySummary;
+          existingLead.leadScore = Math.min(100, (existingLead.leadScore || 30) + 15);
+          existingLead.activityTimeline.push({
+            type: 'note',
+            content: inquirySummary
+          });
+          await existingLead.save();
+        } else {
+          await Lead.create({
+            name: participantName.trim(),
+            email: cleanEmail,
+            phone: (participantPhone || '').trim(),
+            company: (participantCompany || '').trim(),
+            designation: cleanRole === 'exhibitor' ? 'Exhibitor Inquiry' : 'Visitor Inquiry',
+            country: 'India',
+            leadScore: cleanRole === 'exhibitor' ? 65 : 45,
+            source: 'inquiry',
+            status: 'new',
+            event: resolvedEventId,
+            notes: inquirySummary,
+            activityTimeline: [
+              {
+                type: 'note',
+                content: inquirySummary
+              }
+            ]
+          });
+        }
+      } catch (leadErr) {
+        console.warn('[ChatController] Could not sync inquiry lead:', leadErr.message);
+      }
+    }
 
     res.status(isNew ? 201 : 200).json({
       success: true,
