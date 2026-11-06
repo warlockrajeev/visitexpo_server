@@ -122,9 +122,9 @@ async function syncDefaultTicketTier(eventId, body) {
 // Get events list with pagination, search, sorting and filtering
 router.get('/', wordpressLimiter, async (req, res, next) => {
   try {
-    const { search, category, city, venue, page, limit, sort, organizerId, status, all, upcoming } = req.query;
+    const { search, category, city, venue, page, limit, sort, organizerId, status, all, upcoming, slugs } = req.query;
     
-    const filters = { search, category, city, venue, organizerId, status, all, upcoming };
+    const filters = { search, category, city, venue, organizerId, status, all, upcoming, slugs };
     
     // Default options
     const options = {

@@ -35,7 +35,7 @@ const VisitorSchema = new mongoose.Schema(
     },
     registrationStatus: {
       type: String,
-      enum: ['pending', 'confirmed', 'cancelled'],
+      enum: ['pending', 'confirmed', 'cancelled', 'expired'],
       default: 'confirmed',
       index: true
     },

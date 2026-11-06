@@ -65,6 +65,58 @@ export const toggleEngagement = async (req, res) => {
     const userCountry = currentUser.country || '';
     const userAvatar = currentUser.avatar || '';
 
+    // Lookup matching Event from MongoDB to ensure complete, accurate event metadata
+    let dbEvent = null;
+    try {
+      if (eventId && mongoose.isValidObjectId(eventId)) {
+        dbEvent = await Event.findById(eventId).populate('organizer', 'name').lean();
+      }
+      if (!dbEvent && cleanSlug) {
+        dbEvent = await Event.findOne({
+          $or: [
+            { slug: cleanSlug },
+            { wpPostId: cleanSlug },
+            ...(mongoose.isValidObjectId(cleanSlug) ? [{ _id: cleanSlug }] : [])
+          ]
+        })
+          .populate('organizer', 'name')
+          .lean();
+      }
+    } catch (_) {}
+
+    const dbDates = dbEvent?.startDate
+      ? `${new Date(dbEvent.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${
+          dbEvent.endDate
+            ? ` – ${new Date(dbEvent.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+            : ''
+        }`
+      : '';
+    const dbOrgName =
+      dbEvent?.organizer?.name ||
+      (dbEvent?.orgName &&
+      !/^[0-9a-fA-F]{24}$/.test(dbEvent.orgName) &&
+      !dbEvent.orgName.includes('onrender.com')
+        ? dbEvent.orgName
+        : '');
+
+    const resolvedTitle = dbEvent?.title || eventTitle || cleanSlug.replace(/-/g, ' ').toUpperCase();
+    const resolvedCity = dbEvent?.city || eventCity || '';
+    const resolvedCountry = dbEvent?.country || eventCountry || 'India';
+    const resolvedVenue = dbEvent?.venue || eventVenue || '';
+    const resolvedDates = dbDates || eventDates || '';
+    const resolvedCategory =
+      (Array.isArray(dbEvent?.categories) && dbEvent.categories[0]) || eventCategory || '';
+    const resolvedImage = dbEvent?.banner || eventImage || '';
+    const resolvedOrgId =
+      organizerId || (dbEvent?.organizer?._id ? String(dbEvent.organizer._id) : '');
+    const resolvedOrgName =
+      dbOrgName ||
+      (organizerName &&
+      !/^[0-9a-fA-F]{24}$/.test(organizerName) &&
+      !organizerName.includes('onrender.com')
+        ? organizerName
+        : '');
+
     // Find existing engagement
     let engagement = await EventEngagement.findOne({
       userEmail,
@@ -126,13 +178,15 @@ export const toggleEngagement = async (req, res) => {
       }
 
       // Update metadata
-      if (eventTitle) engagement.eventTitle = eventTitle;
-      if (eventCity) engagement.eventCity = eventCity;
-      if (eventVenue) engagement.eventVenue = eventVenue;
-      if (eventDates) engagement.eventDates = eventDates;
-      if (eventImage) engagement.eventImage = eventImage;
-      if (organizerId) engagement.organizerId = organizerId;
-      if (organizerName) engagement.organizerName = organizerName;
+      if (resolvedTitle) engagement.eventTitle = resolvedTitle;
+      if (resolvedCity) engagement.eventCity = resolvedCity;
+      if (resolvedCountry) engagement.eventCountry = resolvedCountry;
+      if (resolvedVenue) engagement.eventVenue = resolvedVenue;
+      if (resolvedDates) engagement.eventDates = resolvedDates;
+      if (resolvedCategory) engagement.eventCategory = resolvedCategory;
+      if (resolvedImage) engagement.eventImage = resolvedImage;
+      if (resolvedOrgId) engagement.organizerId = resolvedOrgId;
+      if (resolvedOrgName) engagement.organizerName = resolvedOrgName;
       if (userName) engagement.userName = userName;
       if (userCompany) engagement.userCompany = userCompany;
       if (userDesignation) engagement.userDesignation = userDesignation;
@@ -155,16 +209,16 @@ export const toggleEngagement = async (req, res) => {
         userCountry,
         userRole,
         eventSlug: cleanSlug,
-        eventId: eventId || '',
-        eventTitle: eventTitle || cleanSlug.replace(/-/g, ' ').toUpperCase(),
-        eventCity: eventCity || '',
-        eventCountry: eventCountry || '',
-        eventVenue: eventVenue || '',
-        eventDates: eventDates || '',
-        eventCategory: eventCategory || '',
-        eventImage: eventImage || '',
-        organizerId: organizerId || '',
-        organizerName: organizerName || '',
+        eventId: eventId || (dbEvent?._id ? String(dbEvent._id) : ''),
+        eventTitle: resolvedTitle,
+        eventCity: resolvedCity,
+        eventCountry: resolvedCountry,
+        eventVenue: resolvedVenue,
+        eventDates: resolvedDates,
+        eventCategory: resolvedCategory,
+        eventImage: resolvedImage,
+        organizerId: resolvedOrgId,
+        organizerName: resolvedOrgName,
         type: action,
         isBookmarked: action === 'bookmark',
         isInterested: action === 'interested',
@@ -400,28 +454,124 @@ export const getUserEngagements = async (req, res) => {
           })
     };
 
-    const engagements = await EventEngagement.find(query).sort({ updatedAt: -1 });
+    const engagements = await EventEngagement.find(query).sort({ updatedAt: -1 }).lean();
 
-    const interestedEvents = engagements.filter(
+    // Hydrate each engagement with live Event data from MongoDB so cards always have full database details
+    const slugSet = new Set();
+    const objectIdList = [];
+    engagements.forEach((e) => {
+      if (e.eventSlug) slugSet.add(String(e.eventSlug).toLowerCase().trim());
+      if (e.eventId) {
+        const idStr = String(e.eventId).trim();
+        slugSet.add(idStr.toLowerCase());
+        if (mongoose.isValidObjectId(idStr)) {
+          objectIdList.push(new mongoose.Types.ObjectId(idStr));
+        }
+      }
+    });
+
+    const eventLookupMap = new Map();
+    if (slugSet.size > 0 || objectIdList.length > 0) {
+      const slugArr = Array.from(slugSet);
+      const matchedEvents = await Event.find({
+        $or: [
+          { slug: { $in: slugArr } },
+          { wpPostId: { $in: slugArr } },
+          ...(objectIdList.length > 0 ? [{ _id: { $in: objectIdList } }] : [])
+        ]
+      })
+        .populate('organizer', 'name email logo website')
+        .lean();
+
+      matchedEvents.forEach((ev) => {
+        if (ev.slug) eventLookupMap.set(String(ev.slug).toLowerCase().trim(), ev);
+        if (ev._id) eventLookupMap.set(String(ev._id).toLowerCase().trim(), ev);
+        if (ev.wpPostId) eventLookupMap.set(String(ev.wpPostId).toLowerCase().trim(), ev);
+      });
+    }
+
+    const enrichedEngagements = engagements.map((e) => {
+      const slugKey = String(e.eventSlug || '').toLowerCase().trim();
+      const idKey = String(e.eventId || '').toLowerCase().trim();
+      const dbEvt = eventLookupMap.get(slugKey) || eventLookupMap.get(idKey) || null;
+
+      if (!dbEvt) return e;
+
+      const populatedOrgName =
+        dbEvt.organizer && typeof dbEvt.organizer === 'object' ? dbEvt.organizer.name : '';
+      const rawOrgName = (dbEvt.orgName || e.organizerName || '').trim();
+      const isBadOrg =
+        /^[0-9a-fA-F]{24}$/.test(rawOrgName) ||
+        /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName);
+      const cleanOrganizer =
+        populatedOrgName || (!isBadOrg && rawOrgName ? rawOrgName : '') || 'VisitExpo Verified Organizer';
+
+      const formattedDates = dbEvt.startDate
+        ? `${new Date(dbEvt.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${
+            dbEvt.endDate
+              ? ` – ${new Date(dbEvt.endDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+              : ''
+          }`
+        : e.eventDates || '';
+
+      const category =
+        (Array.isArray(dbEvt.categories) && dbEvt.categories[0]) ||
+        e.eventCategory ||
+        'Trade & Industry';
+
+      return {
+        ...e,
+        eventId: String(dbEvt._id || e.eventId || ''),
+        eventSlug: dbEvt.slug || e.eventSlug,
+        slug: dbEvt.slug || e.eventSlug,
+        eventTitle: dbEvt.title || e.eventTitle,
+        title: dbEvt.title || e.eventTitle,
+        description: dbEvt.description || '',
+        startDate: dbEvt.startDate || null,
+        endDate: dbEvt.endDate || null,
+        timings: dbEvt.timings || '',
+        dates: formattedDates,
+        eventDates: formattedDates,
+        venue: dbEvt.venue || e.eventVenue || '',
+        eventVenue: dbEvt.venue || e.eventVenue || '',
+        city: dbEvt.city || e.eventCity || '',
+        eventCity: dbEvt.city || e.eventCity || '',
+        country: dbEvt.country || e.eventCountry || 'India',
+        eventCountry: dbEvt.country || e.eventCountry || 'India',
+        category,
+        eventCategory: category,
+        categories: dbEvt.categories || [category],
+        image: dbEvt.banner || e.eventImage || '',
+        eventImage: dbEvt.banner || e.eventImage || '',
+        banner: dbEvt.banner || e.eventImage || '',
+        organizer: cleanOrganizer,
+        organizerName: cleanOrganizer,
+        eventStatus: dbEvt.status || 'published',
+        isFreeEvent: dbEvt.isFreeEvent,
+        paidTicketPrice: dbEvt.paidTicketPrice
+      };
+    });
+
+    const interestedEvents = enrichedEngagements.filter(
       (e) => e.isInterested || e.type === 'interested' || e.type === 'both'
     );
-    const followedEvents = engagements.filter(
+    const followedEvents = enrichedEngagements.filter(
       (e) => e.isFollowed || e.type === 'follower' || e.type === 'both'
     );
-    const bookmarkedEvents = engagements.filter(
+    const bookmarkedEvents = enrichedEngagements.filter(
       (e) => e.isBookmarked || e.type === 'bookmark'
     );
 
     return res.status(200).json({
       success: true,
       data: {
-        total: engagements.length,
-        all: engagements,
+        total: enrichedEngagements.length,
+        all: enrichedEngagements,
         bookmarkedEvents,
         interestedEvents,
         followedEvents,
         counts: {
-          total: engagements.length,
+          total: enrichedEngagements.length,
           bookmarks: bookmarkedEvents.length,
           interested: interestedEvents.length,
           followers: followedEvents.length

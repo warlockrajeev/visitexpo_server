@@ -139,6 +139,25 @@ class EventRepository extends BaseRepository {
       filter.venue = { $regex: filters.venue, $options: 'i' };
     }
 
+    if (filters.slugs) {
+      const rawSlugs = Array.isArray(filters.slugs)
+        ? filters.slugs
+        : String(filters.slugs)
+            .split(',')
+            .map((s) => s.trim().toLowerCase())
+            .filter(Boolean);
+      if (rawSlugs.length > 0) {
+        const objectIds = rawSlugs
+          .filter((s) => mongoose.isValidObjectId(s))
+          .map((s) => new mongoose.Types.ObjectId(s));
+        filter.$or = [
+          { slug: { $in: rawSlugs } },
+          { wpPostId: { $in: rawSlugs } },
+          ...(objectIds.length > 0 ? [{ _id: { $in: objectIds } }] : [])
+        ];
+      }
+    }
+
     if (filters.organizerId) {
       const rawIds = Array.isArray(filters.organizerId)
         ? filters.organizerId

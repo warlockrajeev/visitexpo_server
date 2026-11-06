@@ -195,10 +195,28 @@ router.post('/track-click', optionalAuth, async (req, res, next) => {
 // @access  Public / Optional Auth
 router.post('/inquire', optionalAuth, async (req, res, next) => {
   try {
-    const { eventId, eventSlug, name, email, phone, company, designation, country, message, inquiryType } = req.body;
+    const {
+      eventId,
+      eventSlug,
+      eventTitle,
+      eventVenue,
+      eventCity,
+      organizerId,
+      organizerName,
+      name,
+      email,
+      phone,
+      company,
+      designation,
+      country,
+      message,
+      inquiryType,
+      stallType,
+      stallSize
+    } = req.body;
     const currentUser = req.user;
 
-    if (!eventId && !eventSlug) {
+    if (!eventId && !eventSlug && !eventTitle) {
       return res.status(400).json({ success: false, error: 'Event identifier is required' });
     }
 
@@ -247,6 +265,43 @@ router.post('/inquire', optionalAuth, async (req, res, next) => {
         ]
       });
     }
+    if (!targetEvent && eventTitle) {
+      const escapedTitle = String(eventTitle).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (escapedTitle) {
+        targetEvent = await Event.findOne({ title: new RegExp(`^${escapedTitle}$`, 'i') });
+      }
+    }
+
+    // Auto-provision directory/flagship event if not yet in MongoDB
+    if (!targetEvent && (eventTitle || eventSlug || eventId)) {
+      const fallbackTitle = String(eventTitle || eventSlug || eventId).trim();
+      const baseSlug =
+        String(eventSlug || fallbackTitle)
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/(^-|-$)/g, '') || `expo-${Date.now()}`;
+      const startDt = new Date(Date.now() + 30 * 86400000);
+      const endDt = new Date(startDt.getTime() + 2 * 86400000);
+
+      try {
+        targetEvent = await Event.create({
+          title: fallbackTitle,
+          slug: `${baseSlug}-${Date.now().toString(36)}`,
+          description: `Official trade exhibition listing for ${fallbackTitle}.`,
+          venue: eventVenue || 'Exhibition & Convention Centre',
+          city: eventCity || 'India',
+          country: country || 'India',
+          startDate: startDt,
+          endDate: endDt,
+          organizer: organizerId && mongoose.isValidObjectId(organizerId) ? organizerId : undefined,
+          orgName: organizerName || 'Verified Organizer',
+          status: 'published',
+          registrationSettings: { isOpen: true }
+        });
+      } catch (_) {
+        targetEvent = await Event.findOne({ title: fallbackTitle });
+      }
+    }
 
     if (!targetEvent) {
       return res.status(404).json({ success: false, error: 'Target event not found' });
@@ -256,7 +311,10 @@ router.post('/inquire', optionalAuth, async (req, res, next) => {
     const leadCompany = company || currentUser?.company || 'Interested Attendee';
     const leadDesignation = designation || currentUser?.designation || 'Trade Buyer';
     const leadCountry = country || currentUser?.country || targetEvent.country || 'India';
-    const noteText = message ? `Inquiry (${inquiryType || 'General'}): ${message.trim()}` : `Direct attendee inquiry for "${targetEvent.title}".`;
+    const stallSpec = [stallType, stallSize].filter(Boolean).join(' • ');
+    const noteText = message
+      ? `Inquiry (${inquiryType || 'General'}${stallSpec ? ` — ${stallSpec}` : ''}): ${message.trim()}`
+      : `Direct attendee inquiry for "${targetEvent.title}"${stallSpec ? ` (${stallSpec})` : ''}.`;
 
     let existingLead = await Lead.findOne({ event: targetEvent._id, email: leadEmail });
 

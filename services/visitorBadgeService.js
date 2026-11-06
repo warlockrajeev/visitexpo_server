@@ -6,6 +6,13 @@ export function createVisitorQrCode() {
 }
 
 export async function ensureVisitorQrCode(visitor) {
+  if (visitor.registrationStatus === 'cancelled') {
+    if (visitor.qrCode) {
+      visitor.qrCode = '';
+      if (typeof visitor.save === 'function') await visitor.save();
+    }
+    return '';
+  }
   if (visitor.qrCode && !visitor.qrCode.startsWith('visitexpo-')) {
     return visitor.qrCode;
   }

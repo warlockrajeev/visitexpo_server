@@ -82,6 +82,65 @@ function getSafeHttpUrl(value) {
   }
 }
 
+function isEventPastEndDate(event, now = Date.now()) {
+  if (!event) return false;
+  const statusStr = String(event.status || '').toLowerCase();
+  if (['completed', 'ended', 'archived'].includes(statusStr)) {
+    return true;
+  }
+
+  const endDate = event.endDate || event.startDate;
+  if (!endDate) return false;
+
+  const dateOnlyMatch =
+    typeof endDate === 'string'
+      ? endDate.match(/^(\d{4}-\d{2}-\d{2})(?:T00:00:00(?:\.000)?Z)?$/)
+      : null;
+  const parsedEndDate = dateOnlyMatch
+    ? new Date(`${dateOnlyMatch[1]}T00:00:00`)
+    : new Date(endDate);
+  if (Number.isNaN(parsedEndDate.getTime())) return false;
+
+  if (parsedEndDate.getHours() === 0 && parsedEndDate.getMinutes() === 0) {
+    parsedEndDate.setHours(23, 59, 59, 999);
+  }
+
+  return parsedEndDate.getTime() < now;
+}
+
+async function syncVisitorPassExpiration(visitorDoc, eventDoc = null) {
+  if (!visitorDoc) return { isExpired: false, passStatus: 'active' };
+  const targetEvent =
+    eventDoc ||
+    (visitorDoc.event && typeof visitorDoc.event === 'object' ? visitorDoc.event : null);
+  const eventEnded = isEventPastEndDate(targetEvent);
+
+  if (eventEnded && visitorDoc.registrationStatus === 'confirmed') {
+    visitorDoc.registrationStatus = 'expired';
+    if (typeof visitorDoc.save === 'function') {
+      try {
+        await visitorDoc.save();
+      } catch (err) {
+        console.warn('[VisitorRoutes] Could not persist expired pass status:', err.message);
+      }
+    }
+  }
+
+  const isExpired = visitorDoc.registrationStatus === 'expired' || eventEnded;
+  const passStatus =
+    visitorDoc.registrationStatus === 'cancelled'
+      ? 'cancelled'
+      : isExpired
+        ? 'expired'
+        : visitorDoc.checkInStatus === 'checked_in'
+          ? 'checked_in'
+          : visitorDoc.registrationStatus === 'pending'
+            ? 'pending'
+            : 'active';
+
+  return { isExpired, passStatus };
+}
+
 router.get('/virtual-access/:visitorId', async (req, res, next) => {
   try {
     const { visitorId } = req.params;
@@ -95,6 +154,14 @@ router.get('/virtual-access/:visitorId', async (req, res, next) => {
     );
     if (!visitor || !visitor.event) {
       return res.status(404).json({ success: false, error: 'Visitor registration was not found.' });
+    }
+    const { isExpired } = await syncVisitorPassExpiration(visitor, visitor.event);
+    if (isExpired || visitor.registrationStatus === 'expired') {
+      return res.status(403).json({
+        success: false,
+        code: 'PASS_EXPIRED',
+        error: 'This visitor pass has expired because the event end date has passed and is no longer valid for entry.'
+      });
     }
     if (visitor.registrationStatus !== 'confirmed') {
       return res.status(403).json({ success: false, error: 'This visitor registration is not confirmed.' });
@@ -308,6 +375,14 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
         return res.status(400).json({ success: false, error: 'You are already registered for this event' });
       }
       await ensureVisitorQrCode(existing);
+      const { isExpired, passStatus } = await syncVisitorPassExpiration(existing, event);
+      if (isExpired) {
+        return res.status(400).json({
+          success: false,
+          code: 'PASS_EXPIRED',
+          error: 'This event has ended and your visitor pass has expired.'
+        });
+      }
       return res.status(200).json({
         success: true,
         alreadyRegistered: true,
@@ -323,6 +398,8 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
           country: existing.country,
           qrCode: existing.qrCode,
           registrationStatus: existing.registrationStatus,
+          isExpired,
+          passStatus,
           attendanceType: existing.attendanceType,
           event: {
             id: event._id,
@@ -333,6 +410,14 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
             city: event.city
           }
         }
+      });
+    }
+
+    if (isEventPastEndDate(event)) {
+      return res.status(400).json({
+        success: false,
+        code: 'EVENT_ENDED',
+        error: 'Registrations are closed because this event has already ended.'
       });
     }
 
@@ -392,6 +477,8 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
         country: visitor.country,
         qrCode: visitor.qrCode,
         registrationStatus: visitor.registrationStatus,
+        isExpired: false,
+        passStatus: 'active',
         attendanceType: visitor.attendanceType,
         event: {
           id: event._id,
@@ -415,6 +502,75 @@ router.post('/onboard', protect, authorize('super_admin', 'organizer'), (req, re
 router.post('/register', (req, res, next) => registerVisitor(req, res, next));
 
 // Get logged-in visitor's registered passes & badges
+router.post('/my-passes/:id/cancel', protect, async (req, res, next) => {
+  try {
+    const userEmail = req.user.email ? req.user.email.toLowerCase().trim() : '';
+    if (!userEmail) {
+      return res.status(400).json({ success: false, error: 'User email not found' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ success: false, error: 'Invalid visitor pass.' });
+    }
+
+    const visitor = await Visitor.findOne({ _id: req.params.id, email: userEmail })
+      .populate('event', 'endDate status');
+    if (!visitor) {
+      return res.status(404).json({ success: false, error: 'Visitor pass not found.' });
+    }
+
+    const { isExpired } = await syncVisitorPassExpiration(visitor, visitor.event);
+    if (isExpired || visitor.registrationStatus === 'expired') {
+      return res.status(409).json({ success: false, error: 'Expired passes cannot be cancelled.' });
+    }
+    if (visitor.registrationStatus !== 'confirmed') {
+      return res.status(409).json({ success: false, error: 'Only active visitor passes can be cancelled.' });
+    }
+
+    const hasBeenUsed =
+      visitor.checkInStatus === 'checked_in' ||
+      visitor.virtualJoinStatus === 'checked_in' ||
+      visitor.virtualSessionsAttended?.length > 0 ||
+      visitor.boothsVisited?.length > 0;
+    if (hasBeenUsed) {
+      return res.status(409).json({ success: false, error: 'Already-used passes cannot be cancelled.' });
+    }
+
+    const cancelledVisitor = await Visitor.findOneAndUpdate(
+      {
+        _id: visitor._id,
+        email: userEmail,
+        registrationStatus: 'confirmed',
+        checkInStatus: { $ne: 'checked_in' },
+        virtualJoinStatus: { $ne: 'checked_in' },
+        virtualSessionsAttended: { $not: { $elemMatch: {} } },
+        boothsVisited: { $not: { $elemMatch: {} } }
+      },
+      { $set: { registrationStatus: 'cancelled', qrCode: '' } },
+      { new: true, runValidators: true }
+    );
+
+    if (!cancelledVisitor) {
+      return res.status(409).json({
+        success: false,
+        error: 'This pass is no longer active or has already been used.'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: 'Visitor pass cancelled successfully.',
+      data: {
+        registrationStatus: 'cancelled',
+        passStatus: 'cancelled',
+        isExpired: false,
+        qrCode: ''
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/my-passes', protect, async (req, res, next) => {
   try {
     const userEmail = req.user.email ? req.user.email.toLowerCase().trim() : '';
@@ -425,19 +581,28 @@ router.get('/my-passes', protect, async (req, res, next) => {
     const passes = await Visitor.find({ email: userEmail })
       .populate({
         path: 'event',
-        select: 'title slug startDate endDate venue city banner logo shortDescription organizer timings'
+        select: 'title slug startDate endDate status venue city banner logo shortDescription organizer timings'
       })
       .sort({ createdAt: -1 });
 
+    const serializedPasses = [];
     for (const pass of passes) {
       await ensureVisitorQrCode(pass);
+      const { isExpired, passStatus } = await syncVisitorPassExpiration(pass);
+      const raw = typeof pass.toObject === 'function' ? pass.toObject() : pass;
+      serializedPasses.push({
+        ...raw,
+        passId: raw.passId || `VIS-${String(raw._id).toUpperCase()}`,
+        isExpired,
+        passStatus
+      });
     }
 
     res.status(200).json({
       success: true,
       data: {
-        docs: passes,
-        totalDocs: passes.length
+        docs: serializedPasses,
+        totalDocs: serializedPasses.length
       }
     });
   } catch (error) {
@@ -464,13 +629,14 @@ router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manag
       query.event = { $in: myEvents.map(e => e._id) };
     }
 
-    const [total, checkedIn, notCheckedIn, virtual, confirmed, pending] = await Promise.all([
+    const [total, checkedIn, notCheckedIn, virtual, confirmed, pending, expired] = await Promise.all([
       Visitor.countDocuments(query),
       Visitor.countDocuments({ ...query, checkInStatus: 'checked_in' }),
       Visitor.countDocuments({ ...query, checkInStatus: 'not_checked_in' }),
       Visitor.countDocuments({ ...query, attendanceType: 'virtual' }),
       Visitor.countDocuments({ ...query, registrationStatus: 'confirmed' }),
-      Visitor.countDocuments({ ...query, registrationStatus: 'pending' })
+      Visitor.countDocuments({ ...query, registrationStatus: 'pending' }),
+      Visitor.countDocuments({ ...query, registrationStatus: 'expired' })
     ]);
 
     res.status(200).json({
@@ -481,7 +647,8 @@ router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manag
         notCheckedIn,
         virtual,
         confirmed,
-        pending
+        pending,
+        expired
       }
     });
   } catch (error) {
@@ -560,17 +727,28 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
 
     const [docs, total] = await Promise.all([
       Visitor.find(query)
-        .populate('event', 'title city startDate venue slug banner logo')
+        .populate('event', 'title city startDate endDate status venue slug banner logo')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pgLimit),
       Visitor.countDocuments(query)
     ]);
 
+    const serializedDocs = [];
+    for (const doc of docs) {
+      const { isExpired, passStatus } = await syncVisitorPassExpiration(doc);
+      const raw = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+      serializedDocs.push({
+        ...raw,
+        isExpired,
+        passStatus
+      });
+    }
+
     res.status(200).json({
       success: true,
       data: {
-        docs,
+        docs: serializedDocs,
         total,
         page: pgNum,
         pages: Math.ceil(total / pgLimit)
@@ -607,9 +785,18 @@ router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_ma
       visitorQuery.event = badgeEventId;
     }
 
-    const visitor = await Visitor.findOne(visitorQuery);
+    const visitor = await Visitor.findOne(visitorQuery).populate('event', 'title startDate endDate status');
     if (!visitor) {
       return res.status(404).json({ success: false, error: 'Visitor not found with matching badge token' });
+    }
+
+    const { isExpired } = await syncVisitorPassExpiration(visitor, visitor.event);
+    if (isExpired || visitor.registrationStatus === 'expired') {
+      return res.status(400).json({
+        success: false,
+        code: 'PASS_EXPIRED',
+        error: 'This visitor pass has expired because the event end date has passed and is no longer valid for entry or QR code verification.'
+      });
     }
 
     if (visitor.registrationStatus !== 'confirmed') {
@@ -639,7 +826,7 @@ router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_ma
 
     // Trigger Web Push notification to Organizer (Enterprise plan only)
     notifyOrganizerOnVisitor({
-      event: visitor.event,
+      event: visitor.event?._id || visitor.event,
       visitor,
       type: 'checked_in'
     }).catch(pushErr => console.warn('[VisitorRoutes] Check-in push error:', pushErr.message));
@@ -652,7 +839,7 @@ router.post('/checkin', protect, authorize('super_admin', 'organizer', 'event_ma
         email: visitor.email,
         company: visitor.company,
         checkInTime: visitor.checkInTime,
-        eventTitle: (await Event.findById(visitor.event).select('title'))?.title || ''
+        eventTitle: visitor.event?.title || (await Event.findById(visitor.event).select('title'))?.title || ''
       }
     });
   } catch (error) {
@@ -687,11 +874,19 @@ router.post('/virtual-join', async (req, res, next) => {
     if (!visitor) {
       return res.status(404).json({ success: false, error: 'Visitor registration not found for this email and event' });
     }
-    const visitorEvent = await Event.findById(visitor.event).select('eventType');
+    const visitorEvent = await Event.findById(visitor.event).select('eventType startDate endDate status');
     if (!visitorEvent || !['virtual', 'hybrid'].includes(visitorEvent.eventType)) {
       return res.status(403).json({
         success: false,
         error: 'This event does not provide virtual access.'
+      });
+    }
+    const { isExpired } = await syncVisitorPassExpiration(visitor, visitorEvent);
+    if (isExpired || visitor.registrationStatus === 'expired') {
+      return res.status(403).json({
+        success: false,
+        code: 'PASS_EXPIRED',
+        error: 'This visitor pass has expired because the event end date has passed and is no longer valid for entry.'
       });
     }
     if (visitor.registrationStatus !== 'confirmed' ||
@@ -798,7 +993,7 @@ router.put('/:id/status', protect, authorize('super_admin', 'organizer'), async 
       return res.status(404).json({ success: false, error: 'Visitor not found' });
     }
 
-    if (registrationStatus && ['confirmed', 'pending', 'cancelled'].includes(registrationStatus)) {
+    if (registrationStatus && ['confirmed', 'pending', 'cancelled', 'expired'].includes(registrationStatus)) {
       visitor.registrationStatus = registrationStatus;
     }
 

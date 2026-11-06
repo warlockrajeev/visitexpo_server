@@ -455,10 +455,34 @@ class WordPressDirectorySyncService {
     }
 
     // Query directly from indexed MongoDB
-    const events = await Event.find({ status: { $ne: 'cancelled' } })
-      .select('title slug description banner venue city country startDate endDate categories organizer wpPostId wpUrl isClaimed status')
+    const rawEvents = await Event.find({ status: { $ne: 'cancelled' } })
+      .select('title slug description banner venue address city country startDate endDate timings categories organizer orgName wpPostId wpUrl isClaimed status isFreeEvent paidTicketPrice')
+      .populate('organizer', 'name email logo website')
       .sort({ startDate: 1 })
       .lean();
+
+    const events = (rawEvents || []).map((doc) => {
+      const populatedOrgName =
+        doc.organizer && typeof doc.organizer === 'object' ? doc.organizer.name : '';
+      const rawOrgName = (doc.orgName || '').trim();
+      const isHostnameOrId =
+        /^[0-9a-fA-F]{24}$/.test(rawOrgName) ||
+        /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName);
+      const cleanOrganizer =
+        populatedOrgName ||
+        (!isHostnameOrId && rawOrgName ? rawOrgName : '') ||
+        'VisitExpo Verified Organizer';
+
+      return {
+        ...doc,
+        organizer: cleanOrganizer,
+        organizerName: cleanOrganizer,
+        orgName: cleanOrganizer,
+        category:
+          (Array.isArray(doc.categories) && doc.categories[0]) ||
+          inferCategory(doc.title, doc.description)
+      };
+    });
 
     if (events && events.length > 0) {
       memoryCache = {
