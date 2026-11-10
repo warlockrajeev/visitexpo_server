@@ -171,19 +171,9 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
 router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
   try {
     const { search, city, limit = 2500, page = 1 } = req.query;
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
 
     const query = {
       isClaimed: { $ne: true },
-      $and: [
-        {
-          $or: [
-            { endDate: { $gte: todayStart } },
-            { endDate: null, startDate: { $gte: todayStart } }
-          ]
-        }
-      ],
       title: { $not: /cart|checkout|my account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about us|blog|home/i },
       slug: { $not: /cart|checkout|my-account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about-us|blog|home/i }
     };
@@ -209,7 +199,7 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
     const [rawDocs, total] = await Promise.all([
       Event.find(query)
         .select('title slug description venue city country startDate endDate banner wpPostId wpUrl isClaimed orgName orgEmail orgPhone orgWebsite orgDesc orgLogo')
-        .sort({ startDate: 1, title: 1 })
+        .sort({ startDate: -1, title: 1 })
         .skip(skip)
         .limit(pgLimit)
         .lean(),

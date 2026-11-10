@@ -197,6 +197,8 @@ class AuthService {
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,
         phone: user.phone || '',
+        avatar: user.avatar || user.photoURL || '',
+        photoURL: user.avatar || user.photoURL || '',
         authProvider: 'local',
         hasCustomPassword: true
       },
@@ -330,6 +332,8 @@ class AuthService {
         credits: user.credits !== undefined ? user.credits : 100,
         organization: user.organization,
         phone: user.phone || '',
+        avatar: user.avatar || user.photoURL || '',
+        photoURL: user.avatar || user.photoURL || '',
         authProvider: user.authProvider || 'local',
         hasCustomPassword: user.hasCustomPassword !== undefined ? user.hasCustomPassword : (user.authProvider !== 'google')
       },
@@ -690,6 +694,8 @@ class AuthService {
         hasGrowthPlan: Boolean(user.hasGrowthPlan || user.plan === 'growth'),
         planPaidAmount: user.planPaidAmount || 0,
         credits: user.credits !== undefined ? user.credits : 100,
+        avatar: user.avatar || user.photoURL || '',
+        photoURL: user.avatar || user.photoURL || '',
         organization: user.organization,
         authProvider: user.authProvider || 'google',
         hasCustomPassword: user.hasCustomPassword || false

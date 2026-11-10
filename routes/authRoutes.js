@@ -427,6 +427,8 @@ router.get('/me', protect, async (req, res, next) => {
         subscription: activeSub,
         planPaidAmount: activeSub?.price !== undefined ? activeSub.price : (userDoc.planPaidAmount || 0),
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,
+        avatar: userDoc.avatar || userDoc.photoURL || '',
+        photoURL: userDoc.avatar || userDoc.photoURL || '',
         organization: userDoc.organization,
         isChatEnabled: !!userDoc.isChatEnabled,
         chatStatus: userDoc.chatStatus || 'offline',
@@ -537,10 +539,10 @@ router.put('/organization', protect, async (req, res, next) => {
   }
 });
 
-// Update Account Profile details (name, email, phone, company, designation, city)
+// Update Account Profile details (name, email, phone, company, designation, city, avatar)
 router.put('/profile', protect, async (req, res, next) => {
   try {
-    const { name, email, phone, company, designation, city, phoneVerificationToken } = req.body;
+    const { name, email, phone, company, designation, city, avatar, photoURL, phoneVerificationToken } = req.body;
     const userDoc = await User.findById(req.user.id);
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'User account not found' });
@@ -575,6 +577,14 @@ router.put('/profile', protect, async (req, res, next) => {
     if (designation !== undefined) userDoc.designation = designation;
     if (city !== undefined) userDoc.city = city;
 
+    if (avatar !== undefined) {
+      userDoc.avatar = avatar;
+      userDoc.photoURL = avatar;
+    } else if (photoURL !== undefined) {
+      userDoc.avatar = photoURL;
+      userDoc.photoURL = photoURL;
+    }
+
     if (email && email.toLowerCase() !== userDoc.email.toLowerCase()) {
       const existingUser = await User.findOne({ email: email.toLowerCase() });
       if (existingUser && existingUser._id.toString() !== userDoc._id.toString()) {
@@ -598,6 +608,8 @@ router.put('/profile', protect, async (req, res, next) => {
         company: updatedUser.company || '',
         designation: updatedUser.designation || '',
         city: updatedUser.city || '',
+        avatar: updatedUser.avatar || updatedUser.photoURL || '',
+        photoURL: updatedUser.avatar || updatedUser.photoURL || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
         credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
@@ -667,6 +679,8 @@ router.put('/change-password', protect, async (req, res, next) => {
         company: updatedUser.company || '',
         designation: updatedUser.designation || '',
         city: updatedUser.city || '',
+        avatar: updatedUser.avatar || updatedUser.photoURL || '',
+        photoURL: updatedUser.avatar || updatedUser.photoURL || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
         credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
@@ -736,6 +750,8 @@ router.post('/impersonate-exchange', async (req, res, next) => {
         role: userDoc.role,
         isVerified: userDoc.isVerified,
         credits: userDoc.credits !== undefined ? userDoc.credits : 100,
+        avatar: userDoc.avatar || userDoc.photoURL || '',
+        photoURL: userDoc.avatar || userDoc.photoURL || '',
         organization: userDoc.organization,
         authProvider: userDoc.authProvider || 'local',
         hasCustomPassword: userDoc.hasCustomPassword !== undefined ? userDoc.hasCustomPassword : true

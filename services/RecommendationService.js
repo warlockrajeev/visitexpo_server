@@ -521,13 +521,11 @@ class RecommendationService {
       );
     }
 
-    // Filter out concluded events, test placeholders & apply timeframe ('upcoming' | '30days')
+    // Filter out test placeholders & apply timeframe ('upcoming' | '30days' | '90days')
     workingEvents = workingEvents.filter((ev) => {
       if (ev.slug === 'usd-inr' || /^usd\s+inr$/i.test(String(ev.title || '').trim())) return false;
       const start = ev.startDate ? new Date(ev.startDate) : null;
       const end = ev.endDate ? new Date(ev.endDate) : start;
-      if (end && !isNaN(end.getTime()) && end < yesterday) return false;
-      if (/\b202[0-5]\b/.test(String(ev.title || ''))) return false;
       if (timeframe === '30days') {
         if (!start || isNaN(start.getTime())) return false;
         const in30Days = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
