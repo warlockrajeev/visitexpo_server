@@ -126,11 +126,11 @@ router.get('/', wordpressLimiter, async (req, res, next) => {
     
     const filters = { search, category, city, venue, organizerId, status, all, upcoming, slugs };
     
-    // Default options
+    // Default options (latest date events first)
     const options = {
       page: parseInt(page, 10) || 1,
       limit: parseInt(limit, 10) || 1000,
-      sort: sort ? (typeof sort === 'string' ? (sort.startsWith('{') ? JSON.parse(sort) : { [sort]: 1 }) : sort) : { startDate: 1 },
+      sort: sort ? (typeof sort === 'string' ? (sort.startsWith('{') ? JSON.parse(sort) : { [sort]: -1 }) : sort) : { startDate: -1 },
       populate: 'organizer'
     };
 

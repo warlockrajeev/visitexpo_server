@@ -1286,7 +1286,11 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     .map(o => ({
       ...o,
       count: o.events.length,
-      events: o.events
+      events: [...o.events].sort((a, b) => {
+        const tA = a.startDate ? new Date(a.startDate).getTime() : 0;
+        const tB = b.startDate ? new Date(b.startDate).getTime() : 0;
+        return tB - tA;
+      })
     }))
     .sort((a, b) => b.count - a.count);
 

@@ -80,18 +80,31 @@ const CATEGORY_IMAGE_POOLS = {
 };
 
 function inferCategory(title = '', desc = '') {
-  const text = `${title} ${desc}`.toLowerCase();
-  if (/\b(art|jewel|jewellery|jewelry|lifestyle|photo|handicraft|madridjoya|wedding|bridal|marriage|decor|interior|gift|gifts|luxury|pet|pets|cosmetics|beauty|hair|salon)\b/i.test(text)) return 'Art & Lifestyle';
-  if (/\b(health|med|medical|pharma|cancer|doctor|hospital|surgical|pharmaexpo|iranpharma|dent|dental|biotech|clinical|nurse)\b/i.test(text)) return 'Healthcare & Pharma';
-  if (/\b(textile|garment|fabric|yarn|fashion|apparel|dye|bisutex|clothing|leather|tailor|sewing|knit|hometextile)\b/i.test(text)) return 'Textile & Fashion';
-  if (/\b(rice|food|agriculture|bakery|crop|biofuel|grain|beverage|confectionery|agritech|dairy|ice cream|seafood|agro|farming|spice|organic|sugar)\b/i.test(text)) return 'Agri & Food Tech';
-  if (/\b(travel|tourism|tourist|destination|hospitality|hotel|resort|leisure|cruise|mice|resa|iftm)\b/i.test(text)) return 'Travel & Tourism';
-  if (/\b(auto|automobile|automotive|vehicles?|motor|motors|ev|evs|electric vehicle|mobility|tyre|tire|truck|trucks|transport|rodeo|car|cars)\b/i.test(text)) return 'Automotive & EV';
-  if (/\b(airport|aviation|rotorcraft|airlines?|airways?|aerospace|drone|aircraft)\b/i.test(text)) return 'Aerospace & Aviation';
-  if (/\b(cargo|logistics|freight|supply chain|warehousing|innotrans|shipping|maritime)\b/i.test(text)) return 'Logistics & Cargo';
-  if (/\b(build|building|construction|cement|concrete|infrastructure|municipal|architecture|foaid|real estate|property|housing|realty|urban land|flooring|roofing)\b/i.test(text)) return 'Construction & Infra';
-  if (/\b(tech|technology|ai|software|cyber|iot|cloud|digital|broadcast|bes|lighting|led|electronics|semiconductor|smart|startup|startupx|it|data|telecom)\b/i.test(text)) return 'Technology & AI';
-  if (/\b(energy|solar|power|water|environment|waste|clean|renewable|sustainability|storage|battery|oil|gas|wind)\b/i.test(text)) return 'Energy & Environment';
+  const cleanTitle = String(title || '').toLowerCase().replace(/state-of-the-art|state of the art/g, ' ');
+  const cleanDesc = String(desc || '').toLowerCase().replace(/state-of-the-art|state of the art/g, ' ');
+
+  const matchRules = [
+    { label: 'Healthcare & Pharma', regex: /\b(health|healthcare|medicall|medical|pharma\w*|cancer|doctor|hospital|surgical|dental|biotech\w*|clinical|nurse|diagnostic\w*|ayurved\w*|medtech|cphi)\b/i },
+    { label: 'Automotive & EV', regex: /\b(automotive|automobile|automechanika|auto\s+expo|motor\s+show|electric\s+vehicle|ev\s+expo|ev\s+india|e-mobility|bharat\s+mobility|tyre|tire|two-wheeler|busworld)\b/i },
+    { label: 'Construction & Infra', regex: /\b(build|building|buildcon|construction|conmach|cement|concrete|infrastructure|municipal|architecture|foaid|real\s+estate|property|housing|flooring|roofing|glasspex|glasspro|ceramics|elevator|hvac|bauma)\b/i },
+    { label: 'Manufacturing & Machinery', regex: /\b(manufacturing|machinery|machine\s+tools?|imtex|engimach|engiexpo|automation|robotics|welding|foundry|packaging|pack\s+expo|plastindia|plasto|plastics|recycling|chemical|printpack|wire\s+and\s+cable|cable\s*&\s*wire)\b/i },
+    { label: 'Textile & Fashion', regex: /\b(textile\w*|garment\w*|fabric\w*|yarn|fashion|apparel|denim|clothing|leather|sewing|knit\w*|hometextile|handloom|footwear)\b/i },
+    { label: 'Agri & Food Tech', regex: /\b(rice|food\w*|agriculture|agricultural|bakery|crop|biofuel|grain|beverage\w*|confectionery|agritech|dairy|ice\s+cream|seafood|agro\w*|farming|spice\w*|organic|sugar|aahar|horeca|hospitality|horti\w*)\b/i },
+    { label: 'Energy & Environment', regex: /\b(renewable\s+energy|solar|powergen|power\s+generation|elecrama|water\s+expo|clean\s+energy|battery\s+show|oil\s+and\s+gas|wind\s+energy|refining|petrochemical\w*|hydrogen)\b/i },
+    { label: 'Finance & FinTech', regex: /\b(finance|financial|fintech|money\s+expo|banking|ibex|insurance|investment|wealth|crypto|bfsi)\b/i },
+    { label: 'Aerospace & Aviation', regex: /\b(airport|aviation|rotorcraft|airlines?|airways?|aerospace|drone|aircraft)\b/i },
+    { label: 'Logistics & Cargo', regex: /\b(cargo|logistics|freight|supply\s+chain|warehousing|innotrans|shipping|maritime|cold\s+chain)\b/i },
+    { label: 'Travel & Tourism', regex: /\b(travel|tourism|tourist|destination|resort|leisure|cruise|mice|iftm|ttf|satte|otm)\b/i },
+    { label: 'Technology & AI', regex: /\b(technology|artificial\s+intelligence|gitex|software|cyber\w*|iot\b|cloud\s+computing|broadcast\w*|electronics|semiconductor\w*|semicon|telecom\w*|infocomm|et\s+tech|tech\s+expo|tech\s+summit)\b/i },
+    { label: 'Art & Lifestyle', regex: /\b(jewel\w*|jewelry|handicraft|madridjoya|wedding|bridal|marriage|gifts?\s+fair|luxury|pet\s+trade|interzoo|anido|iiptf|cosmetics|beauty|salon)\b/i }
+  ];
+
+  for (const rule of matchRules) {
+    if (rule.regex.test(cleanTitle)) return rule.label;
+  }
+  for (const rule of matchRules) {
+    if (rule.regex.test(cleanDesc)) return rule.label;
+  }
   return 'Trade & Industry';
 }
 
@@ -454,11 +467,11 @@ class WordPressDirectorySyncService {
       return memoryCache.events;
     }
 
-    // Query directly from indexed MongoDB
+    // Query directly from indexed MongoDB (latest date events first)
     const rawEvents = await Event.find({ status: { $ne: 'cancelled' } })
-      .select('title slug description banner venue address city country startDate endDate timings categories organizer orgName wpPostId wpUrl isClaimed status isFreeEvent paidTicketPrice')
+      .select('title slug description banner venue address city country startDate endDate timings categories organizer orgName wpPostId wpUrl isClaimed status isFreeEvent paidTicketPrice createdAt')
       .populate('organizer', 'name email logo website')
-      .sort({ startDate: 1 })
+      .sort({ startDate: -1 })
       .lean();
 
     const events = (rawEvents || []).map((doc) => {
@@ -473,14 +486,14 @@ class WordPressDirectorySyncService {
         (!isHostnameOrId && rawOrgName ? rawOrgName : '') ||
         'VisitExpo Verified Organizer';
 
+      const resolvedCategory = inferCategory(doc.title, doc.description);
       return {
         ...doc,
         organizer: cleanOrganizer,
         organizerName: cleanOrganizer,
         orgName: cleanOrganizer,
-        category:
-          (Array.isArray(doc.categories) && doc.categories[0]) ||
-          inferCategory(doc.title, doc.description)
+        category: resolvedCategory,
+        categories: [resolvedCategory]
       };
     });
 
