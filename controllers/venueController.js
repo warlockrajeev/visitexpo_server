@@ -5,6 +5,7 @@
 
 import Venue from '../models/Venue.js';
 import Event from '../models/Event.js';
+import Review from '../models/Review.js';
 import { DEFAULT_VENUES } from '../data/defaultVenues.js';
 
 // Helper to normalize strings into URL-safe slugs
@@ -169,8 +170,8 @@ export async function getAllVenues(req, res) {
 
       return {
         ...v,
-        liveTotalEvents: Math.max(liveTotal, parseInt(v.eventsHosted, 10) || 0),
-        liveUpcomingEvents: liveUpcoming > 0 ? liveUpcoming : parseInt(v.upcomingEventsCount, 10) || 0
+        liveTotalEvents: liveTotal,
+        liveUpcomingEvents: liveUpcoming
       };
     });
 
@@ -204,21 +205,72 @@ export async function getAllVenues(req, res) {
 
 /**
  * GET /api/venues/:slug
- * Get a single venue by slug or ID with its matching live events.
+ * Get a single venue by slug or ID with its matching live events and dynamic real-time metrics.
  */
 export async function getVenueBySlug(req, res) {
   try {
     const { slug } = req.params;
+    const cleanSlug = String(slug || '').toLowerCase().trim();
+
     let venue = await Venue.findOne({
-      $or: [{ slug: slug.toLowerCase() }, { _id: slug.match(/^[0-9a-fA-F]{24}$/) ? slug : null }]
+      $or: [
+        { slug: cleanSlug },
+        { _id: cleanSlug.match(/^[0-9a-fA-F]{24}$/) ? cleanSlug : null }
+      ].filter(Boolean)
     });
 
     // Fallback to default venues if not found
     if (!venue) {
-      const defaultVenue = DEFAULT_VENUES.find((d) => d.slug === slug.toLowerCase());
+      const defaultVenue = DEFAULT_VENUES.find((d) => d.slug === cleanSlug);
       if (defaultVenue) {
         venue = await Venue.create(defaultVenue);
       }
+    }
+
+    // Fallback by slug regex pattern or name matching
+    if (!venue) {
+      const slugPattern = cleanSlug.replace(/-/g, '.*');
+      const namePattern = cleanSlug.replace(/-/g, ' ');
+      venue = await Venue.findOne({
+        $or: [
+          { slug: { $regex: `^${slugPattern}$`, $options: 'i' } },
+          { name: { $regex: namePattern, $options: 'i' } },
+          { shortName: { $regex: namePattern, $options: 'i' } }
+        ]
+      });
+    }
+
+    // Auto-discover venue from events if not registered yet
+    if (!venue) {
+      const rawSearch = cleanSlug.replace(/-/g, ' ');
+      const sampleEvent = await Event.findOne({
+        $or: [
+          { venue: { $regex: rawSearch, $options: 'i' } },
+          { address: { $regex: rawSearch, $options: 'i' } }
+        ]
+      });
+
+      const titleName = rawSearch.replace(/\b\w/g, (c) => c.toUpperCase());
+      const cityName = sampleEvent?.city || 'India';
+      venue = await Venue.create({
+        slug: cleanSlug,
+        name: sampleEvent?.venue || titleName,
+        shortName: (sampleEvent?.venue || titleName).split(',')[0],
+        tagline: `Premier Convention & Exhibition Facility in ${cityName}`,
+        city: cityName,
+        country: sampleEvent?.country || 'India',
+        address: sampleEvent?.address || `${titleName}, ${cityName}, India`,
+        heroBanner: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?q=80&w=1600&auto=format&fit=crop',
+        logoThumbnail: 'https://images.unsplash.com/photo-1541971875076-8f970d573be6?q=80&w=300&auto=format&fit=crop',
+        gallery: [],
+        overviewDescription: `${titleName} is one of ${cityName}'s foremost venues for trade fairs, international conventions, and industry conclaves.`,
+        rating: 0,
+        ratingsCount: 0,
+        followersCount: '18K+',
+        bestSuited: sampleEvent?.category || 'Industrial & Trade Expos',
+        eventsHosted: '0',
+        upcomingEventsCount: '0'
+      });
     }
 
     if (!venue) {
@@ -229,16 +281,86 @@ export async function getVenueBySlug(req, res) {
     }
 
     const vShort = (venue.shortName || venue.name).trim();
+    const vName = (venue.name || '').trim();
+    const vSlugTokens = venue.slug.split('-').filter((t) => t.length > 2 && !['ground', 'centre', 'center', 'complex', 'hall', 'india', 'expo'].includes(t));
+
+    const eventQueryConditions = [
+      { venue: { $regex: vShort, $options: 'i' } },
+      { address: { $regex: vShort, $options: 'i' } },
+      { venue: { $regex: vName, $options: 'i' } }
+    ];
+
+    if (vSlugTokens.length > 0) {
+      vSlugTokens.forEach((token) => {
+        eventQueryConditions.push({ venue: { $regex: `\\b${token}\\b`, $options: 'i' } });
+      });
+    }
+
     const liveEvents = await Event.find({
-      $or: [
-        { venue: { $regex: vShort, $options: 'i' } },
-        { address: { $regex: vShort, $options: 'i' } }
-      ]
-    }).sort({ startDate: 1 });
+      $or: eventQueryConditions
+    }).sort({ startDate: 1 }).lean();
+
+    const now = new Date();
+    const upcomingCount = liveEvents.filter((e) => {
+      const end = e.endDate ? new Date(e.endDate) : (e.startDate ? new Date(e.startDate) : null);
+      return !end || end >= now;
+    }).length;
+
+    // Dynamically calculate dominant category from actual live database events
+    const categoryFreq = {};
+    liveEvents.forEach((ev) => {
+      const cat = ev.category || (Array.isArray(ev.categories) ? ev.categories[0] : ev.categories);
+      if (cat && typeof cat === 'string') {
+        const trimmed = cat.trim();
+        categoryFreq[trimmed] = (categoryFreq[trimmed] || 0) + 1;
+      }
+    });
+    const sortedCats = Object.entries(categoryFreq).sort((a, b) => b[1] - a[1]);
+    const dynamicCategory = sortedCats.length > 0 ? sortedCats[0][0] : (venue.bestSuited || 'Industrial & Trade Expos');
+
+    // Dynamically calculate live reviews and ratings aggregate
+    let reviewCount = 0;
+    let averageRating = 0;
+    try {
+      const reviewAgg = await Review.aggregate([
+        {
+          $match: {
+            $or: [
+              { venueSlug: venue.slug },
+              { targetSlug: venue.slug },
+              { venue: venue.name }
+            ],
+            status: { $in: ['approved', 'featured'] }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            count: { $sum: 1 },
+            avgRating: { $avg: '$rating' }
+          }
+        }
+      ]);
+      if (reviewAgg.length > 0) {
+        reviewCount = reviewAgg[0].count;
+        averageRating = Math.round(reviewAgg[0].avgRating * 10) / 10;
+      }
+    } catch (_) {}
+
+    const dynamicVenue = {
+      ...(venue.toObject ? venue.toObject() : venue),
+      liveTotalEvents: liveEvents.length,
+      liveUpcomingEvents: upcomingCount,
+      eventsHosted: String(liveEvents.length),
+      upcomingEventsCount: String(upcomingCount),
+      bestSuited: dynamicCategory,
+      rating: averageRating,
+      ratingsCount: reviewCount
+    };
 
     res.status(200).json({
       success: true,
-      data: venue,
+      data: dynamicVenue,
       events: liveEvents
     });
   } catch (err) {

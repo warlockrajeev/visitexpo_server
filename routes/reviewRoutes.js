@@ -7,6 +7,7 @@
 import express from 'express';
 import Review from '../models/Review.js';
 import Venue from '../models/Venue.js';
+import Event from '../models/Event.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 
@@ -41,8 +42,64 @@ async function getVenueReviewAggregate(venueSlug) {
   ]);
   return {
     count: aggregate?.count || 0,
-    averageRating: aggregate?.averageRating || 0
+    averageRating: aggregate?.averageRating ? Math.round(aggregate.averageRating * 10) / 10 : 0
   };
+}
+
+async function syncVenueRating(venueSlug) {
+  if (!venueSlug) return;
+  try {
+    const aggregate = await getVenueReviewAggregate(venueSlug);
+    await Venue.findOneAndUpdate(
+      { slug: venueSlug },
+      {
+        rating: aggregate.averageRating,
+        ratingsCount: aggregate.count
+      }
+    );
+  } catch (_) {}
+}
+
+async function getEventReviewAggregate(eventSlug) {
+  const slug = String(eventSlug || '').toLowerCase().trim();
+  if (!slug) return { count: 0, averageRating: 0 };
+  const [aggregate] = await Review.aggregate([
+    {
+      $match: {
+        $or: [
+          { eventSlug: slug },
+          { eventSlug: { $regex: new RegExp(`^${slug}$`, 'i') } }
+        ],
+        status: { $in: ['approved', 'featured', 'pending'] }
+      }
+    },
+    { $group: { _id: null, count: { $sum: 1 }, averageRating: { $avg: '$rating' } } }
+  ]);
+  return {
+    count: aggregate?.count || 0,
+    averageRating: aggregate?.averageRating ? Number(aggregate.averageRating.toFixed(1)) : 0
+  };
+}
+
+async function syncEventRating(eventSlug) {
+  try {
+    const slug = String(eventSlug || '').toLowerCase().trim();
+    if (!slug) return null;
+    const aggregate = await getEventReviewAggregate(slug);
+    await Event.findOneAndUpdate(
+      {
+        $or: [
+          { slug },
+          { slug: { $regex: new RegExp(`^${slug}$`, 'i') } }
+        ]
+      },
+      { rating: aggregate.averageRating, reviewCount: aggregate.count }
+    );
+    return aggregate;
+  } catch (err) {
+    console.warn('syncEventRating warning:', err.message);
+    return null;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -134,10 +191,14 @@ router.post('/', async (req, res) => {
       submittedAt: new Date()
     });
 
+    const aggregate = await syncEventRating(newReview.eventSlug);
+
     res.status(201).json({
       success: true,
       message: 'Comment posted successfully!',
-      data: newReview
+      data: newReview,
+      count: aggregate?.count ?? 1,
+      averageRating: aggregate?.averageRating ?? newReview.rating
     });
   } catch (err) {
     console.error('Error submitting review:', err);
@@ -192,18 +253,26 @@ router.get('/featured', async (req, res) => {
 router.get('/event/:slug', async (req, res) => {
   try {
     const slug = (req.params.slug || '').toLowerCase().trim();
-    const reviews = await Review.find({
-      $or: [
-        { eventSlug: slug },
-        { eventSlug: { $regex: new RegExp(`^${slug}$`, 'i') } }
-      ],
-      status: { $in: ['approved', 'featured', 'pending'] }
-    })
-      .sort({ createdAt: -1 })
-      .limit(50)
-      .lean();
+    const [reviews, aggregate] = await Promise.all([
+      Review.find({
+        $or: [
+          { eventSlug: slug },
+          { eventSlug: { $regex: new RegExp(`^${slug}$`, 'i') } }
+        ],
+        status: { $in: ['approved', 'featured', 'pending'] }
+      })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean(),
+      getEventReviewAggregate(slug)
+    ]);
 
-    res.status(200).json({ success: true, count: reviews.length, data: reviews });
+    res.status(200).json({
+      success: true,
+      count: aggregate.count,
+      averageRating: aggregate.averageRating,
+      data: reviews
+    });
   } catch (err) {
     console.error('Error fetching event reviews:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch event reviews.' });
@@ -287,6 +356,7 @@ router.post('/venue', protect, async (req, res) => {
       submittedAt: new Date()
     });
     const aggregate = await getVenueReviewAggregate(venue.slug);
+    await syncVenueRating(venue.slug);
 
     res.status(201).json({
       success: true,
@@ -345,6 +415,7 @@ router.put('/venue/:id', protect, async (req, res) => {
     await review.save();
 
     const aggregate = await getVenueReviewAggregate(review.venueSlug);
+    await syncVenueRating(review.venueSlug);
     res.status(200).json({
       success: true,
       message: 'Venue review updated successfully.',
@@ -375,6 +446,7 @@ router.delete('/venue/:id', protect, async (req, res) => {
     const venueSlug = review.venueSlug;
     await review.deleteOne();
     const aggregate = await getVenueReviewAggregate(venueSlug);
+    await syncVenueRating(venueSlug);
     res.status(200).json({
       success: true,
       message: 'Venue review deleted successfully.',
@@ -450,7 +522,14 @@ router.put('/:id', async (req, res) => {
     if (!updated) {
       return res.status(404).json({ success: false, error: 'Review not found.' });
     }
-    res.status(200).json({ success: true, data: updated, message: 'Review updated successfully.' });
+    const aggregate = await syncEventRating(updated.eventSlug);
+    res.status(200).json({
+      success: true,
+      data: updated,
+      count: aggregate?.count ?? 0,
+      averageRating: aggregate?.averageRating ?? 0,
+      message: 'Review updated successfully.'
+    });
   } catch (err) {
     console.error('Error updating review:', err);
     res.status(500).json({ success: false, error: 'Failed to update review.' });
@@ -467,7 +546,13 @@ router.delete('/:id', async (req, res) => {
     if (!review) {
       return res.status(404).json({ success: false, error: 'Review not found.' });
     }
-    res.status(200).json({ success: true, message: 'Review deleted successfully.' });
+    const aggregate = await syncEventRating(review.eventSlug);
+    res.status(200).json({
+      success: true,
+      count: aggregate?.count ?? 0,
+      averageRating: aggregate?.averageRating ?? 0,
+      message: 'Review deleted successfully.'
+    });
   } catch (err) {
     console.error('Error deleting review:', err);
     res.status(500).json({ success: false, error: 'Failed to delete review.' });

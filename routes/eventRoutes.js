@@ -28,6 +28,7 @@ import WordPressDirectorySyncService from '../services/WordPressDirectorySyncSer
 import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBadgeService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import LocationFeasibilityService from '../services/LocationFeasibilityService.js';
+import { invalidateVenuesCache } from '../controllers/venueController.js';
 
 const router = express.Router();
 
@@ -1132,6 +1133,8 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
     // Automatically sync event to WordPress
     await syncEventToWordPress(event._id);
 
+    try { invalidateVenuesCache(); } catch (_) {}
+
     res.status(201).json({ success: true, message: 'Event created successfully', event });
   } catch (error) {
     if (error.statusCode === 409) {
@@ -1164,6 +1167,8 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
 
     // Automatically sync event to WordPress
     await syncEventToWordPress(event._id);
+
+    try { invalidateVenuesCache(); } catch (_) {}
 
     res.status(200).json({ success: true, message: 'Event updated successfully', event });
   } catch (error) {
@@ -1251,6 +1256,8 @@ router.delete('/:id', protect, authorize('super_admin', 'organizer', 'event_mana
       },
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
+
+    try { invalidateVenuesCache(); } catch (_) {}
 
     res.status(200).json({ success: true, message: 'Event deleted successfully' });
   } catch (error) {
