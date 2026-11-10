@@ -7,6 +7,7 @@ import Venue from '../models/Venue.js';
 import Event from '../models/Event.js';
 import Review from '../models/Review.js';
 import { DEFAULT_VENUES } from '../data/defaultVenues.js';
+import { getNearbyHotelsForVenue } from '../data/defaultHotels.js';
 
 // Helper to normalize strings into URL-safe slugs
 function slugify(text) {
@@ -355,7 +356,8 @@ export async function getVenueBySlug(req, res) {
       upcomingEventsCount: String(upcomingCount),
       bestSuited: dynamicCategory,
       rating: averageRating,
-      ratingsCount: reviewCount
+      ratingsCount: reviewCount,
+      nearbyHotels: getNearbyHotelsForVenue(venue)
     };
 
     res.status(200).json({
@@ -585,3 +587,37 @@ export async function removeVenueImage(req, res) {
     });
   }
 }
+
+/**
+ * @desc Get nearby hotels for a specific venue
+ * @route GET /api/venues/:slug/hotels
+ * @access Public
+ */
+export const getVenueHotels = async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const cleanSlug = (slug || '').toLowerCase().trim();
+    let venue = await Venue.findOne({ slug: cleanSlug });
+    if (!venue) {
+      venue = {
+        slug: cleanSlug,
+        name: cleanSlug.replace(/-/g, ' '),
+        shortName: cleanSlug.replace(/-/g, ' '),
+        city: 'India',
+        address: cleanSlug.replace(/-/g, ' ')
+      };
+    }
+    const hotels = getNearbyHotelsForVenue(venue);
+    return res.status(200).json({
+      success: true,
+      count: hotels.length,
+      data: hotels
+    });
+  } catch (err) {
+    console.error('[Venues] Error in getVenueHotels:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve nearby hotels'
+    });
+  }
+};

@@ -7,6 +7,7 @@ import express from 'express';
 import {
   getAllVenues,
   getVenueBySlug,
+  getVenueHotels,
   createVenue,
   updateVenue,
   addVenueImages,
@@ -19,6 +20,7 @@ const router = express.Router();
 // Public routes (used by client-dashboard and client-admin preview)
 router.get('/', getAllVenues);
 router.get('/:slug', getVenueBySlug);
+router.get('/:slug/hotels', getVenueHotels);
 
 // Protected routes (admin/superadmin management)
 router.post('/', protect, authorize('superadmin', 'admin'), createVenue);
