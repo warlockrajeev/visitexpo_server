@@ -8,6 +8,7 @@ import {
   getAllVenues,
   getVenueBySlug,
   getVenueHotels,
+  getVenueEvents,
   createVenue,
   updateVenue,
   addVenueImages,
@@ -21,6 +22,7 @@ const router = express.Router();
 router.get('/', getAllVenues);
 router.get('/:slug', getVenueBySlug);
 router.get('/:slug/hotels', getVenueHotels);
+router.get('/:slug/events', getVenueEvents);
 
 // Protected routes (admin/superadmin management)
 router.post('/', protect, authorize('superadmin', 'admin'), createVenue);

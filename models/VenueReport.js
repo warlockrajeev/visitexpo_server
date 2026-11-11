@@ -34,6 +34,21 @@ const venueReportSchema = new mongoose.Schema(
       default: '',
       trim: true
     },
+    userId: {
+      type: String,
+      default: '',
+      trim: true
+    },
+    userEmail: {
+      type: String,
+      default: '',
+      trim: true
+    },
+    userName: {
+      type: String,
+      default: '',
+      trim: true
+    },
     status: {
       type: String,
       enum: ['pending', 'reviewing', 'resolved', 'dismissed'],

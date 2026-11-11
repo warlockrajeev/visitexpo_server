@@ -16,7 +16,17 @@ const REPORT_CATEGORIES = [
 
 router.post('/', async (req, res, next) => {
   try {
-    const { venueId, venueName, venueAddress = '', category, description, imageUrl = '' } = req.body || {};
+    const {
+      venueId,
+      venueName,
+      venueAddress = '',
+      category,
+      description,
+      imageUrl = '',
+      userId = '',
+      userEmail = '',
+      userName = ''
+    } = req.body || {};
     if (
       typeof venueId !== 'string' || !venueId.trim() || venueId.length > 200 ||
       typeof venueName !== 'string' || !venueName.trim() || venueName.length > 200
@@ -49,7 +59,10 @@ router.post('/', async (req, res, next) => {
       venueAddress: venueAddress.trim(),
       category,
       description: description.trim(),
-      imageUrl
+      imageUrl,
+      userId: typeof userId === 'string' ? userId.trim() : '',
+      userEmail: typeof userEmail === 'string' ? userEmail.trim() : '',
+      userName: typeof userName === 'string' ? userName.trim() : ''
     });
 
     return res.status(201).json({

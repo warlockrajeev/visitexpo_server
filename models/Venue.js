@@ -89,11 +89,15 @@ const venueSchema = new mongoose.Schema(
     },
     rating: {
       type: Number,
-      default: 4.8
+      default: 0
     },
     ratingsCount: {
       type: Number,
-      default: 500
+      default: 0
+    },
+    ratingSource: {
+      type: String,
+      default: ''
     },
     followersCount: {
       type: String,

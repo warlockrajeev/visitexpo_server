@@ -10,6 +10,8 @@ import Venue from '../models/Venue.js';
 import Event from '../models/Event.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
+import { invalidateVenuesCache } from '../controllers/venueController.js';
+import { DEFAULT_VENUES } from '../data/defaultVenues.js';
 
 const router = express.Router();
 
@@ -50,13 +52,29 @@ async function syncVenueRating(venueSlug) {
   if (!venueSlug) return;
   try {
     const aggregate = await getVenueReviewAggregate(venueSlug);
-    await Venue.findOneAndUpdate(
-      { slug: venueSlug },
-      {
-        rating: aggregate.averageRating,
-        ratingsCount: aggregate.count
-      }
-    );
+    if (aggregate.count > 0) {
+      await Venue.findOneAndUpdate(
+        { slug: venueSlug },
+        {
+          rating: aggregate.averageRating,
+          ratingsCount: aggregate.count,
+          ratingSource: 'VisitExpo Verified Reviews'
+        }
+      );
+    } else {
+      const defaultMatch = DEFAULT_VENUES.find((d) => d.slug === venueSlug);
+      await Venue.findOneAndUpdate(
+        { slug: venueSlug },
+        {
+          rating: defaultMatch ? defaultMatch.rating : 0,
+          ratingsCount: defaultMatch ? defaultMatch.ratingsCount : 0,
+          ratingSource: defaultMatch ? (defaultMatch.ratingSource || 'Google Verified Reviews') : 'No reviews yet'
+        }
+      );
+    }
+    if (typeof invalidateVenuesCache === 'function') {
+      invalidateVenuesCache();
+    }
   } catch (_) {}
 }
 

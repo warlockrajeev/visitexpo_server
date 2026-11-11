@@ -562,7 +562,7 @@ router.get('/check-duplicate', async (req, res, next) => {
 router.get('/:slug', wordpressLimiter, async (req, res, next) => {
   try {
     const event = await EventService.getEventBySlug(req.params.slug);
-    res.status(200).json({ success: true, event });
+    res.status(200).json({ success: true, event, data: event });
   } catch (error) {
     next(error);
   }

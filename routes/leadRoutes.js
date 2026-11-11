@@ -374,6 +374,57 @@ router.post('/inquire', optionalAuth, async (req, res, next) => {
   }
 });
 
+// @desc    Check whether current authenticated attendee has submitted a speaker proposal
+// @route   GET /api/leads/my-speaker-status
+// @access  Public / Optional Auth
+router.get('/my-speaker-status', optionalAuth, async (req, res) => {
+  try {
+    const userEmail = (req.user?.email || req.query.email || '').toLowerCase().trim();
+    if (!userEmail) {
+      return res.json({ success: true, applied: false });
+    }
+
+    const { slug, eventId } = req.query;
+    let targetEvent = null;
+
+    if (eventId && mongoose.isValidObjectId(eventId)) {
+      targetEvent = await Event.findById(eventId);
+    }
+    if (!targetEvent && slug) {
+      targetEvent = await Event.findOne({ slug: String(slug).toLowerCase().trim() });
+    }
+    if (!targetEvent && eventId) {
+      targetEvent = await Event.findOne({
+        $or: [
+          { slug: String(eventId).toLowerCase().trim() },
+          { wpPostId: String(eventId) }
+        ]
+      });
+    }
+
+    if (!targetEvent) {
+      return res.json({ success: true, applied: false });
+    }
+
+    const existingLead = await Lead.findOne({
+      event: targetEvent._id,
+      email: userEmail,
+      $or: [
+        { notes: { $regex: /speaker|keynote/i } },
+        { 'activityTimeline.content': { $regex: /speaker|keynote/i } }
+      ]
+    });
+
+    return res.json({
+      success: true,
+      applied: !!existingLead
+    });
+  } catch (err) {
+    console.error('Error in my-speaker-status check:', err);
+    return res.json({ success: true, applied: false });
+  }
+});
+
 // =========================================================================
 // 2. PROTECTED ORGANIZER & ADMIN CRM ROUTES
 // =========================================================================

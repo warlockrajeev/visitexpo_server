@@ -31,6 +31,37 @@ async function ensureDefaultVenuesSeeded() {
     } catch (err) {
       console.warn('[Venues] Seeding initial venues note:', err.message);
     }
+  } else {
+    try {
+      // Sync verified default venues ratingSource
+      for (const d of DEFAULT_VENUES) {
+        await Venue.updateOne(
+          { slug: d.slug },
+          {
+            $set: {
+              rating: d.rating,
+              ratingsCount: d.ratingsCount,
+              ratingSource: d.ratingSource || 'Google Verified Reviews'
+            }
+          }
+        );
+      }
+      // Clean up any historical dummy ratings on auto-discovered venues
+      await Venue.updateMany(
+        {
+          slug: { $nin: DEFAULT_VENUES.map((d) => d.slug) },
+          $or: [
+            { rating: 4.8, ratingsCount: 500 },
+            { rating: 4.8, ratingsCount: 0 },
+            { ratingSource: { $exists: false } },
+            { ratingSource: '' }
+          ]
+        },
+        {
+          $set: { rating: 0, ratingsCount: 0, ratingSource: 'No reviews yet' }
+        }
+      );
+    } catch (_) {}
   }
 }
 
@@ -82,7 +113,9 @@ async function syncDiscoveredVenuesFromEvents() {
             'https://images.unsplash.com/photo-1541971875076-8f970d573be6?q=80&w=300&auto=format&fit=crop',
           gallery: ev.sampleImage ? [ev.sampleImage] : [],
           eventsHosted: `${ev.eventCount}+`,
-          rating: 4.8,
+          rating: 0,
+          ratingsCount: 0,
+          ratingSource: 'No reviews yet',
           overviewDescription: `${rawName} is a prominent venue host for conferences, exhibitions, and trade shows.`
         });
       }
@@ -154,6 +187,38 @@ export async function getAllVenues(req, res) {
       }
     });
 
+    // Compute genuine user review aggregates directly from Review collection
+    let reviewAgg = [];
+    try {
+      reviewAgg = await Review.aggregate([
+        {
+          $match: {
+            venueSlug: { $exists: true, $ne: '' },
+            status: { $in: ['approved', 'featured'] }
+          }
+        },
+        {
+          $group: {
+            _id: { $toLower: { $trim: { input: '$venueSlug' } } },
+            count: { $sum: 1 },
+            averageRating: { $avg: '$rating' }
+          }
+        }
+      ]);
+    } catch (reviewErr) {
+      console.warn('[Venues] Review aggregation warning:', reviewErr.message);
+    }
+
+    const reviewMap = new Map();
+    reviewAgg.forEach((r) => {
+      if (r._id) {
+        reviewMap.set(r._id, {
+          count: r.count,
+          averageRating: Math.round((r.averageRating || 0) * 10) / 10
+        });
+      }
+    });
+
     const enrichedVenues = venues.map((v) => {
       const vShort = (v.shortName || v.name || '').toLowerCase().trim();
       const vName = (v.name || '').toLowerCase().trim();
@@ -169,8 +234,40 @@ export async function getAllVenues(req, res) {
         }
       }
 
+      // Resolve genuine rating from live user reviews, verified external source, or unrated
+      const slugKey = (v.slug || '').toLowerCase().trim();
+      const liveReview = reviewMap.get(slugKey);
+
+      let finalRating = 0;
+      let finalCount = 0;
+      let finalSource = '';
+
+      if (liveReview && liveReview.count > 0) {
+        finalRating = liveReview.averageRating;
+        finalCount = liveReview.count;
+        finalSource = 'VisitExpo Verified Reviews';
+      } else if (v.ratingSource && v.ratingsCount > 0 && v.rating > 0 && v.ratingSource !== 'No reviews yet') {
+        finalRating = v.rating;
+        finalCount = v.ratingsCount;
+        finalSource = v.ratingSource;
+      } else {
+        const defaultMatch = DEFAULT_VENUES.find((d) => d.slug === slugKey);
+        if (defaultMatch && defaultMatch.ratingsCount > 0 && defaultMatch.rating > 0) {
+          finalRating = defaultMatch.rating;
+          finalCount = defaultMatch.ratingsCount;
+          finalSource = defaultMatch.ratingSource || 'Google Verified Reviews';
+        } else {
+          finalRating = 0;
+          finalCount = 0;
+          finalSource = 'No reviews yet';
+        }
+      }
+
       return {
         ...v,
+        rating: finalRating,
+        ratingsCount: finalCount,
+        ratingSource: finalSource,
         liveTotalEvents: liveTotal,
         liveUpcomingEvents: liveUpcoming
       };
@@ -297,9 +394,40 @@ export async function getVenueBySlug(req, res) {
       });
     }
 
+    // Specific known venue aliases
+    if (cleanSlug.includes('mandapam') || cleanSlug.includes('pragati') || venue.slug.includes('mandapam') || venue.slug.includes('pragati')) {
+      eventQueryConditions.push({ venue: { $regex: 'pragati maidan', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'bharat mandapam', $options: 'i' } });
+    }
+    if (cleanSlug.includes('yashobhoomi') || cleanSlug.includes('iicc') || venue.slug.includes('yashobhoomi') || venue.slug.includes('iicc')) {
+      eventQueryConditions.push({ venue: { $regex: 'yashobhoomi', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'iicc', $options: 'i' } });
+    }
+    if (cleanSlug.includes('nsic') || venue.slug.includes('nsic')) {
+      eventQueryConditions.push({ venue: { $regex: 'nsic', $options: 'i' } });
+    }
+    if (cleanSlug.includes('bec') || cleanSlug.includes('bombay') || cleanSlug.includes('nesco')) {
+      eventQueryConditions.push({ venue: { $regex: 'bombay exhibition', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'nesco', $options: 'i' } });
+    }
+    if (cleanSlug.includes('biec') || cleanSlug.includes('bangalore')) {
+      eventQueryConditions.push({ venue: { $regex: 'biec', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'bangalore exhibition', $options: 'i' } });
+    }
+    if (cleanSlug.includes('jio')) {
+      eventQueryConditions.push({ venue: { $regex: 'jio', $options: 'i' } });
+    }
+    if (cleanSlug.includes('ieml') || cleanSlug.includes('greater-noida') || cleanSlug.includes('india-expo')) {
+      eventQueryConditions.push({ venue: { $regex: 'expo centre', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'greater noida', $options: 'i' } });
+    }
+
     const liveEvents = await Event.find({
       $or: eventQueryConditions
-    }).sort({ startDate: 1 }).lean();
+    })
+      .select('_id slug title name startDate endDate dates category categories image banner city venue address attendeesCount expectedAttendees turnout')
+      .sort({ startDate: 1 })
+      .lean();
 
     const now = new Date();
     const upcomingCount = liveEvents.filter((e) => {
@@ -348,15 +476,21 @@ export async function getVenueBySlug(req, res) {
       }
     } catch (_) {}
 
+    const resolvedState = venue.state || (venue.city === 'New Delhi' || (venue.slug && (venue.slug.includes('mandapam') || venue.slug.includes('pragati'))) ? 'Delhi' : '') || venue.city || 'India';
+
     const dynamicVenue = {
       ...(venue.toObject ? venue.toObject() : venue),
+      state: resolvedState,
       liveTotalEvents: liveEvents.length,
       liveUpcomingEvents: upcomingCount,
       eventsHosted: String(liveEvents.length),
       upcomingEventsCount: String(upcomingCount),
       bestSuited: dynamicCategory,
-      rating: averageRating,
-      ratingsCount: reviewCount,
+      rating: reviewCount > 0 ? averageRating : (venue.rating || DEFAULT_VENUES.find((d) => d.slug === venue.slug)?.rating || 0),
+      ratingsCount: reviewCount > 0 ? reviewCount : (venue.ratingsCount || DEFAULT_VENUES.find((d) => d.slug === venue.slug)?.ratingsCount || 0),
+      ratingSource: reviewCount > 0
+        ? 'VisitExpo Verified Reviews'
+        : (venue.ratingSource || DEFAULT_VENUES.find((d) => d.slug === venue.slug)?.ratingSource || 'No reviews yet'),
       nearbyHotels: getNearbyHotelsForVenue(venue)
     };
 
@@ -618,6 +752,103 @@ export const getVenueHotels = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: 'Failed to retrieve nearby hotels'
+    });
+  }
+};
+
+/**
+ * @desc Get real dynamic exhibition events hosted at a specific venue
+ * @route GET /api/venues/:slug/events
+ * @access Public
+ */
+export const getVenueEvents = async (req, res) => {
+  try {
+    const { slug } = req.params;
+    const cleanSlug = (slug || '').toLowerCase().trim();
+
+    let venue = await Venue.findOne({
+      $or: [
+        { slug: cleanSlug },
+        { _id: cleanSlug.match(/^[0-9a-fA-F]{24}$/) ? cleanSlug : null }
+      ].filter(Boolean)
+    });
+
+    if (!venue) {
+      const slugPattern = cleanSlug.replace(/-/g, '.*');
+      const namePattern = cleanSlug.replace(/-/g, ' ');
+      venue = await Venue.findOne({
+        $or: [
+          { slug: { $regex: `^${slugPattern}$`, $options: 'i' } },
+          { name: { $regex: namePattern, $options: 'i' } },
+          { shortName: { $regex: namePattern, $options: 'i' } }
+        ]
+      });
+    }
+
+    const vShort = (venue?.shortName || venue?.name || cleanSlug.replace(/-/g, ' ')).trim();
+    const vName = (venue?.name || '').trim();
+    const vSlugTokens = cleanSlug.split('-').filter((t) => t.length > 2 && !['ground', 'centre', 'center', 'complex', 'hall', 'india', 'expo'].includes(t));
+
+    const eventQueryConditions = [
+      { venue: { $regex: vShort, $options: 'i' } },
+      { address: { $regex: vShort, $options: 'i' } }
+    ];
+    if (vName) {
+      eventQueryConditions.push({ venue: { $regex: vName, $options: 'i' } });
+    }
+    if (vSlugTokens.length > 0) {
+      vSlugTokens.forEach((token) => {
+        eventQueryConditions.push({ venue: { $regex: `\\b${token}\\b`, $options: 'i' } });
+      });
+    }
+
+    // Specific known aliases
+    if (cleanSlug.includes('mandapam') || cleanSlug.includes('pragati')) {
+      eventQueryConditions.push({ venue: { $regex: 'pragati maidan', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'bharat mandapam', $options: 'i' } });
+    }
+    if (cleanSlug.includes('yashobhoomi') || cleanSlug.includes('iicc')) {
+      eventQueryConditions.push({ venue: { $regex: 'yashobhoomi', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'iicc', $options: 'i' } });
+    }
+    if (cleanSlug.includes('nsic')) {
+      eventQueryConditions.push({ venue: { $regex: 'nsic', $options: 'i' } });
+    }
+    if (cleanSlug.includes('bec') || cleanSlug.includes('bombay') || cleanSlug.includes('nesco')) {
+      eventQueryConditions.push({ venue: { $regex: 'bombay exhibition', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'nesco', $options: 'i' } });
+    }
+    if (cleanSlug.includes('biec') || cleanSlug.includes('bangalore')) {
+      eventQueryConditions.push({ venue: { $regex: 'biec', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'bangalore exhibition', $options: 'i' } });
+    }
+    if (cleanSlug.includes('jio')) {
+      eventQueryConditions.push({ venue: { $regex: 'jio', $options: 'i' } });
+    }
+    if (cleanSlug.includes('ieml') || cleanSlug.includes('greater-noida') || cleanSlug.includes('india-expo')) {
+      eventQueryConditions.push({ venue: { $regex: 'expo centre', $options: 'i' } });
+      eventQueryConditions.push({ venue: { $regex: 'greater noida', $options: 'i' } });
+    }
+
+    const liveEvents = await Event.find({
+      $or: eventQueryConditions
+    })
+      .select('_id slug title name startDate endDate dates category categories image banner city venue address attendeesCount expectedAttendees turnout')
+      .sort({ startDate: 1 })
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      count: liveEvents.length,
+      data: liveEvents,
+      events: liveEvents
+    });
+  } catch (err) {
+    console.error('[Venues] Error in getVenueEvents:', err);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve venue events',
+      error: err.message
     });
   }
 };
