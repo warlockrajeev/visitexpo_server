@@ -343,6 +343,55 @@ router.post('/sync-wordpress', async (req, res, next) => {
   }
 });
 
+// @desc    Calculate genuine real-time trending statistics from database activity
+// @route   GET /api/events/trending-stats
+// @access  Public
+router.get('/trending-stats', async (req, res, next) => {
+  try {
+    // 1. Gather all events with genuine recorded activity in MongoDB
+    const [leadEventIds, ticketEventIds, engagementEventIds] = await Promise.all([
+      Lead.distinct('event'),
+      Ticket.distinct('event'),
+      EventEngagement.distinct('eventId')
+    ]);
+
+    const activeTrendingIdSet = new Set();
+    leadEventIds.forEach((id) => id && activeTrendingIdSet.add(String(id)));
+    ticketEventIds.forEach((id) => id && activeTrendingIdSet.add(String(id)));
+    engagementEventIds.forEach((id) => id && activeTrendingIdSet.add(String(id)));
+
+    const validObjectIds = Array.from(activeTrendingIdSet)
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    // 2. Count active, non-cancelled events in MongoDB matching genuine activity
+    const [verifiedTrendingCount, totalNonCancelledCount, totalLeads, totalTickets, totalEngagements] = await Promise.all([
+      Event.countDocuments({ _id: { $in: validObjectIds }, status: { $ne: 'cancelled' } }),
+      Event.countDocuments({ status: { $ne: 'cancelled' } }),
+      Lead.countDocuments(),
+      Ticket.countDocuments(),
+      EventEngagement.countDocuments()
+    ]);
+
+    const totalGenuineInteractions = totalLeads + totalTickets + totalEngagements;
+
+    return res.status(200).json({
+      success: true,
+      trendingCount: verifiedTrendingCount,
+      totalShows: totalNonCancelledCount,
+      totalInteractions: totalGenuineInteractions,
+      breakdown: {
+        eventsWithLeads: leadEventIds.length,
+        eventsWithTickets: ticketEventIds.length,
+        eventsWithEngagements: engagementEventIds.length
+      },
+      updatedAt: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Featured events
 router.get('/featured-events', wordpressLimiter, async (req, res, next) => {
   try {
