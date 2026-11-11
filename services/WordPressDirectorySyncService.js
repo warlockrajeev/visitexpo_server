@@ -474,7 +474,7 @@ class WordPressDirectorySyncService {
       Event.find({ status: { $ne: 'cancelled' } })
         .select('title slug description banner venue address city country startDate endDate timings categories organizer orgName wpPostId wpUrl isClaimed status isFreeEvent paidTicketPrice createdAt')
         .populate('organizer', 'name email logo website')
-        .sort({ startDate: -1 })
+        .sort({ startDate: 1 })
         .lean(),
       EventEngagement.aggregate([
         {

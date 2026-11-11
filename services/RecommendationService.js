@@ -741,8 +741,8 @@ class RecommendationService {
     });
 
     // 5. Sort results:
-    // - In GPS Proximity mode: sort by shortest distance first, then title match, then startDate descending
-    // - Otherwise: when industry sectors are selected, prioritize direct title matches first, then sort by latest startDate descending, then matchScore descending
+    // - In GPS Proximity mode: sort by shortest distance first, then title match, then startDate ascending
+    // - Otherwise: when industry sectors are selected, prioritize direct title matches first, then sort by nearest upcoming startDate ascending, then matchScore descending
     scoredEvents.sort((a, b) => {
       if (hasCoords) {
         const dA = a.distanceKm ?? Infinity;
@@ -754,9 +754,13 @@ class RecommendationService {
         const titleMatchB = (b.scoreBreakdown?.interest || 0) >= 42 ? 1 : 0;
         if (titleMatchB !== titleMatchA) return titleMatchB - titleMatchA;
       }
+      const now = Date.now();
       const tA = a.startDate ? new Date(a.startDate).getTime() : 0;
       const tB = b.startDate ? new Date(b.startDate).getTime() : 0;
-      if (tB !== tA) return tB - tA;
+      const expA = tA < now;
+      const expB = tB < now;
+      if (expA !== expB) return expA ? 1 : -1;
+      if (tA !== tB) return tA - tB;
       return b.matchScore - a.matchScore;
     });
 

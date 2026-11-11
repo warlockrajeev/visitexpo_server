@@ -127,11 +127,29 @@ router.get('/', wordpressLimiter, async (req, res, next) => {
     
     const filters = { search, category, city, venue, organizerId, status, all, upcoming, slugs };
     
-    // Default options (latest date events first)
+    // Default options (nearest upcoming date events first)
+    let parsedSort = { startDate: 1 };
+    if (sort) {
+      if (typeof sort === 'string') {
+        if (sort.startsWith('{')) {
+          try { parsedSort = JSON.parse(sort); } catch (_) { parsedSort = { startDate: 1 }; }
+        } else if (sort.startsWith('-')) {
+          parsedSort = { [sort.slice(1)]: -1 };
+        } else if (sort.includes(':')) {
+          const [field, dir] = sort.split(':');
+          parsedSort = { [field]: dir === 'desc' || dir === '-1' ? -1 : 1 };
+        } else {
+          parsedSort = { [sort]: 1 };
+        }
+      } else {
+        parsedSort = sort;
+      }
+    }
+
     const options = {
       page: parseInt(page, 10) || 1,
       limit: parseInt(limit, 10) || 1000,
-      sort: sort ? (typeof sort === 'string' ? (sort.startsWith('{') ? JSON.parse(sort) : { [sort]: -1 }) : sort) : { startDate: -1 },
+      sort: parsedSort,
       populate: 'organizer'
     };
 

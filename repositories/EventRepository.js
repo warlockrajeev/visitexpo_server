@@ -29,7 +29,7 @@ class EventRepository extends BaseRepository {
       status: 'published',
       startDate: { $gte: new Date() }
     })
-      .sort({ startDate: -1 })
+      .sort({ startDate: 1 })
       .limit(limit)
       .populate('organizer', 'name logo');
   }
