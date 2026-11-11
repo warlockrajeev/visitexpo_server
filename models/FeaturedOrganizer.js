@@ -81,6 +81,11 @@ const FeaturedOrganizerSchema = new mongoose.Schema(
       default: true,
       index: true
     },
+    isVerified: {
+      type: Boolean,
+      default: true,
+      index: true
+    },
     // Applicant details (when applied from Enterprise Organizer Dashboard)
     applicantUser: {
       type: mongoose.Schema.Types.ObjectId,

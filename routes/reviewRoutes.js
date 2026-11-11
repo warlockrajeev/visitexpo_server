@@ -224,12 +224,123 @@ router.post('/', async (req, res) => {
   }
 });
 
+function extractVoterId(req) {
+  return (
+    req.user?.id ||
+    req.user?._id ||
+    req.user?.email ||
+    req.body?.voterId ||
+    req.query?.voterId ||
+    req.headers['x-voter-id'] ||
+    req.ip ||
+    'anonymous_guest'
+  ).toString().trim().toLowerCase();
+}
+
+function attachUserReaction(review, voterId) {
+  const helpfulVoters = Array.isArray(review.helpfulVoters) ? review.helpfulVoters : [];
+  const notHelpfulVoters = Array.isArray(review.notHelpfulVoters) ? review.notHelpfulVoters : [];
+
+  let userReaction = null;
+  if (voterId) {
+    if (helpfulVoters.includes(voterId)) {
+      userReaction = 'helpful';
+    } else if (notHelpfulVoters.includes(voterId)) {
+      userReaction = 'notHelpful';
+    }
+  }
+
+  const helpfulCount = Number.isFinite(review.helpfulCount)
+    ? Math.max(review.helpfulCount, helpfulVoters.length)
+    : helpfulVoters.length;
+  const notHelpfulCount = Number.isFinite(review.notHelpfulCount)
+    ? Math.max(review.notHelpfulCount, notHelpfulVoters.length)
+    : notHelpfulVoters.length;
+
+  return {
+    ...review,
+    helpfulCount,
+    notHelpfulCount,
+    userReaction
+  };
+}
+
+async function applyReviewVote(reviewId, voterId, targetReaction) {
+  const cleanId = String(reviewId || '').trim();
+  if (!cleanId) return null;
+
+  const review = await Review.findById(cleanId);
+  if (!review) return null;
+
+  if (!Array.isArray(review.helpfulVoters)) review.helpfulVoters = [];
+  if (!Array.isArray(review.notHelpfulVoters)) review.notHelpfulVoters = [];
+
+  const cleanVoterId = String(voterId || '').trim().toLowerCase();
+  if (!cleanVoterId) {
+    throw new Error('Valid voter identification is required');
+  }
+
+  const wasHelpful = review.helpfulVoters.includes(cleanVoterId);
+  const wasNotHelpful = review.notHelpfulVoters.includes(cleanVoterId);
+
+  let finalReaction = null;
+
+  if (targetReaction === 'helpful') {
+    if (wasHelpful) {
+      // Already voted helpful: idempotent check prevents duplicate increment
+      finalReaction = 'helpful';
+    } else {
+      // If switching from not-helpful, pull from notHelpfulVoters
+      if (wasNotHelpful) {
+        review.notHelpfulVoters = review.notHelpfulVoters.filter((v) => v !== cleanVoterId);
+      }
+      review.helpfulVoters.push(cleanVoterId);
+      finalReaction = 'helpful';
+    }
+  } else if (targetReaction === 'notHelpful') {
+    if (wasNotHelpful) {
+      // Already voted not-helpful: idempotent check prevents duplicate increment
+      finalReaction = 'notHelpful';
+    } else {
+      // If switching from helpful, pull from helpfulVoters
+      if (wasHelpful) {
+        review.helpfulVoters = review.helpfulVoters.filter((v) => v !== cleanVoterId);
+      }
+      review.notHelpfulVoters.push(cleanVoterId);
+      finalReaction = 'notHelpful';
+    }
+  } else if (targetReaction === 'none' || targetReaction === 'remove') {
+    // Un-vote / toggle off
+    if (wasHelpful) {
+      review.helpfulVoters = review.helpfulVoters.filter((v) => v !== cleanVoterId);
+    }
+    if (wasNotHelpful) {
+      review.notHelpfulVoters = review.notHelpfulVoters.filter((v) => v !== cleanVoterId);
+    }
+    finalReaction = null;
+  }
+
+  // Update counts to match voter arrays strictly
+  review.helpfulCount = review.helpfulVoters.length;
+  review.notHelpfulCount = review.notHelpfulVoters.length;
+
+  await review.save();
+
+  return {
+    reviewId: review._id,
+    helpfulCount: review.helpfulCount,
+    notHelpfulCount: review.notHelpfulCount,
+    userReaction: finalReaction
+  };
+}
+
 /**
  * GET /api/reviews
  * Fetch all approved reviews (status: 'approved' or 'featured').
  */
-router.get('/', async (req, res) => {
+router.get('/', optionalProtect, async (req, res) => {
   try {
+    const voterId = extractVoterId(req);
     const { eventSlug, limit } = req.query;
     const filter = { status: { $in: ['approved', 'featured'] } };
     if (eventSlug) filter.eventSlug = eventSlug.toLowerCase().trim();
@@ -239,7 +350,8 @@ router.get('/', async (req, res) => {
       .limit(Number(limit) || 50)
       .lean();
 
-    res.status(200).json({ success: true, count: reviews.length, data: reviews });
+    const formatted = reviews.map((r) => attachUserReaction(r, voterId));
+    res.status(200).json({ success: true, count: formatted.length, data: formatted });
   } catch (err) {
     console.error('Error fetching reviews:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch reviews.' });
@@ -250,14 +362,16 @@ router.get('/', async (req, res) => {
  * GET /api/reviews/featured
  * Fetch only reviews marked as featured on landing page.
  */
-router.get('/featured', async (req, res) => {
+router.get('/featured', optionalProtect, async (req, res) => {
   try {
+    const voterId = extractVoterId(req);
     const reviews = await Review.find({ isFeaturedOnLanding: true, status: { $in: ['approved', 'featured'] } })
       .sort({ createdAt: -1 })
       .limit(20)
       .lean();
 
-    res.status(200).json({ success: true, count: reviews.length, data: reviews });
+    const formatted = reviews.map((r) => attachUserReaction(r, voterId));
+    res.status(200).json({ success: true, count: formatted.length, data: formatted });
   } catch (err) {
     console.error('Error fetching featured reviews:', err);
     res.status(500).json({ success: false, error: 'Failed to fetch featured reviews.' });
@@ -268,8 +382,9 @@ router.get('/featured', async (req, res) => {
  * GET /api/reviews/event/:slug
  * Fetch approved reviews for a specific expo by slug.
  */
-router.get('/event/:slug', async (req, res) => {
+router.get('/event/:slug', optionalProtect, async (req, res) => {
   try {
+    const voterId = extractVoterId(req);
     const slug = (req.params.slug || '').toLowerCase().trim();
     const [reviews, aggregate] = await Promise.all([
       Review.find({
@@ -285,11 +400,12 @@ router.get('/event/:slug', async (req, res) => {
       getEventReviewAggregate(slug)
     ]);
 
+    const formatted = reviews.map((r) => attachUserReaction(r, voterId));
     res.status(200).json({
       success: true,
       count: aggregate.count,
       averageRating: aggregate.averageRating,
-      data: reviews
+      data: formatted
     });
   } catch (err) {
     console.error('Error fetching event reviews:', err);
@@ -479,42 +595,94 @@ router.delete('/venue/:id', protect, async (req, res) => {
 
 /**
  * POST /api/reviews/:id/helpful
- * Increment helpful count (public, no auth).
+ * Cast, toggle, or switch helpful feedback with duplicate vote prevention.
  */
-router.post('/:id/helpful', async (req, res) => {
+router.post('/:id/helpful', optionalProtect, async (req, res) => {
   try {
-    const review = await Review.findByIdAndUpdate(
-      req.params.id,
-      { $inc: { helpfulCount: 1 } },
-      { new: true }
-    );
-    if (!review) {
+    const voterId = extractVoterId(req);
+    const isRemove = req.body?.action === 'remove' || req.body?.delta === -1;
+    const targetReaction = isRemove ? 'none' : 'helpful';
+
+    const result = await applyReviewVote(req.params.id, voterId, targetReaction);
+    if (!result) {
       return res.status(404).json({ success: false, error: 'Review not found.' });
     }
-    res.status(200).json({ success: true, data: { helpfulCount: review.helpfulCount } });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        reviewId: result.reviewId,
+        helpfulCount: result.helpfulCount,
+        notHelpfulCount: result.notHelpfulCount,
+        userReaction: result.userReaction
+      }
+    });
   } catch (err) {
-    res.status(500).json({ success: false, error: 'Failed to update helpful count.' });
+    console.error('Error updating helpful count:', err);
+    res.status(500).json({ success: false, error: 'Failed to update helpful feedback.' });
   }
 });
 
 /**
  * POST /api/reviews/:id/not-helpful
- * Increment not-helpful count (public, no auth).
+ * Cast, toggle, or switch not-helpful feedback with duplicate vote prevention.
  */
-router.post('/:id/not-helpful', async (req, res) => {
+router.post('/:id/not-helpful', optionalProtect, async (req, res) => {
   try {
-    const review = await Review.findByIdAndUpdate(
-      req.params.id,
-      { $inc: { notHelpfulCount: 1 } },
-      { new: true }
-    );
-    if (!review) {
+    const voterId = extractVoterId(req);
+    const isRemove = req.body?.action === 'remove' || req.body?.delta === -1;
+    const targetReaction = isRemove ? 'none' : 'notHelpful';
+
+    const result = await applyReviewVote(req.params.id, voterId, targetReaction);
+    if (!result) {
       return res.status(404).json({ success: false, error: 'Review not found.' });
     }
-    res.status(200).json({ success: true, data: { notHelpfulCount: review.notHelpfulCount } });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        reviewId: result.reviewId,
+        helpfulCount: result.helpfulCount,
+        notHelpfulCount: result.notHelpfulCount,
+        userReaction: result.userReaction
+      }
+    });
   } catch (err) {
     console.error('Error updating not-helpful count:', err);
-    res.status(500).json({ success: false, error: 'Failed to update not-helpful count.' });
+    res.status(500).json({ success: false, error: 'Failed to update not-helpful feedback.' });
+  }
+});
+
+/**
+ * POST /api/reviews/:id/reaction
+ * Unified reaction endpoint: 'helpful' | 'notHelpful' | 'none'
+ */
+router.post('/:id/reaction', optionalProtect, async (req, res) => {
+  try {
+    const voterId = extractVoterId(req);
+    let targetReaction = req.body?.reaction;
+    if (!targetReaction) {
+      if (req.body?.action === 'remove' || req.body?.delta === -1) targetReaction = 'none';
+      else targetReaction = 'helpful';
+    }
+
+    const result = await applyReviewVote(req.params.id, voterId, targetReaction);
+    if (!result) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        reviewId: result.reviewId,
+        helpfulCount: result.helpfulCount,
+        notHelpfulCount: result.notHelpfulCount,
+        userReaction: result.userReaction
+      }
+    });
+  } catch (err) {
+    console.error('Error updating reaction feedback:', err);
+    res.status(500).json({ success: false, error: 'Failed to update reaction feedback.' });
   }
 });
 

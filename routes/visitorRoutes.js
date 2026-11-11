@@ -7,10 +7,12 @@ import express from 'express';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
+import EventEngagement from '../models/EventEngagement.js';
 import Session from '../models/Session.js';
 import Lead from '../models/Lead.js';
 import User from '../models/User.js';
 import Subscription from '../models/Subscription.js';
+import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
 import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBadgeService.js';
@@ -434,6 +436,39 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       notes,
       attendanceType: attendanceType || 'in_person'
     });
+
+    // Sync passholder as verified active participant in EventEngagement
+    try {
+      const cleanSlug = (event?.slug || '').toLowerCase().trim();
+      if (cleanSlug) {
+        await EventEngagement.findOneAndUpdate(
+          { userEmail: email.toLowerCase(), eventSlug: cleanSlug },
+          {
+            $set: {
+              userName: name,
+              userEmail: email.toLowerCase(),
+              userPhone: phone,
+              userCompany: company || '',
+              userDesignation: designation || '',
+              eventSlug: cleanSlug,
+              eventId: String(resolvedEventId),
+              eventTitle: event?.title || '',
+              eventCity: event?.city || '',
+              eventVenue: event?.venue || '',
+              isInterested: true,
+              status: 'active',
+              passType: 'Standard Trade Visitor'
+            }
+          },
+          { upsert: true, new: true }
+        );
+      }
+      if (cleanSlug) {
+        WordPressDirectorySyncService.updateEventInterestedCount(cleanSlug, 1);
+        WordPressDirectorySyncService.updateEventInterestedCount(String(resolvedEventId), 1);
+      }
+      WordPressDirectorySyncService.clearCache();
+    } catch (_) {}
 
     // 4. Automatically create a Lead in Lead CRM
     await Lead.create({

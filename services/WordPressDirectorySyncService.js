@@ -8,6 +8,8 @@ import fs from 'fs';
 import path from 'path';
 import Event from '../models/Event.js';
 import DeletedEvent from '../models/DeletedEvent.js';
+import EventEngagement from '../models/EventEngagement.js';
+import Visitor from '../models/Visitor.js';
 import { parseWpLocation } from '../routes/adminRoutes.js';
 
 const WORDPRESS_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
@@ -459,7 +461,7 @@ class WordPressDirectorySyncService {
   }
 
   /**
-   * Fast event fetcher from MongoDB (served in < 20ms)
+   * Fast event fetcher from MongoDB with dynamic live engagement & turnout counts
    */
   async getFastStoredEvents({ forceRefresh = false } = {}) {
     const now = Date.now();
@@ -467,12 +469,71 @@ class WordPressDirectorySyncService {
       return memoryCache.events;
     }
 
-    // Query directly from indexed MongoDB (latest date events first)
-    const rawEvents = await Event.find({ status: { $ne: 'cancelled' } })
-      .select('title slug description banner venue address city country startDate endDate timings categories organizer orgName wpPostId wpUrl isClaimed status isFreeEvent paidTicketPrice createdAt')
-      .populate('organizer', 'name email logo website')
-      .sort({ startDate: -1 })
-      .lean();
+    // Query directly from indexed MongoDB along with real engagement and visitor turnout counts
+    const [rawEvents, engagementAgg, visitorAgg] = await Promise.all([
+      Event.find({ status: { $ne: 'cancelled' } })
+        .select('title slug description banner venue address city country startDate endDate timings categories organizer orgName wpPostId wpUrl isClaimed status isFreeEvent paidTicketPrice createdAt')
+        .populate('organizer', 'name email logo website')
+        .sort({ startDate: -1 })
+        .lean(),
+      EventEngagement.aggregate([
+        {
+          $match: {
+            status: 'active',
+            $or: [
+              { isInterested: true },
+              { type: { $in: ['interested', 'both'] } }
+            ]
+          }
+        },
+        {
+          $group: {
+            _id: '$eventSlug',
+            count: { $sum: 1 },
+            eventIds: { $addToSet: '$eventId' }
+          }
+        }
+      ]).catch(() => []),
+      Visitor.aggregate([
+        {
+          $match: {
+            registrationStatus: { $ne: 'cancelled' }
+          }
+        },
+        {
+          $group: {
+            _id: '$event',
+            count: { $sum: 1 }
+          }
+        }
+      ]).catch(() => [])
+    ]);
+
+    // Build engagement map by slug and by eventId
+    const engagementMap = new Map();
+    (engagementAgg || []).forEach((e) => {
+      const slugKey = (e._id || '').toLowerCase().trim();
+      if (slugKey) {
+        engagementMap.set(slugKey, (engagementMap.get(slugKey) || 0) + e.count);
+      }
+      if (Array.isArray(e.eventIds)) {
+        e.eventIds.forEach((id) => {
+          const idKey = String(id || '').trim();
+          if (idKey) {
+            engagementMap.set(idKey, (engagementMap.get(idKey) || 0) + e.count);
+          }
+        });
+      }
+    });
+
+    // Build visitor map by event ObjectId string
+    const visitorMap = new Map();
+    (visitorAgg || []).forEach((v) => {
+      const vKey = String(v._id || '').trim();
+      if (vKey) {
+        visitorMap.set(vKey, v.count);
+      }
+    });
 
     const events = (rawEvents || []).map((doc) => {
       const populatedOrgName =
@@ -487,13 +548,33 @@ class WordPressDirectorySyncService {
         'VisitExpo Verified Organizer';
 
       const resolvedCategory = inferCategory(doc.title, doc.description);
+
+      const slugKey = (doc.slug || '').toLowerCase().trim();
+      const idKey = String(doc._id || '').trim();
+      const wpKey = String(doc.wpPostId || '').trim();
+
+      const engCount =
+        (slugKey && engagementMap.get(slugKey)) ||
+        (idKey && engagementMap.get(idKey)) ||
+        (wpKey && engagementMap.get(wpKey)) ||
+        0;
+      const visCount =
+        (idKey && visitorMap.get(idKey)) ||
+        (wpKey && visitorMap.get(wpKey)) ||
+        0;
+
+      // Genuine dynamic count of users interested or attending from MongoDB
+      const dynamicInterestedCount = engCount + visCount;
+
       return {
         ...doc,
         organizer: cleanOrganizer,
         organizerName: cleanOrganizer,
         orgName: cleanOrganizer,
         category: resolvedCategory,
-        categories: [resolvedCategory]
+        categories: [resolvedCategory],
+        interestedCount: dynamicInterestedCount,
+        attendeesCount: dynamicInterestedCount
       };
     });
 
@@ -506,6 +587,45 @@ class WordPressDirectorySyncService {
     }
 
     return events;
+  }
+
+  /**
+   * Immediately update specific event's participation count in warm memory cache
+   */
+  updateEventInterestedCount(slugOrId, delta = 0, explicitCount = null) {
+    if (!memoryCache.events || !Array.isArray(memoryCache.events)) return;
+    const cleanKey = String(slugOrId || '').toLowerCase().trim();
+    if (!cleanKey) return;
+    const event = memoryCache.events.find(
+      (e) =>
+        (e.slug || '').toLowerCase().trim() === cleanKey ||
+        String(e._id || '').toLowerCase().trim() === cleanKey ||
+        String(e.wpPostId || '').toLowerCase().trim() === cleanKey
+    );
+    if (event) {
+      if (typeof explicitCount === 'number') {
+        event.interestedCount = Math.max(0, explicitCount);
+        event.attendeesCount = Math.max(0, explicitCount);
+      } else {
+        event.interestedCount = Math.max(0, (event.interestedCount || 0) + delta);
+        event.attendeesCount = event.interestedCount;
+      }
+    }
+  }
+
+  /**
+   * Immediately clear memory cache so new user engagements are reflected dynamically
+   */
+  clearCache() {
+    if (memoryCache.events) {
+      memoryCache.timestamp = 0; // Mark stale for background refresh
+    } else {
+      memoryCache = {
+        events: null,
+        timestamp: 0,
+        ttl: 5 * 60 * 1000
+      };
+    }
   }
 }
 

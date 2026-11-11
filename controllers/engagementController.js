@@ -9,6 +9,7 @@ import User from '../models/User.js';
 import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
 import Lead from '../models/Lead.js';
+import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
 import { notifyOrganizerOnFollow, notifyOrganizerOnInterest } from '../services/oneSignalService.js';
 
@@ -301,10 +302,13 @@ export const toggleEngagement = async (req, res) => {
       console.warn('[EngagementController] Failed to auto-sync Lead:', leadSyncErr.message);
     }
 
-    // Aggregate live counts for this event
-    const [interestedCount, followersCount] = await Promise.all([
+    // Aggregate live counts for this event directly from MongoDB
+    const [interestedCount, followersCount, visitorCount] = await Promise.all([
       EventEngagement.countDocuments({
-        eventSlug: cleanSlug,
+        $or: [
+          { eventSlug: cleanSlug },
+          ...(dbEvent?._id ? [{ eventId: String(dbEvent._id) }] : [])
+        ],
         status: 'active',
         $or: [
           { isInterested: true },
@@ -312,14 +316,34 @@ export const toggleEngagement = async (req, res) => {
         ]
       }),
       EventEngagement.countDocuments({
-        eventSlug: cleanSlug,
+        $or: [
+          { eventSlug: cleanSlug },
+          ...(dbEvent?._id ? [{ eventId: String(dbEvent._id) }] : [])
+        ],
         status: 'active',
         $or: [
           { isFollowed: true },
           { type: { $in: ['follower', 'both'] } }
         ]
-      })
+      }),
+      dbEvent?._id
+        ? Visitor.countDocuments({
+            event: dbEvent._id,
+            registrationStatus: { $ne: 'cancelled' }
+          })
+        : 0
     ]);
+
+    const totalInterestedAndAttending = interestedCount + (visitorCount || 0);
+
+    // Invalidate WordPress sync cache so directory endpoints immediately reflect the change
+    try {
+      WordPressDirectorySyncService.updateEventInterestedCount(cleanSlug, 0, totalInterestedAndAttending);
+      if (dbEvent?._id) {
+        WordPressDirectorySyncService.updateEventInterestedCount(String(dbEvent._id), 0, totalInterestedAndAttending);
+      }
+      WordPressDirectorySyncService.clearCache();
+    } catch (_) {}
 
     return res.status(200).json({
       success: true,
@@ -332,8 +356,9 @@ export const toggleEngagement = async (req, res) => {
         status: engagement.status,
         engagement,
         counts: {
-          interested: interestedCount,
-          followers: followersCount
+          interested: totalInterestedAndAttending,
+          followers: followersCount,
+          visitors: visitorCount || 0
         }
       }
     });

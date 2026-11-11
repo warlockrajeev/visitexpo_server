@@ -198,10 +198,15 @@ router.get('/', async (req, res, next) => {
       .sort({ displayOrder: 1, eventsCount: -1, createdAt: -1 })
       .lean();
 
+    const formatted = featured.map((org) => ({
+      ...org,
+      isVerified: org.isVerified !== false && org.status === 'approved'
+    }));
+
     res.status(200).json({
       success: true,
-      data: featured,
-      count: featured.length
+      data: formatted,
+      count: formatted.length
     });
   } catch (error) {
     next(error);
