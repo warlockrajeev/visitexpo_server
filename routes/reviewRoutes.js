@@ -5,6 +5,7 @@
  */
 
 import express from 'express';
+import mongoose from 'mongoose';
 import Review from '../models/Review.js';
 import Venue from '../models/Venue.js';
 import Event from '../models/Event.js';
@@ -269,7 +270,12 @@ async function applyReviewVote(reviewId, voterId, targetReaction) {
   const cleanId = String(reviewId || '').trim();
   if (!cleanId) return null;
 
-  const review = await Review.findById(cleanId);
+  let review = null;
+  if (mongoose.Types.ObjectId.isValid(cleanId)) {
+    review = await Review.findById(cleanId);
+  } else {
+    review = await Review.findOne({ $or: [{ slug: cleanId }, { eventSlug: cleanId }] });
+  }
   if (!review) return null;
 
   if (!Array.isArray(review.helpfulVoters)) review.helpfulVoters = [];
@@ -365,9 +371,13 @@ router.get('/', optionalProtect, async (req, res) => {
 router.get('/featured', optionalProtect, async (req, res) => {
   try {
     const voterId = extractVoterId(req);
-    const reviews = await Review.find({ isFeaturedOnLanding: true, status: { $in: ['approved', 'featured'] } })
+    // Strictly return only reviews approved by admin and marked for landing page showcase
+    const reviews = await Review.find({
+      isFeaturedOnLanding: true,
+      status: { $in: ['approved', 'featured'] }
+    })
       .sort({ createdAt: -1 })
-      .limit(20)
+      .limit(30)
       .lean();
 
     const formatted = reviews.map((r) => attachUserReaction(r, voterId));
