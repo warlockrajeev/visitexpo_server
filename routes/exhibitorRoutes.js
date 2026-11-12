@@ -149,8 +149,18 @@ router.post('/register', async (req, res, next) => {
         return res.status(400).json({ success: false, error: 'Enter a valid website URL beginning with http:// or https://.' });
       }
     }
-    if (!isManagedRegistration && (typeof password !== 'string' || password.length < 6)) {
-      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters.' });
+    if (!isManagedRegistration && (
+      typeof password !== 'string' ||
+      password.length < 8 ||
+      !/[a-z]/.test(password) ||
+      !/[A-Z]/.test(password) ||
+      !/\d/.test(password) ||
+      !/[^A-Za-z0-9\s]/.test(password)
+    )) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password must be at least 8 characters and include uppercase and lowercase letters, a number, and a special character.'
+      });
     }
     if (staff !== undefined && (!Array.isArray(staff) || staff.length > 25 || staff.some((member) => (
       !member ||
@@ -195,6 +205,20 @@ router.post('/register', async (req, res, next) => {
     }
     if (!event) {
       return res.status(404).json({ success: false, error: 'Target event not found' });
+    }
+    const existingUser = normalizedEmail ? await User.findOne({ email: normalizedEmail }) : null;
+    if (!isManagedRegistration && existingUser && existingUser.role !== 'exhibitor') {
+      return res.status(409).json({
+        success: false,
+        error: `This email is already registered as a ${existingUser.role}. Sign in to that account or use a different email for exhibitor registration.`,
+        registeredRole: existingUser.role
+      });
+    }
+    if (!isManagedRegistration && existingUser && (existingUser.isSuspended || existingUser.status === 'suspended')) {
+      return res.status(403).json({
+        success: false,
+        error: 'This account has been suspended. Contact support@visitexpo.in before submitting an exhibitor application.'
+      });
     }
     if (event.isClaimed && !isManagedRegistration) {
       return res.status(409).json({
@@ -268,22 +292,24 @@ router.post('/register', async (req, res, next) => {
     });
 
     // 4. Create User record for login
-    let user = await User.findOne({ email: normalizedEmail });
+    let user = existingUser;
     if (!user) {
       user = await User.create({
         name: name,
         email: normalizedEmail,
         password: password || 'defaultPassword123',
         role: 'exhibitor',
-        isVerified: false
+        isVerified: false,
+        status: 'active'
       });
     } else {
       // Safe update: do not overwrite role/verification status of organizers/admins!
       if (user.role === 'exhibitor') {
+        if (!user.isSuspended && user.status !== 'suspended') user.status = 'active';
         if (password) {
           user.password = password;
-          await user.save();
         }
+        await user.save();
       }
     }
 
@@ -1249,27 +1275,6 @@ router.put('/:id/status', protect, authorize('super_admin', 'sub_admin', 'admin'
 
     exhibitor.status = status;
     await exhibitor.save();
-
-    // Sync isVerified on User
-    const emailEscaped = (exhibitor.contactEmail || '').trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const associatedUser = await User.findOne({ email: { $regex: new RegExp(`^${emailEscaped}$`, 'i') } });
-    if (associatedUser && associatedUser.role === 'exhibitor') {
-      if (status === 'approved') {
-        associatedUser.isVerified = true;
-        await associatedUser.save();
-      } else {
-        // Only mark unverified if they have NO other approved exhibitor accounts
-        const otherApproved = await Exhibitor.findOne({
-          contactEmail: { $regex: new RegExp(`^${emailEscaped}$`, 'i') },
-          _id: { $ne: exhibitor._id },
-          status: 'approved'
-        });
-        if (!otherApproved) {
-          associatedUser.isVerified = false;
-          await associatedUser.save();
-        }
-      }
-    }
 
     // Sync to event if approved (optional side-effect matching old embedded behavior)
     if (status === 'approved') {

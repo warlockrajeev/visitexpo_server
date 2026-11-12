@@ -113,13 +113,14 @@ class AuthService {
     }
 
     // 4. Determine corporate vs general email & plan activation
-    const isCorporate = assignedRole === 'organizer' ? hasVerifiedWorkEmail : isCorporateEmail(normalizedEmail);
+    const isCorporate = hasVerifiedWorkEmail || isCorporateEmail(normalizedEmail);
     const emailType = isCorporate ? 'corporate' : 'general';
 
     let isVerified = false;
     let planStatus = 'payment_pending';
     let isPlanActive = false;
     let planPaidAmount = 0;
+    let generalEmailPrice = 1499;
 
     if (assignedRole === 'visitor') {
       isVerified = true;
@@ -127,7 +128,7 @@ class AuthService {
       isPlanActive = true;
     } else if (assignedRole === 'organizer') {
       const freePlanDoc = await Plan.findOne({ planId: 'free' });
-      const generalEmailPrice = freePlanDoc?.pricing?.generalEmailPrice !== undefined ? freePlanDoc.pricing.generalEmailPrice : 1499;
+      generalEmailPrice = freePlanDoc?.pricing?.generalEmailPrice !== undefined ? freePlanDoc.pricing.generalEmailPrice : 1499;
       const isGeneralFree = generalEmailPrice === 0;
 
       if (isCorporate || isGeneralFree) {
@@ -156,13 +157,14 @@ class AuthService {
       interests: assignedRole === 'visitor' ? visitorInterests : [],
       workEmail: hasVerifiedWorkEmail ? normalizedWorkEmail : '',
       workEmailVerified: !!hasVerifiedWorkEmail,
-      workEmailVerificationRequired: assignedRole === 'organizer',
+      workEmailVerificationRequired: false,
       emailType,
       plan: 'free',
       planStatus,
       isPlanActive,
       planPaidAmount,
       isVerified,
+      status: 'active',
       isPhoneVerified: true,
       authProvider: 'local',
       hasCustomPassword: true
@@ -328,12 +330,6 @@ class AuthService {
       if (needsSave) {
         await user.save();
       }
-    }
-
-    if (user.role === 'exhibitor' && !user.isVerified) {
-      const err = new Error('Your exhibitor onboarding request is pending Organizer approval. Access will be granted once approved.');
-      err.statusCode = 403;
-      throw err;
     }
 
     // 5. Generate tokens
@@ -558,12 +554,13 @@ class AuthService {
         throw err;
       }
 
-      const isCorporate = assignedRole === 'organizer' ? hasVerifiedWorkEmail : isCorporateEmail(normalizedEmail);
+      const isCorporate = hasVerifiedWorkEmail || isCorporateEmail(normalizedEmail);
       const emailType = isCorporate ? 'corporate' : 'general';
 
       let isVerified = false;
       let planStatus = 'payment_pending';
       let isPlanActive = false;
+      let generalEmailPrice = 1499;
 
       if (assignedRole === 'visitor') {
         isVerified = true;
@@ -571,7 +568,7 @@ class AuthService {
         isPlanActive = true;
       } else if (assignedRole === 'organizer') {
         const freePlanDoc = await Plan.findOne({ planId: 'free' });
-        const generalEmailPrice = freePlanDoc?.pricing?.generalEmailPrice !== undefined ? freePlanDoc.pricing.generalEmailPrice : 1499;
+        generalEmailPrice = freePlanDoc?.pricing?.generalEmailPrice !== undefined ? freePlanDoc.pricing.generalEmailPrice : 1499;
         const isGeneralFree = generalEmailPrice === 0;
 
         if (isCorporate || isGeneralFree) {
@@ -599,13 +596,14 @@ class AuthService {
         interests: assignedRole === 'visitor' ? visitorInterests : [],
         workEmail: hasVerifiedWorkEmail ? normalizedWorkEmail : '',
         workEmailVerified: !!hasVerifiedWorkEmail,
-        workEmailVerificationRequired: assignedRole === 'organizer',
+        workEmailVerificationRequired: false,
         emailType,
         plan: 'free',
         planStatus,
         isPlanActive,
         planPaidAmount: 0,
         isVerified,
+        status: 'active',
         isPhoneVerified: true,
         authProvider: 'google',
         hasCustomPassword: false
