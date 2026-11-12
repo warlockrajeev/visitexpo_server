@@ -15,7 +15,8 @@ import { authLimiter } from '../middlewares/rateLimiter.js';
 import jwt from 'jsonwebtoken';
 import UserRepository from '../repositories/UserRepository.js';
 import { generateAccessToken, generateRefreshToken } from '../utils/jwt.js';
-import { isCorporateEmail } from '../utils/emailValidator.js';
+import { isUserCorporateEmail } from '../utils/emailValidator.js';
+import { sendWorkEmailVerificationCode, verifyWorkEmailCode } from '../services/workEmailVerificationService.js';
 
 const router = express.Router();
 
@@ -74,9 +75,29 @@ router.post('/otp/verify', authLimiter, async (req, res, next) => {
   }
 });
 
+router.post('/work-email/send', authLimiter, async (req, res, next) => {
+  try {
+    const { workEmail, accountEmail } = req.body;
+    await sendWorkEmailVerificationCode(workEmail, accountEmail);
+    res.status(200).json({ success: true, message: 'Verification code sent.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/work-email/verify', authLimiter, async (req, res, next) => {
+  try {
+    const { workEmail, accountEmail, code } = req.body;
+    const verificationToken = await verifyWorkEmailCode(workEmail, accountEmail, code);
+    res.status(200).json({ success: true, verificationToken });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/signup', authLimiter, async (req, res, next) => {
   try {
-    const { name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp } = req.body;
+    const { name, email, password, organizationName, role, phone, city, interests, phoneVerificationToken, otpSessionId, otp, workEmail, workEmailVerificationToken } = req.body;
     
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, error: 'Full Name is required' });
@@ -96,8 +117,11 @@ router.post('/signup', authLimiter, async (req, res, next) => {
         error: role === 'exhibitor' ? 'Company / Exhibitor Name is required' : 'Organization Name is required'
       });
     }
+    if (role === 'visitor' && (!Array.isArray(interests) || !interests.some((interest) => typeof interest === 'string' && interest.trim()))) {
+      return res.status(400).json({ success: false, error: 'Please select a visitor category.' });
+    }
 
-    const data = await AuthService.signup(name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp);
+    const data = await AuthService.signup(name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail, workEmailVerificationToken);
     
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);
@@ -220,9 +244,12 @@ router.post('/google', authLimiter, async (req, res, next) => {
       company,
       designation,
       industry,
+      interests,
       phoneVerificationToken,
       otpSessionId,
-      otp
+      otp,
+      workEmail,
+      workEmailVerificationToken
     } = req.body;
 
     if (!email) {
@@ -243,9 +270,12 @@ router.post('/google', authLimiter, async (req, res, next) => {
       company,
       designation,
       industry,
+      interests,
       phoneVerificationToken,
       otpSessionId,
-      otp
+      otp,
+      workEmail,
+      workEmailVerificationToken
     });
 
     // Set refresh token cookie
@@ -348,7 +378,7 @@ router.get('/me', protect, async (req, res, next) => {
       hasGrowthPlan = Boolean(hasGrowthSub);
 
       let needsSave = false;
-      const isCorporate = isCorporateEmail(userDoc.email);
+      const isCorporate = isUserCorporateEmail(userDoc);
       if (!userDoc.emailType) {
         userDoc.emailType = isCorporate ? 'corporate' : 'general';
         needsSave = true;
@@ -414,11 +444,14 @@ router.get('/me', protect, async (req, res, next) => {
         company: userDoc.company || '',
         designation: userDoc.designation || '',
         city: userDoc.city || '',
+        workEmail: userDoc.workEmail || '',
+        workEmailVerified: !!userDoc.workEmailVerified,
+        workEmailVerificationRequired: !!userDoc.workEmailVerificationRequired,
         role: userDoc.role,
         adminRole: userDoc.adminRole || '',
         permissions: userDoc.permissions || [],
         isVerified,
-        emailType: userDoc.emailType || (isCorporateEmail(userDoc.email) ? 'corporate' : 'general'),
+        emailType: userDoc.emailType || (isUserCorporateEmail(userDoc) ? 'corporate' : 'general'),
         plan: resolvedBasePlan,
         basePlan: resolvedBasePlan,
         planStatus: userDoc.planStatus || (isPlanActive ? 'active' : 'payment_pending'),

@@ -62,3 +62,8 @@ export const isCorporateEmail = (email) => {
 export const getEmailDomainType = (email) => {
   return isCorporateEmail(email) ? 'corporate' : 'general';
 };
+
+export const isUserCorporateEmail = (user) => {
+  if (user?.workEmailVerified && isCorporateEmail(user.workEmail)) return true;
+  return !user?.workEmailVerificationRequired && isCorporateEmail(user?.email);
+};

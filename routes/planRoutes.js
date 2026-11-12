@@ -9,7 +9,7 @@ import PlanInquiry from '../models/PlanInquiry.js';
 import Subscription from '../models/Subscription.js';
 import Organization from '../models/Organization.js';
 import User from '../models/User.js';
-import { isCorporateEmail } from '../utils/emailValidator.js';
+import { isCorporateEmail, isUserCorporateEmail } from '../utils/emailValidator.js';
 import { protect, authorize } from '../middlewares/auth.js';
 
 const router = express.Router();
@@ -995,7 +995,7 @@ router.post('/admin/assign-plan', protect, authorize('super_admin', 'sub_admin',
         }
       }
 
-      const isCorporate = isCorporateEmail(user.email);
+      const isCorporate = isUserCorporateEmail(user);
 
       // Upgrade role to organizer if requested
       if (upgradeRoleToOrganizer && user.role !== 'organizer') {
@@ -1221,7 +1221,7 @@ router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin',
             );
 
             // Upsert standard active Free plan subscription (10 years)
-            const isCorporate = isCorporateEmail(user.email);
+            const isCorporate = isUserCorporateEmail(user);
             await Subscription.findOneAndUpdate(
               { organization: orgId, plan: { $ne: 'growth' } },
               {
@@ -1326,7 +1326,7 @@ router.post('/admin/remove-plan', protect, authorize('super_admin', 'sub_admin',
       } else {
         // REVERT USER TO FREE PLAN
         const previousPlan = user.plan || 'starter';
-        const isCorporate = isCorporateEmail(user.email);
+        const isCorporate = isUserCorporateEmail(user);
 
         user.plan = 'free';
         user.hasGrowthPlan = false;
@@ -1533,7 +1533,7 @@ router.get('/my-plan', protect, async (req, res, next) => {
       return res.status(404).json({ success: false, message: 'User not found.' });
     }
 
-    const isCorporate = isCorporateEmail(user.email);
+    const isCorporate = isUserCorporateEmail(user);
     // Find active BASE subscription (excluding Growth add-on)
     let sub = await Subscription.findOne({
       $or: [
@@ -1667,6 +1667,9 @@ router.get('/my-plan', protect, async (req, res, next) => {
         name: user.name,
         email: user.email,
         role: user.role,
+        workEmail: user.workEmail || '',
+        workEmailVerified: !!user.workEmailVerified,
+        workEmailVerificationRequired: !!user.workEmailVerificationRequired,
         plan: resolvedBasePlan,
         basePlan: resolvedBasePlan,
         hasGrowthPlan,
@@ -1719,7 +1722,7 @@ router.post('/activate-free-plan', protect, async (req, res, next) => {
       });
     }
 
-    const isCorporate = isCorporateEmail(user.email);
+    const isCorporate = isUserCorporateEmail(user);
     const { transactionId } = req.body;
 
     const freePlan = await Plan.findOne({ planId: 'free' });

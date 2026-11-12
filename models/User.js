@@ -62,6 +62,20 @@ const UserSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
+    workEmail: {
+      type: String,
+      trim: true,
+      lowercase: true,
+      default: ''
+    },
+    workEmailVerified: {
+      type: Boolean,
+      default: false
+    },
+    workEmailVerificationRequired: {
+      type: Boolean,
+      default: false
+    },
     avatar: {
       type: String,
       default: ''

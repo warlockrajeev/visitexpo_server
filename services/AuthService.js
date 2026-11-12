@@ -10,7 +10,8 @@ import Subscription from '../models/Subscription.js';
 import Plan from '../models/Plan.js';
 import TwoFactorService from './twoFactorService.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
-import { isCorporateEmail } from '../utils/emailValidator.js';
+import { isCorporateEmail, isUserCorporateEmail } from '../utils/emailValidator.js';
+import { verifyWorkEmailVerificationToken } from '../utils/workEmailVerification.js';
 
 export const getRoleLabel = (role) => {
   if (!role) return 'User';
@@ -23,7 +24,7 @@ export const getRoleLabel = (role) => {
 };
 
 class AuthService {
-  async signup(name, email, password, orgName = '', role = 'organizer', phone = '', city = '', phoneVerificationToken = '', otpSessionId = '', otp = '') {
+  async signup(name, email, password, orgName = '', role = 'organizer', phone = '', city = '', phoneVerificationToken = '', otpSessionId = '', otp = '', interests = [], workEmail = '', workEmailVerificationToken = '') {
     // 1. Check if email already registered
     const normalizedEmail = (email || '').toLowerCase().trim();
     const existingUser = await UserRepository.findOne({ email: normalizedEmail });
@@ -49,6 +50,30 @@ class AuthService {
     }
 
     const assignedRole = ['visitor', 'organizer', 'exhibitor'].includes(role) ? role : 'organizer';
+    if (assignedRole === 'organizer' && workEmail != null && typeof workEmail !== 'string') {
+      const err = new Error('Work email must be a valid email address.');
+      err.statusCode = 400;
+      throw err;
+    }
+    const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
+    const hasVerifiedWorkEmail = assignedRole === 'organizer' &&
+      verifyWorkEmailVerificationToken(workEmailVerificationToken, normalizedWorkEmail, normalizedEmail);
+    if (
+      assignedRole === 'organizer' &&
+      ((normalizedWorkEmail && !hasVerifiedWorkEmail) || (!normalizedWorkEmail && workEmailVerificationToken))
+    ) {
+      const err = new Error('Verify your work email before using it for the organizer fee waiver.');
+      err.statusCode = 400;
+      throw err;
+    }
+    const visitorInterests = Array.isArray(interests)
+      ? Array.from(new Set(interests.filter((interest) => typeof interest === 'string').map((interest) => interest.trim()).filter(Boolean)))
+      : [];
+    if (assignedRole === 'visitor' && visitorInterests.length === 0) {
+      const err = new Error('Please select a visitor category.');
+      err.statusCode = 400;
+      throw err;
+    }
     if (assignedRole !== 'visitor' && (!orgName || orgName.trim().length < 2)) {
       const err = new Error(
         assignedRole === 'exhibitor'
@@ -88,7 +113,7 @@ class AuthService {
     }
 
     // 4. Determine corporate vs general email & plan activation
-    const isCorporate = isCorporateEmail(normalizedEmail);
+    const isCorporate = assignedRole === 'organizer' ? hasVerifiedWorkEmail : isCorporateEmail(normalizedEmail);
     const emailType = isCorporate ? 'corporate' : 'general';
 
     let isVerified = false;
@@ -128,6 +153,10 @@ class AuthService {
       role: assignedRole,
       phone: cleanPhone,
       city: city.trim(),
+      interests: assignedRole === 'visitor' ? visitorInterests : [],
+      workEmail: hasVerifiedWorkEmail ? normalizedWorkEmail : '',
+      workEmailVerified: !!hasVerifiedWorkEmail,
+      workEmailVerificationRequired: assignedRole === 'organizer',
       emailType,
       plan: 'free',
       planStatus,
@@ -156,7 +185,7 @@ class AuthService {
           plan: 'free',
           emailType,
           status: isPlanActive ? 'active' : 'payment_pending',
-          price: isCorporate ? 0 : 1499,
+          price: isCorporate ? 0 : generalEmailPrice,
           paymentCycle: isCorporate ? 'quarterly' : 'one_time',
           startDate: new Date(),
           endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
@@ -185,6 +214,11 @@ class AuthService {
         name: user.name,
         email: user.email,
         role: user.role,
+        city: user.city || '',
+        interests: user.interests || [],
+        workEmail: user.workEmail || '',
+        workEmailVerified: !!user.workEmailVerified,
+        workEmailVerificationRequired: !!user.workEmailVerificationRequired,
         adminRole: user.adminRole || '',
         permissions: user.permissions || [],
         isVerified: user.isVerified,
@@ -245,7 +279,7 @@ class AuthService {
 
     // 4. Auto-sync organizer corporate email plan & verification
     if (user.role === 'organizer') {
-      const isCorporate = isCorporateEmail(user.email);
+      const isCorporate = isUserCorporateEmail(user);
       let needsSave = false;
       if (!user.emailType) {
         user.emailType = isCorporate ? 'corporate' : 'general';
@@ -319,10 +353,15 @@ class AuthService {
         name: user.name,
         email: user.email,
         role: user.role,
+        city: user.city || '',
+        interests: user.interests || [],
+        workEmail: user.workEmail || '',
+        workEmailVerified: !!user.workEmailVerified,
+        workEmailVerificationRequired: !!user.workEmailVerificationRequired,
         adminRole: user.adminRole || '',
         permissions: user.permissions || [],
         isVerified: isPaidOrganizer ? true : user.isVerified,
-        emailType: user.emailType || (isCorporateEmail(user.email) ? 'corporate' : 'general'),
+        emailType: user.emailType || (isUserCorporateEmail(user) ? 'corporate' : 'general'),
         plan: user.plan || 'free',
         basePlan: user.plan || 'free',
         planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
@@ -407,7 +446,7 @@ class AuthService {
     return true;
   }
 
-  async googleAuth({ email, name, role = 'organizer', organizationName, phone, city, website, company, designation, industry, phoneVerificationToken, otpSessionId, otp }) {
+  async googleAuth({ email, name, role = 'organizer', organizationName, phone, city, website, company, designation, industry, interests = [], phoneVerificationToken, otpSessionId, otp, workEmail = '', workEmailVerificationToken = '' }) {
     if (!email) {
       const err = new Error('Email is required for Google authentication');
       err.statusCode = 400;
@@ -425,6 +464,9 @@ class AuthService {
     }
 
     const assignedRole = role === 'visitor' ? 'visitor' : role === 'exhibitor' ? 'exhibitor' : 'organizer';
+    const visitorInterests = Array.isArray(interests)
+      ? Array.from(new Set(interests.filter((interest) => typeof interest === 'string').map((interest) => interest.trim()).filter(Boolean)))
+      : [];
     const finalOrgName = organizationName || company || `${name || normalizedEmail.split('@')[0]}'s ${assignedRole === 'exhibitor' ? 'Exhibition Enterprise' : 'Organization'}`;
 
     if (user) {
@@ -490,11 +532,33 @@ class AuthService {
         err.statusCode = 400;
         throw err;
       }
+      if (assignedRole === 'visitor' && visitorInterests.length === 0) {
+        const err = new Error('Please select a visitor category.');
+        err.statusCode = 400;
+        throw err;
+      }
 
       // Auto-register new user authenticated via Google
       const randomPassword = crypto.randomBytes(24).toString('hex');
       const userName = name || normalizedEmail.split('@')[0];
-      const isCorporate = isCorporateEmail(normalizedEmail);
+      if (assignedRole === 'organizer' && workEmail != null && typeof workEmail !== 'string') {
+        const err = new Error('Work email must be a valid email address.');
+        err.statusCode = 400;
+        throw err;
+      }
+      const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
+      const hasVerifiedWorkEmail = assignedRole === 'organizer' &&
+        verifyWorkEmailVerificationToken(workEmailVerificationToken, normalizedWorkEmail, normalizedEmail);
+      if (
+        assignedRole === 'organizer' &&
+        ((normalizedWorkEmail && !hasVerifiedWorkEmail) || (!normalizedWorkEmail && workEmailVerificationToken))
+      ) {
+        const err = new Error('Verify your work email before using it for the organizer fee waiver.');
+        err.statusCode = 400;
+        throw err;
+      }
+
+      const isCorporate = assignedRole === 'organizer' ? hasVerifiedWorkEmail : isCorporateEmail(normalizedEmail);
       const emailType = isCorporate ? 'corporate' : 'general';
 
       let isVerified = false;
@@ -532,6 +596,10 @@ class AuthService {
         company: company || organizationName || '',
         designation: designation || '',
         city: city || '',
+        interests: assignedRole === 'visitor' ? visitorInterests : [],
+        workEmail: hasVerifiedWorkEmail ? normalizedWorkEmail : '',
+        workEmailVerified: !!hasVerifiedWorkEmail,
+        workEmailVerificationRequired: assignedRole === 'organizer',
         emailType,
         plan: 'free',
         planStatus,
@@ -561,7 +629,7 @@ class AuthService {
             plan: 'free',
             emailType,
             status: isPlanActive ? 'active' : 'payment_pending',
-            price: isCorporate ? 0 : 1499,
+            price: isCorporate ? 0 : generalEmailPrice,
             paymentCycle: isCorporate ? 'quarterly' : 'one_time',
             startDate: new Date(),
             endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
@@ -575,8 +643,25 @@ class AuthService {
       }
     } else {
       // If user exists, sync corporate email plan if organizer
+      if (user.role === 'organizer' && (workEmail || workEmailVerificationToken)) {
+        if (workEmail != null && typeof workEmail !== 'string') {
+          const err = new Error('Work email must be a valid email address.');
+          err.statusCode = 400;
+          throw err;
+        }
+        const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
+        if (!verifyWorkEmailVerificationToken(workEmailVerificationToken, normalizedWorkEmail, normalizedEmail)) {
+          const err = new Error('Verify your work email before using it for the organizer fee waiver.');
+          err.statusCode = 400;
+          throw err;
+        }
+        user.workEmail = normalizedWorkEmail;
+        user.workEmailVerified = true;
+        user.workEmailVerificationRequired = true;
+      }
+
       if (user.role === 'organizer') {
-        const isCorporate = isCorporateEmail(user.email);
+        const isCorporate = isUserCorporateEmail(user);
         if (!user.emailType) user.emailType = isCorporate ? 'corporate' : 'general';
 
         const orgId = user.organization?._id || user.organization;
@@ -634,6 +719,9 @@ class AuthService {
       if (company && !user.company) user.company = company;
       if (city && !user.city) user.city = city;
       if (designation && !user.designation) user.designation = designation;
+      if (user.role === 'visitor' && visitorInterests.length > 0) {
+        user.interests = visitorInterests;
+      }
 
       // If user has no organization yet and is organizer/exhibitor, create one
       if (!user.organization && (user.role === 'organizer' || user.role === 'exhibitor')) {
@@ -684,9 +772,13 @@ class AuthService {
         company: user.company || '',
         designation: user.designation || '',
         city: user.city || '',
+        interests: user.interests || [],
+        workEmail: user.workEmail || '',
+        workEmailVerified: !!user.workEmailVerified,
+        workEmailVerificationRequired: !!user.workEmailVerificationRequired,
         role: user.role,
         isVerified: isPaidOrganizerGoogle ? true : user.isVerified,
-        emailType: user.emailType || (isCorporateEmail(user.email) ? 'corporate' : 'general'),
+        emailType: user.emailType || (isUserCorporateEmail(user) ? 'corporate' : 'general'),
         plan: user.plan || 'free',
         basePlan: user.plan || 'free',
         planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
