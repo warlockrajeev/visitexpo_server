@@ -7,16 +7,49 @@ import express from 'express';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import Exhibitor from '../models/Exhibitor.js';
+import Lead from '../models/Lead.js';
+import Visitor from '../models/Visitor.js';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
 import ContactMessage from '../models/ContactMessage.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
+import TwoFactorService from '../services/twoFactorService.js';
 import { CURATED_DISCOVERY_EXHIBITORS } from '../data/curatedDiscoveryExhibitors.js';
 import exhibitorEnquiryRoutes, { createExhibitorEnquiry } from './exhibitorEnquiryRoutes.js';
 
 const router = express.Router();
 router.use('/enquiries', exhibitorEnquiryRoutes);
+
+const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const getExhibitorOwnershipQuery = (user) => {
+  const email = String(user.email || '').trim();
+  if (!email) return { _id: null };
+  const exactEmail = { $regex: new RegExp(`^${escapeRegex(email)}$`, 'i') };
+  return {
+    $or: [
+      { contactEmail: exactEmail },
+      { 'staff.email': exactEmail }
+    ]
+  };
+};
+
+const isEventPastEndDate = (event) => {
+  if (!event) return false;
+  if (['completed', 'ended', 'archived'].includes(String(event.status || '').toLowerCase())) return true;
+  const endDate = event.endDate || event.startDate;
+  if (!endDate) return false;
+  const dateOnlyMatch = typeof endDate === 'string'
+    ? endDate.match(/^(\d{4}-\d{2}-\d{2})(?:T00:00:00(?:\.000)?Z)?$/)
+    : null;
+  const parsedEndDate = dateOnlyMatch ? new Date(`${dateOnlyMatch[1]}T00:00:00`) : new Date(endDate);
+  if (Number.isNaN(parsedEndDate.getTime())) return false;
+  if (parsedEndDate.getHours() === 0 && parsedEndDate.getMinutes() === 0) {
+    parsedEndDate.setHours(23, 59, 59, 999);
+  }
+  return parsedEndDate.getTime() < Date.now();
+};
 
 // Optional JWT authentication helper for discovery endpoints
 const optionalAuth = (req, res, next) => {
@@ -42,7 +75,36 @@ const optionalAuth = (req, res, next) => {
 // ==========================================
 router.post('/register', async (req, res, next) => {
   try {
-    const { eventId, name, description, logo, website, contactEmail, contactPhone, attendanceType, staff, password } = req.body;
+    const {
+      eventId,
+      name,
+      description,
+      logo,
+      website,
+      contactEmail,
+      contactPhone,
+      phoneVerificationToken,
+      attendanceType,
+      staff,
+      password
+    } = req.body;
+    let callerToken;
+    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+      callerToken = req.headers.authorization.split(' ')[1];
+    } else if (req.cookies && req.cookies.token) {
+      callerToken = req.cookies.token;
+    }
+    let callerRole = '';
+    if (callerToken) {
+      try {
+        callerRole = verifyAccessToken(callerToken)?.role || '';
+      } catch {
+        callerRole = '';
+      }
+    }
+    const isManagedRegistration = ['super_admin', 'admin', 'sub_admin', 'subadmin', 'organizer', 'event_manager'].includes(callerRole);
+    const cleanPhone = TwoFactorService.cleanPhoneNumber(contactPhone);
+    const normalizedEmail = typeof contactEmail === 'string' ? contactEmail.trim().toLowerCase() : '';
 
     if (!eventId) {
       return res.status(400).json({
@@ -50,17 +112,54 @@ router.post('/register', async (req, res, next) => {
         error: 'Event ID is required. Please select an active event before onboarding an exhibitor.'
       });
     }
-    if (!name || !name.trim()) {
-      return res.status(400).json({ success: false, error: 'Company Name is required.' });
+    if (typeof name !== 'string' || name.trim().length < 2 || name.trim().length > 120) {
+      return res.status(400).json({ success: false, error: 'Company name must be between 2 and 120 characters.' });
     }
-    if (!description || !description.trim()) {
-      return res.status(400).json({ success: false, error: 'Company Description is required.' });
+    const minimumDescriptionLength = isManagedRegistration ? 1 : 20;
+    if (typeof description !== 'string' || description.trim().length < minimumDescriptionLength || description.trim().length > 2000) {
+      return res.status(400).json({
+        success: false,
+        error: isManagedRegistration
+          ? 'Company overview is required and cannot exceed 2,000 characters.'
+          : 'Company overview must be between 20 and 2,000 characters.'
+      });
     }
-    if (!contactEmail || !contactEmail.trim()) {
-      return res.status(400).json({ success: false, error: 'Contact Email is required.' });
+    if (normalizedEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizedEmail)) {
+      return res.status(400).json({ success: false, error: 'A valid contact email address is required.' });
     }
-    if (!contactPhone || !contactPhone.trim()) {
-      return res.status(400).json({ success: false, error: 'Contact Phone is required.' });
+    const phoneIsValid = isManagedRegistration
+      ? /^\d{8,15}$/.test(String(contactPhone || '').replace(/\D/g, ''))
+      : /^[6-9]\d{9}$/.test(cleanPhone);
+    if (!phoneIsValid) {
+      return res.status(400).json({
+        success: false,
+        error: isManagedRegistration
+          ? 'Enter a valid contact phone number with 8 to 15 digits.'
+          : 'Enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.'
+      });
+    }
+    if (!isManagedRegistration && !TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
+      return res.status(400).json({ success: false, error: 'Verify your mobile number with OTP before submitting the exhibitor application.' });
+    }
+    if (website) {
+      try {
+        const parsedWebsite = new URL(website);
+        if (!['http:', 'https:'].includes(parsedWebsite.protocol)) throw new Error('Invalid protocol');
+      } catch {
+        return res.status(400).json({ success: false, error: 'Enter a valid website URL beginning with http:// or https://.' });
+      }
+    }
+    if (!isManagedRegistration && (typeof password !== 'string' || password.length < 6)) {
+      return res.status(400).json({ success: false, error: 'Password must be at least 6 characters.' });
+    }
+    if (staff !== undefined && (!Array.isArray(staff) || staff.length > 25 || staff.some((member) => (
+      !member ||
+      typeof member.name !== 'string' ||
+      !member.name.trim() ||
+      typeof member.email !== 'string' ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(member.email.trim())
+    )))) {
+      return res.status(400).json({ success: false, error: 'Staff members must include a name and a valid email address (maximum 25 representatives).' });
     }
 
     // 1. Verify target event exists
@@ -97,14 +196,14 @@ router.post('/register', async (req, res, next) => {
     if (!event) {
       return res.status(404).json({ success: false, error: 'Target event not found' });
     }
+    if (event.isClaimed && !isManagedRegistration) {
+      return res.status(409).json({
+        success: false,
+        error: 'This event has already been claimed and is no longer accepting exhibitor applications through this form.'
+      });
+    }
 
     // Check if called by an organizer, enforce plan tier checks
-    let callerToken;
-    if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
-      callerToken = req.headers.authorization.split(' ')[1];
-    } else if (req.cookies && req.cookies.token) {
-      callerToken = req.cookies.token;
-    }
     if (callerToken) {
       try {
         const decoded = verifyAccessToken(callerToken);
@@ -141,6 +240,18 @@ router.post('/register', async (req, res, next) => {
     if (existing) {
       return res.status(400).json({ success: false, error: 'This company is already registered as an exhibitor for this event' });
     }
+    if (!isManagedRegistration) {
+      const activeExhibitor = await Exhibitor.exists({
+        event: event._id,
+        status: { $ne: 'rejected' }
+      });
+      if (activeExhibitor) {
+        return res.status(409).json({
+          success: false,
+          error: 'This event already has an active exhibitor registration and is no longer available through public onboarding.'
+        });
+      }
+    }
 
     // 3. Create Exhibitor (defaults status to pending)
     const exhibitor = await Exhibitor.create({
@@ -148,8 +259,8 @@ router.post('/register', async (req, res, next) => {
       description,
       logo: logo || '',
       website: website || '',
-      contactEmail: contactEmail.toLowerCase(),
-      contactPhone,
+      contactEmail: normalizedEmail,
+      contactPhone: isManagedRegistration ? String(contactPhone).trim() : cleanPhone,
       event: event._id,
       attendanceType: attendanceType || 'in_person',
       staff: staff || [],
@@ -157,11 +268,11 @@ router.post('/register', async (req, res, next) => {
     });
 
     // 4. Create User record for login
-    let user = await User.findOne({ email: contactEmail.toLowerCase() });
+    let user = await User.findOne({ email: normalizedEmail });
     if (!user) {
       user = await User.create({
         name: name,
-        email: contactEmail.toLowerCase(),
+        email: normalizedEmail,
         password: password || 'defaultPassword123',
         role: 'exhibitor',
         isVerified: false
@@ -224,6 +335,141 @@ router.get('/profile', protect, async (req, res, next) => {
     res.status(200).json({
       success: true,
       data: exhibitors || []
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/leads', protect, authorize('exhibitor'), async (req, res, next) => {
+  try {
+    const exhibitorIds = await Exhibitor.find(getExhibitorOwnershipQuery(req.user)).distinct('_id');
+    const leads = exhibitorIds.length
+      ? await Lead.find({ exhibitor: { $in: exhibitorIds } })
+        .populate('event', 'title city startDate endDate venue slug')
+        .populate('exhibitor', 'name boothNumber')
+        .sort({ createdAt: -1 })
+        .limit(100)
+        .lean()
+      : [];
+
+    res.status(200).json({ success: true, data: leads });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/leads/scan', protect, authorize('exhibitor'), async (req, res, next) => {
+  try {
+    const { exhibitorId } = req.body;
+    let badgeToken = typeof req.body.qrCode === 'string' ? req.body.qrCode.trim() : '';
+    let badgeEventId = '';
+
+    if (!mongoose.isValidObjectId(exhibitorId)) {
+      return res.status(400).json({ success: false, error: 'Select a valid exhibitor booth before scanning.' });
+    }
+
+    if (badgeToken.startsWith('http://') || badgeToken.startsWith('https://')) {
+      try {
+        const scannedUrl = new URL(badgeToken);
+        badgeToken = scannedUrl.searchParams.get('badgeToken') || '';
+        badgeEventId = scannedUrl.searchParams.get('eventId') || '';
+      } catch {
+        return res.status(400).json({ success: false, error: 'The scanned badge URL is invalid.' });
+      }
+    }
+
+    if (!badgeToken || badgeToken.length > 256) {
+      return res.status(400).json({ success: false, error: 'A valid visitor badge QR code is required.' });
+    }
+
+    const exhibitor = await Exhibitor.findOne({
+      _id: exhibitorId,
+      status: 'approved',
+      ...getExhibitorOwnershipQuery(req.user)
+    });
+    if (!exhibitor) {
+      return res.status(403).json({ success: false, error: 'This approved booth is not linked to your exhibitor account.' });
+    }
+
+    const visitor = await Visitor.findOne({ qrCode: badgeToken })
+      .populate('event', 'title city country startDate endDate status');
+    if (!visitor || !visitor.event) {
+      return res.status(404).json({ success: false, error: 'No visitor pass matches this QR code.' });
+    }
+    if (badgeEventId && String(visitor.event._id) !== String(badgeEventId)) {
+      return res.status(400).json({ success: false, error: 'The QR code does not match the visitor’s event.' });
+    }
+    if (String(visitor.event._id) !== String(exhibitor.event)) {
+      return res.status(403).json({ success: false, error: 'This visitor pass is for a different event than the selected booth.' });
+    }
+    if (visitor.registrationStatus !== 'confirmed') {
+      return res.status(400).json({ success: false, error: 'This visitor pass is not confirmed or is no longer active.' });
+    }
+    if (visitor.attendanceType === 'virtual') {
+      return res.status(400).json({ success: false, error: 'Virtual visitor passes cannot be scanned for in-person leads.' });
+    }
+    if (isEventPastEndDate(visitor.event)) {
+      return res.status(400).json({ success: false, code: 'PASS_EXPIRED', error: 'This visitor pass has expired because the event has ended.' });
+    }
+
+    const existingLead = await Lead.findOne({
+      event: visitor.event._id,
+      exhibitor: exhibitor._id,
+      email: visitor.email.toLowerCase()
+    });
+    if (existingLead) {
+      return res.status(200).json({
+        success: true,
+        alreadyCaptured: true,
+        message: 'This visitor is already saved as a lead for your booth.',
+        lead: existingLead
+      });
+    }
+
+    let lead;
+    try {
+      lead = await Lead.create({
+        name: visitor.name,
+        email: visitor.email,
+        phone: visitor.phone,
+        company: visitor.company || '',
+        designation: visitor.designation || '',
+        country: visitor.country || visitor.event.country || '',
+        leadScore: 50,
+        source: 'exhibitor_scan',
+        status: 'new',
+        event: visitor.event._id,
+        exhibitor: exhibitor._id,
+        visitor: visitor._id,
+        notes: `Scanned at ${exhibitor.name}${exhibitor.boothNumber ? ` (Booth ${exhibitor.boothNumber})` : ''}.`,
+        activityTimeline: [{
+          type: 'note',
+          content: `Visitor badge scanned at ${exhibitor.name}${exhibitor.boothNumber ? ` (Booth ${exhibitor.boothNumber})` : ''}.`,
+          performedBy: req.user.id
+        }]
+      });
+    } catch (error) {
+      if (error.code !== 11000) throw error;
+      lead = await Lead.findOne({
+        event: visitor.event._id,
+        exhibitor: exhibitor._id,
+        email: visitor.email.toLowerCase()
+      });
+      if (!lead) throw error;
+      return res.status(200).json({
+        success: true,
+        alreadyCaptured: true,
+        message: 'This visitor is already saved as a lead for your booth.',
+        lead
+      });
+    }
+
+    res.status(201).json({
+      success: true,
+      alreadyCaptured: false,
+      message: 'Visitor saved as a new lead for your booth.',
+      lead
     });
   } catch (error) {
     next(error);

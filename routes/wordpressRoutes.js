@@ -6,6 +6,7 @@
 import express from 'express';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
+import Exhibitor from '../models/Exhibitor.js';
 import Ticket from '../models/Ticket.js';
 import User from '../models/User.js';
 import Organization from '../models/Organization.js';
@@ -166,11 +167,12 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
 // ==========================================
 /**
  * GET /api/wordpress/claimable-events
- * Fetch list of unclaimed events for the Organizer Onboarding directory search.
+ * Fetch available events, optionally excluding events with active exhibitor registrations.
  */
 router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
   try {
     const { search, city, limit = 2500, page = 1 } = req.query;
+    const forExhibitor = req.query.forExhibitor === 'true';
 
     const query = {
       isClaimed: { $ne: true },
@@ -190,6 +192,13 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
 
     if (city && city.trim()) {
       query.city = { $regex: city.trim(), $options: 'i' };
+    }
+
+    if (forExhibitor) {
+      const occupiedEventIds = await Exhibitor.distinct('event', {
+        status: { $ne: 'rejected' }
+      });
+      query._id = { $nin: occupiedEventIds };
     }
 
     const pgLimit = limit === 'all' ? 2500 : (parseInt(limit, 10) || 2500);
@@ -220,7 +229,7 @@ router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
       venue: e.venue || 'Exhibition Center',
       city: e.city || 'India',
       country: e.country || 'India',
-      isClaimed: false,
+      isClaimed: !!e.isClaimed,
       orgName: e.orgName || 'Verified Organizer',
       orgEmail: e.orgEmail || '',
       orgPhone: e.orgPhone || '',

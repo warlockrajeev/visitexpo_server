@@ -60,7 +60,8 @@ const LeadSchema = new mongoose.Schema(
         'cold_call',
         'referral',
         'walk_in',
-        'bulk_upload'
+        'bulk_upload',
+        'exhibitor_scan'
       ],
       default: 'website',
       index: true
@@ -76,6 +77,17 @@ const LeadSchema = new mongoose.Schema(
       ref: 'User',
       default: null,
       index: true
+    },
+    exhibitor: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Exhibitor',
+      default: null,
+      index: true
+    },
+    visitor: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Visitor',
+      default: null
     },
     notes: String,
     activityTimeline: [ActivitySchema],
@@ -94,5 +106,9 @@ const LeadSchema = new mongoose.Schema(
 
 // Optimize compound index
 LeadSchema.index({ event: 1, status: 1 });
+LeadSchema.index(
+  { event: 1, exhibitor: 1, email: 1 },
+  { unique: true, partialFilterExpression: { exhibitor: { $type: 'objectId' } } }
+);
 
 export default mongoose.model('Lead', LeadSchema);
