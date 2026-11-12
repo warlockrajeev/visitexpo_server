@@ -520,12 +520,28 @@ router.post('/quick-setup', protect, async (req, res, next) => {
     const companyName = name?.trim() || req.user.company || req.user.name || 'Exhibition Partner';
     const contactEmail = req.user.email.toLowerCase().trim();
 
-    // Check if already registered for this event
-    let exhibitor = await Exhibitor.findOne({ event: eventId, contactEmail });
+    // Keep an existing request idempotent, but never allow another exhibitor to occupy the same event.
+    let exhibitor = await Exhibitor.findOne({
+      event: eventId,
+      contactEmail,
+      status: { $ne: 'rejected' }
+    });
     if (exhibitor) {
       const populated = await Exhibitor.findById(exhibitor._id)
         .populate('event', 'title city startDate venue description slug');
       return res.status(200).json({ success: true, message: 'Booth already exists for this event', exhibitor: populated });
+    }
+
+    if (event.isClaimed) {
+      return res.status(409).json({ success: false, error: 'This expo has already been claimed and is no longer available for booth registration.' });
+    }
+
+    const occupiedByAnotherExhibitor = await Exhibitor.exists({
+      event: eventId,
+      status: { $ne: 'rejected' }
+    });
+    if (occupiedByAnotherExhibitor) {
+      return res.status(409).json({ success: false, error: 'This expo already has an exhibitor and is no longer available for booth registration.' });
     }
 
     // Default staff representative to logged in user if none provided

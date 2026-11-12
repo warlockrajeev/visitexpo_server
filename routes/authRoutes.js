@@ -97,7 +97,7 @@ router.post('/work-email/verify', authLimiter, async (req, res, next) => {
 
 router.post('/signup', authLimiter, async (req, res, next) => {
   try {
-    const { name, email, password, organizationName, role, phone, city, interests, phoneVerificationToken, otpSessionId, otp, workEmail, workEmailVerificationToken } = req.body;
+    const { name, email, password, organizationName, role, phone, city, interests, phoneVerificationToken, otpSessionId, otp, workEmail } = req.body;
     
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, error: 'Full Name is required' });
@@ -121,7 +121,7 @@ router.post('/signup', authLimiter, async (req, res, next) => {
       return res.status(400).json({ success: false, error: 'Please select a visitor category.' });
     }
 
-    const data = await AuthService.signup(name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail, workEmailVerificationToken);
+    const data = await AuthService.signup(name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail);
     
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);
@@ -248,8 +248,7 @@ router.post('/google', authLimiter, async (req, res, next) => {
       phoneVerificationToken,
       otpSessionId,
       otp,
-      workEmail,
-      workEmailVerificationToken
+      workEmail
     } = req.body;
 
     if (!email) {
@@ -274,8 +273,7 @@ router.post('/google', authLimiter, async (req, res, next) => {
       phoneVerificationToken,
       otpSessionId,
       otp,
-      workEmail,
-      workEmailVerificationToken
+      workEmail
     });
 
     // Set refresh token cookie

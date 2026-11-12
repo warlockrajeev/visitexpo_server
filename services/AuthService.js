@@ -11,7 +11,6 @@ import Plan from '../models/Plan.js';
 import TwoFactorService from './twoFactorService.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
 import { isCorporateEmail, isUserCorporateEmail } from '../utils/emailValidator.js';
-import { verifyWorkEmailVerificationToken } from '../utils/workEmailVerification.js';
 
 export const getRoleLabel = (role) => {
   if (!role) return 'User';
@@ -24,7 +23,7 @@ export const getRoleLabel = (role) => {
 };
 
 class AuthService {
-  async signup(name, email, password, orgName = '', role = 'organizer', phone = '', city = '', phoneVerificationToken = '', otpSessionId = '', otp = '', interests = [], workEmail = '', workEmailVerificationToken = '') {
+  async signup(name, email, password, orgName = '', role = 'organizer', phone = '', city = '', phoneVerificationToken = '', otpSessionId = '', otp = '', interests = [], workEmail = '') {
     // 1. Check if email already registered
     const normalizedEmail = (email || '').toLowerCase().trim();
     const existingUser = await UserRepository.findOne({ email: normalizedEmail });
@@ -56,16 +55,13 @@ class AuthService {
       throw err;
     }
     const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
-    const hasVerifiedWorkEmail = assignedRole === 'organizer' &&
-      verifyWorkEmailVerificationToken(workEmailVerificationToken, normalizedWorkEmail, normalizedEmail);
-    if (
-      assignedRole === 'organizer' &&
-      ((normalizedWorkEmail && !hasVerifiedWorkEmail) || (!normalizedWorkEmail && workEmailVerificationToken))
-    ) {
-      const err = new Error('Verify your work email before using it for the organizer fee waiver.');
+    if (assignedRole === 'organizer' && normalizedWorkEmail &&
+      (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalizedWorkEmail) || !isCorporateEmail(normalizedWorkEmail))) {
+      const err = new Error('Enter a valid corporate work email address.');
       err.statusCode = 400;
       throw err;
     }
+    const hasCorporateWorkEmail = assignedRole === 'organizer' && !!normalizedWorkEmail;
     const visitorInterests = Array.isArray(interests)
       ? Array.from(new Set(interests.filter((interest) => typeof interest === 'string').map((interest) => interest.trim()).filter(Boolean)))
       : [];
@@ -113,7 +109,7 @@ class AuthService {
     }
 
     // 4. Determine corporate vs general email & plan activation
-    const isCorporate = hasVerifiedWorkEmail || isCorporateEmail(normalizedEmail);
+    const isCorporate = assignedRole === 'organizer' ? hasCorporateWorkEmail : isCorporateEmail(normalizedEmail);
     const emailType = isCorporate ? 'corporate' : 'general';
 
     let isVerified = false;
@@ -155,9 +151,9 @@ class AuthService {
       phone: cleanPhone,
       city: city.trim(),
       interests: assignedRole === 'visitor' ? visitorInterests : [],
-      workEmail: hasVerifiedWorkEmail ? normalizedWorkEmail : '',
-      workEmailVerified: !!hasVerifiedWorkEmail,
-      workEmailVerificationRequired: false,
+      workEmail: hasCorporateWorkEmail ? normalizedWorkEmail : '',
+      workEmailVerified: false,
+      workEmailVerificationRequired: assignedRole === 'organizer' && !hasCorporateWorkEmail,
       emailType,
       plan: 'free',
       planStatus,
@@ -442,7 +438,7 @@ class AuthService {
     return true;
   }
 
-  async googleAuth({ email, name, role = 'organizer', organizationName, phone, city, website, company, designation, industry, interests = [], phoneVerificationToken, otpSessionId, otp, workEmail = '', workEmailVerificationToken = '' }) {
+  async googleAuth({ email, name, role = 'organizer', organizationName, phone, city, website, company, designation, industry, interests = [], phoneVerificationToken, otpSessionId, otp, workEmail = '' }) {
     if (!email) {
       const err = new Error('Email is required for Google authentication');
       err.statusCode = 400;
@@ -543,18 +539,15 @@ class AuthService {
         throw err;
       }
       const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
-      const hasVerifiedWorkEmail = assignedRole === 'organizer' &&
-        verifyWorkEmailVerificationToken(workEmailVerificationToken, normalizedWorkEmail, normalizedEmail);
-      if (
-        assignedRole === 'organizer' &&
-        ((normalizedWorkEmail && !hasVerifiedWorkEmail) || (!normalizedWorkEmail && workEmailVerificationToken))
-      ) {
-        const err = new Error('Verify your work email before using it for the organizer fee waiver.');
+      if (assignedRole === 'organizer' && normalizedWorkEmail &&
+        (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalizedWorkEmail) || !isCorporateEmail(normalizedWorkEmail))) {
+        const err = new Error('Enter a valid corporate work email address.');
         err.statusCode = 400;
         throw err;
       }
+      const hasCorporateWorkEmail = assignedRole === 'organizer' && !!normalizedWorkEmail;
 
-      const isCorporate = hasVerifiedWorkEmail || isCorporateEmail(normalizedEmail);
+      const isCorporate = assignedRole === 'organizer' ? hasCorporateWorkEmail : isCorporateEmail(normalizedEmail);
       const emailType = isCorporate ? 'corporate' : 'general';
 
       let isVerified = false;
@@ -594,9 +587,9 @@ class AuthService {
         designation: designation || '',
         city: city || '',
         interests: assignedRole === 'visitor' ? visitorInterests : [],
-        workEmail: hasVerifiedWorkEmail ? normalizedWorkEmail : '',
-        workEmailVerified: !!hasVerifiedWorkEmail,
-        workEmailVerificationRequired: false,
+        workEmail: hasCorporateWorkEmail ? normalizedWorkEmail : '',
+        workEmailVerified: false,
+        workEmailVerificationRequired: assignedRole === 'organizer' && !hasCorporateWorkEmail,
         emailType,
         plan: 'free',
         planStatus,
@@ -641,34 +634,37 @@ class AuthService {
       }
     } else {
       // If user exists, sync corporate email plan if organizer
-      if (user.role === 'organizer' && (workEmail || workEmailVerificationToken)) {
+      if (user.role === 'organizer' && workEmail) {
         if (workEmail != null && typeof workEmail !== 'string') {
           const err = new Error('Work email must be a valid email address.');
           err.statusCode = 400;
           throw err;
         }
         const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
-        if (!verifyWorkEmailVerificationToken(workEmailVerificationToken, normalizedWorkEmail, normalizedEmail)) {
-          const err = new Error('Verify your work email before using it for the organizer fee waiver.');
+        if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalizedWorkEmail) || !isCorporateEmail(normalizedWorkEmail)) {
+          const err = new Error('Enter a valid corporate work email address.');
           err.statusCode = 400;
           throw err;
         }
         user.workEmail = normalizedWorkEmail;
-        user.workEmailVerified = true;
-        user.workEmailVerificationRequired = true;
+        user.workEmailVerified = false;
+        user.workEmailVerificationRequired = false;
       }
 
       if (user.role === 'organizer') {
         const isCorporate = isUserCorporateEmail(user);
-        if (!user.emailType) user.emailType = isCorporate ? 'corporate' : 'general';
+        user.emailType = isCorporate ? 'corporate' : 'general';
 
         const orgId = user.organization?._id || user.organization;
-        const activeSub = await Subscription.findOne({
+        const subscriptionFilter = {
           $or: [
             ...(orgId ? [{ organization: orgId }] : []),
             { user: user._id }
           ],
           plan: { $ne: 'growth' },
+        };
+        const activeSub = await Subscription.findOne({
+          ...subscriptionFilter,
           status: 'active'
         }).sort({ createdAt: -1 });
 
@@ -687,6 +683,10 @@ class AuthService {
           user.planStatus = 'active';
           user.isPlanActive = true;
           user.planPaidAmount = 0;
+          await Subscription.updateMany(
+            { ...subscriptionFilter, status: 'payment_pending' },
+            { $set: { status: 'active', price: 0, emailType: 'corporate' } }
+          );
         }
       }
       if (!user.authProvider) {
