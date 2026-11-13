@@ -12,6 +12,7 @@ import Event from '../models/Event.js';
 import '../models/Organization.js';
 import User from '../models/User.js';
 import EventEngagement from '../models/EventEngagement.js';
+import WordPressDirectorySyncService from './WordPressDirectorySyncService.js';
 
 // Semantic synonym clusters to match broader user interest keywords
 const INTEREST_CLUSTERS = {
@@ -590,17 +591,8 @@ class RecommendationService {
       }
     }
 
-    // 2. Fetch candidate events from database
+    // 2. Fetch candidate events from shared pre-warmed directory cache first (instant), with lightweight DB fallback
     const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-    const query = {
-      status: 'published',
-      $or: [
-        { endDate: { $gte: yesterday } },
-        { startDate: { $gte: yesterday } },
-        { endDate: { $exists: false } }
-      ]
-    };
-
     const nowTs = Date.now();
     let candidateEvents = null;
 
@@ -608,16 +600,75 @@ class RecommendationService {
       candidateEvents = candidateEventsCache;
     } else {
       try {
-        candidateEvents = await Event.find(query)
-          .populate('organizer', 'name logo website')
-          .lean();
-        if (candidateEvents && candidateEvents.length > 0) {
-          candidateEventsCache = candidateEvents;
-          candidateCacheTimestamp = nowTs;
+        const storedEvents = await WordPressDirectorySyncService.getFastStoredEvents();
+        if (Array.isArray(storedEvents) && storedEvents.length > 0) {
+          candidateEvents = storedEvents.filter((ev) => {
+            if (ev.status && ev.status !== 'published') return false;
+            const end = ev.endDate ? new Date(ev.endDate) : null;
+            const start = ev.startDate ? new Date(ev.startDate) : null;
+            return !end || end >= yesterday || (start && start >= yesterday);
+          });
         }
-      } catch (dbErr) {
-        console.warn('[RecommendationService] Candidate fetch error:', dbErr.message);
-        candidateEvents = candidateEventsCache || [];
+      } catch (dirErr) {
+        console.warn('[RecommendationService] Shared directory cache error:', dirErr.message);
+      }
+
+      if (!candidateEvents || candidateEvents.length === 0) {
+        try {
+          candidateEvents = await Event.aggregate([
+            {
+              $match: {
+                status: 'published',
+                $or: [
+                  { endDate: { $gte: yesterday } },
+                  { startDate: { $gte: yesterday } },
+                  { endDate: { $exists: false } }
+                ]
+              }
+            },
+            {
+              $project: {
+                title: 1,
+                slug: 1,
+                shortDescription: 1,
+                description: { $substrCP: [{ $ifNull: ['$description', ''] }, 0, 350] },
+                banner: 1,
+                bannerImage: 1,
+                image: 1,
+                venue: 1,
+                city: 1,
+                state: 1,
+                country: 1,
+                startDate: 1,
+                endDate: 1,
+                categories: 1,
+                category: 1,
+                organizer: 1,
+                orgName: 1,
+                wpPostId: 1,
+                wpUrl: 1,
+                isClaimed: 1,
+                isFreeEvent: 1,
+                ticketingMode: 1,
+                freePassQuota: 1,
+                freePassUntil: 1,
+                freePassClaimedCount: 1,
+                paidTicketPrice: 1,
+                currency: 1,
+                attendeesCount: 1,
+                interestedCount: 1
+              }
+            }
+          ]);
+        } catch (dbErr) {
+          console.warn('[RecommendationService] Candidate fetch error:', dbErr.message);
+          candidateEvents = candidateEventsCache || [];
+        }
+      }
+
+      if (candidateEvents && candidateEvents.length > 0) {
+        candidateEventsCache = candidateEvents;
+        candidateCacheTimestamp = nowTs;
       }
     }
 

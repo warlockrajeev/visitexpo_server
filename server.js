@@ -45,10 +45,16 @@ const runExhibitorEnquiryReminders = async () => {
 // Start Server
 const server = app.listen(PORT, () => {
   console.log(`VisitExpo API Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
+  // Pre-warm directory cache immediately after boot so homepage requests respond in milliseconds
+  setTimeout(() => {
+    WordPressDirectorySyncService.warmCache().catch((err) => {
+      console.warn('[WarmCache] Boot warm error:', err.message);
+    });
+  }, 500);
   // Run background sync every 30 minutes
   setInterval(autoSyncWordPressEvents, 30 * 60 * 1000);
-  // Initial sync 5 seconds after boot (non-blocking)
-  setTimeout(autoSyncWordPressEvents, 5 * 1000);
+  // Initial sync 20 seconds after boot so initial reads don't contend with bulk writes
+  setTimeout(autoSyncWordPressEvents, 20 * 1000);
   // Run scheduled event reminder checks every 30 minutes
   setInterval(runScheduledEventReminders, 30 * 60 * 1000);
   // Initial check 10 seconds after boot

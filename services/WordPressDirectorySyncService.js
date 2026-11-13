@@ -5,11 +5,13 @@
  */
 
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import Event from '../models/Event.js';
 import DeletedEvent from '../models/DeletedEvent.js';
 import EventEngagement from '../models/EventEngagement.js';
 import Visitor from '../models/Visitor.js';
+import Organization from '../models/Organization.js';
 import { parseWpLocation } from '../routes/adminRoutes.js';
 
 const WORDPRESS_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
@@ -116,18 +118,52 @@ function getCategoryFallback(category, title = '') {
   return pool[Math.abs(hash) % pool.length];
 }
 
-// In-memory cache for ultra-fast serving
+// Persistent disk snapshot + in-memory cache for instant cold starts & stale-while-revalidate
+const CACHE_TTL_MS = 15 * 60 * 1000;
+const DISK_CACHE_PATH = path.join(os.tmpdir(), 'visitexpo-all-directory-cache.json');
+
 let memoryCache = {
   events: null,
   timestamp: 0,
-  ttl: 5 * 60 * 1000 // 5 minutes cache
+  ttl: CACHE_TTL_MS
 };
+
+let inFlightEventsPromise = null;
+let isBackgroundRefreshing = false;
 
 class WordPressDirectorySyncService {
   constructor() {
     this.imageLookupMap = new Map();
     this.loadImageMap();
+    this.loadDiskCache();
     this.isSyncing = false;
+  }
+
+  loadDiskCache() {
+    try {
+      if (!fs.existsSync(DISK_CACHE_PATH)) return;
+      const stat = fs.statSync(DISK_CACHE_PATH);
+      const raw = JSON.parse(fs.readFileSync(DISK_CACHE_PATH, 'utf8'));
+      if (Array.isArray(raw) && raw.length > 0) {
+        memoryCache = {
+          events: raw,
+          timestamp: stat.mtimeMs || 0,
+          ttl: CACHE_TTL_MS
+        };
+        console.log(`[WP-Sync] Loaded ${raw.length} cached directory events from disk snapshot.`);
+      }
+    } catch (err) {
+      console.warn('[WP-Sync] Could not load disk cache:', err.message);
+    }
+  }
+
+  async saveDiskCache(events) {
+    try {
+      if (!Array.isArray(events) || events.length === 0) return;
+      await fs.promises.writeFile(DISK_CACHE_PATH, JSON.stringify(events), 'utf8');
+    } catch (err) {
+      console.warn('[WP-Sync] Could not write disk cache:', err.message);
+    }
   }
 
   loadImageMap() {
@@ -439,9 +475,9 @@ class WordPressDirectorySyncService {
       const totalTimeMs = Date.now() - startTime;
       console.log(`[WP-Sync] Done! Processed ${bulkOps.length} events (Upserted: ${totalUpserted}, Modified: ${totalModified}, Skipped deleted: ${skippedCount}) in ${totalTimeMs}ms.`);
 
-      // Invalidate memory cache so next read gets fresh data
-      memoryCache.events = null;
+      // Mark cache stale without wiping existing warm data, then refresh in background
       memoryCache.timestamp = 0;
+      this.refreshCacheInBackground();
 
       this.isSyncing = false;
       return {
@@ -461,132 +497,243 @@ class WordPressDirectorySyncService {
   }
 
   /**
-   * Fast event fetcher from MongoDB with dynamic live engagement & turnout counts
+   * Non-blocking background cache refresh so callers receive warm data immediately
+   */
+  refreshCacheInBackground() {
+    if (isBackgroundRefreshing || inFlightEventsPromise) return;
+    isBackgroundRefreshing = true;
+    this._fetchAndCacheEvents()
+      .catch((err) => {
+        console.warn('[WP-Sync] Background directory refresh failed:', err.message);
+      })
+      .finally(() => {
+        isBackgroundRefreshing = false;
+      });
+  }
+
+  /**
+   * Pre-warms in-memory directory cache on server startup
+   */
+  async warmCache() {
+    try {
+      const now = Date.now();
+      if (memoryCache.events && (now - memoryCache.timestamp < memoryCache.ttl)) {
+        return memoryCache.events;
+      }
+      return await this._fetchAndCacheEvents();
+    } catch (err) {
+      console.warn('[WP-Sync] Startup warmCache failed:', err.message);
+      return memoryCache.events || [];
+    }
+  }
+
+  async _fetchAndCacheEvents() {
+    if (inFlightEventsPromise) {
+      return inFlightEventsPromise;
+    }
+
+    inFlightEventsPromise = (async () => {
+      // Query directly from indexed MongoDB with truncated descriptions (~3x faster & smaller payload)
+      const [rawEvents, engagementAgg, visitorAgg] = await Promise.all([
+        Event.aggregate([
+          { $match: { status: { $ne: 'cancelled' } } },
+          { $sort: { startDate: 1 } },
+          {
+            $project: {
+              title: 1,
+              slug: 1,
+              description: { $substrCP: [{ $ifNull: ['$description', ''] }, 0, 300] },
+              banner: 1,
+              venue: 1,
+              address: 1,
+              city: 1,
+              country: 1,
+              startDate: 1,
+              endDate: 1,
+              timings: 1,
+              categories: 1,
+              organizer: 1,
+              orgName: 1,
+              wpPostId: 1,
+              wpUrl: 1,
+              isClaimed: 1,
+              status: 1,
+              isFreeEvent: 1,
+              ticketingMode: 1,
+              freePassQuota: 1,
+              freePassUntil: 1,
+              freePassClaimedCount: 1,
+              paidTicketPrice: 1,
+              currency: 1,
+              createdAt: 1
+            }
+          }
+        ]),
+        EventEngagement.aggregate([
+          {
+            $match: {
+              status: 'active',
+              $or: [
+                { isInterested: true },
+                { type: { $in: ['interested', 'both'] } }
+              ]
+            }
+          },
+          {
+            $group: {
+              _id: '$eventSlug',
+              count: { $sum: 1 },
+              eventIds: { $addToSet: '$eventId' }
+            }
+          }
+        ]).catch(() => []),
+        Visitor.aggregate([
+          {
+            $match: {
+              registrationStatus: { $ne: 'cancelled' }
+            }
+          },
+          {
+            $group: {
+              _id: '$event',
+              count: { $sum: 1 }
+            }
+          }
+        ]).catch(() => [])
+      ]);
+
+      // Resolve distinct linked Organization names in one tiny batch query
+      const orgIds = [...new Set(
+        (rawEvents || [])
+          .map((d) => (d.organizer && typeof d.organizer !== 'object' ? String(d.organizer) : d.organizer?._id ? String(d.organizer._id) : null))
+          .filter(Boolean)
+      )];
+      const orgNameMap = new Map();
+      if (orgIds.length > 0) {
+        const orgDocs = await Organization.find({ _id: { $in: orgIds } }).select('name').lean().catch(() => []);
+        (orgDocs || []).forEach((o) => {
+          if (o?._id && o?.name) orgNameMap.set(String(o._id), o.name);
+        });
+      }
+
+      // Build engagement map by slug and by eventId
+      const engagementMap = new Map();
+      (engagementAgg || []).forEach((e) => {
+        const slugKey = (e._id || '').toLowerCase().trim();
+        if (slugKey) {
+          engagementMap.set(slugKey, (engagementMap.get(slugKey) || 0) + e.count);
+        }
+        if (Array.isArray(e.eventIds)) {
+          e.eventIds.forEach((id) => {
+            const idKey = String(id || '').trim();
+            if (idKey) {
+              engagementMap.set(idKey, (engagementMap.get(idKey) || 0) + e.count);
+            }
+          });
+        }
+      });
+
+      // Build visitor map by event ObjectId string
+      const visitorMap = new Map();
+      (visitorAgg || []).forEach((v) => {
+        const vKey = String(v._id || '').trim();
+        if (vKey) {
+          visitorMap.set(vKey, v.count);
+        }
+      });
+
+      const events = (rawEvents || []).map((doc) => {
+        const populatedOrgName =
+          (doc.organizer && typeof doc.organizer === 'object' ? doc.organizer.name : '') ||
+          (doc.organizer ? orgNameMap.get(String(doc.organizer)) : '') ||
+          '';
+        const rawOrgName = (doc.orgName || '').trim();
+        const isHostnameOrId =
+          /^[0-9a-fA-F]{24}$/.test(rawOrgName) ||
+          /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName);
+        const cleanOrganizer =
+          populatedOrgName ||
+          (!isHostnameOrId && rawOrgName ? rawOrgName : '') ||
+          'VisitExpo Verified Organizer';
+
+        const resolvedCategory = inferCategory(doc.title, doc.description);
+
+        const slugKey = (doc.slug || '').toLowerCase().trim();
+        const idKey = String(doc._id || '').trim();
+        const wpKey = String(doc.wpPostId || '').trim();
+
+        const engCount =
+          (slugKey && engagementMap.get(slugKey)) ||
+          (idKey && engagementMap.get(idKey)) ||
+          (wpKey && engagementMap.get(wpKey)) ||
+          0;
+        const visCount =
+          (idKey && visitorMap.get(idKey)) ||
+          (wpKey && visitorMap.get(wpKey)) ||
+          0;
+
+        const dynamicInterestedCount = engCount + visCount;
+
+        return {
+          ...doc,
+          organizer: cleanOrganizer,
+          organizerName: cleanOrganizer,
+          orgName: cleanOrganizer,
+          category: resolvedCategory,
+          categories: [resolvedCategory],
+          interestedCount: dynamicInterestedCount,
+          attendeesCount: dynamicInterestedCount
+        };
+      });
+
+      if (events && events.length > 0) {
+        memoryCache = {
+          events,
+          timestamp: Date.now(),
+          ttl: CACHE_TTL_MS
+        };
+        void this.saveDiskCache(events);
+      }
+
+      return events;
+    })().finally(() => {
+      inFlightEventsPromise = null;
+    });
+
+    return inFlightEventsPromise;
+  }
+
+  /**
+   * Fast event fetcher from MongoDB with stale-while-revalidate and coalesced inflight requests
    */
   async getFastStoredEvents({ forceRefresh = false } = {}) {
     const now = Date.now();
-    if (!forceRefresh && memoryCache.events && (now - memoryCache.timestamp < memoryCache.ttl)) {
+    if (!forceRefresh && memoryCache.events) {
+      if (now - memoryCache.timestamp >= memoryCache.ttl) {
+        this.refreshCacheInBackground();
+      }
       return memoryCache.events;
     }
 
-    // Query directly from indexed MongoDB along with real engagement and visitor turnout counts
-    const [rawEvents, engagementAgg, visitorAgg] = await Promise.all([
-      Event.find({ status: { $ne: 'cancelled' } })
-        .select('title slug description banner venue address city country startDate endDate timings categories organizer orgName wpPostId wpUrl isClaimed status isFreeEvent paidTicketPrice createdAt')
-        .populate('organizer', 'name email logo website')
-        .sort({ startDate: 1 })
-        .lean(),
-      EventEngagement.aggregate([
-        {
-          $match: {
-            status: 'active',
-            $or: [
-              { isInterested: true },
-              { type: { $in: ['interested', 'both'] } }
-            ]
-          }
-        },
-        {
-          $group: {
-            _id: '$eventSlug',
-            count: { $sum: 1 },
-            eventIds: { $addToSet: '$eventId' }
-          }
-        }
-      ]).catch(() => []),
-      Visitor.aggregate([
-        {
-          $match: {
-            registrationStatus: { $ne: 'cancelled' }
-          }
-        },
-        {
-          $group: {
-            _id: '$event',
-            count: { $sum: 1 }
-          }
-        }
-      ]).catch(() => [])
-    ]);
-
-    // Build engagement map by slug and by eventId
-    const engagementMap = new Map();
-    (engagementAgg || []).forEach((e) => {
-      const slugKey = (e._id || '').toLowerCase().trim();
-      if (slugKey) {
-        engagementMap.set(slugKey, (engagementMap.get(slugKey) || 0) + e.count);
+    if (forceRefresh && memoryCache.events) {
+      if (now - memoryCache.timestamp < 60 * 1000) {
+        return memoryCache.events;
       }
-      if (Array.isArray(e.eventIds)) {
-        e.eventIds.forEach((id) => {
-          const idKey = String(id || '').trim();
-          if (idKey) {
-            engagementMap.set(idKey, (engagementMap.get(idKey) || 0) + e.count);
-          }
-        });
+      const refreshPromise = this._fetchAndCacheEvents();
+      const freshWithinBudget = await Promise.race([
+        refreshPromise,
+        new Promise((resolve) => setTimeout(() => resolve(null), 8000))
+      ]);
+      if (Array.isArray(freshWithinBudget) && freshWithinBudget.length > 0) {
+        return freshWithinBudget;
       }
-    });
-
-    // Build visitor map by event ObjectId string
-    const visitorMap = new Map();
-    (visitorAgg || []).forEach((v) => {
-      const vKey = String(v._id || '').trim();
-      if (vKey) {
-        visitorMap.set(vKey, v.count);
-      }
-    });
-
-    const events = (rawEvents || []).map((doc) => {
-      const populatedOrgName =
-        doc.organizer && typeof doc.organizer === 'object' ? doc.organizer.name : '';
-      const rawOrgName = (doc.orgName || '').trim();
-      const isHostnameOrId =
-        /^[0-9a-fA-F]{24}$/.test(rawOrgName) ||
-        /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName);
-      const cleanOrganizer =
-        populatedOrgName ||
-        (!isHostnameOrId && rawOrgName ? rawOrgName : '') ||
-        'VisitExpo Verified Organizer';
-
-      const resolvedCategory = inferCategory(doc.title, doc.description);
-
-      const slugKey = (doc.slug || '').toLowerCase().trim();
-      const idKey = String(doc._id || '').trim();
-      const wpKey = String(doc.wpPostId || '').trim();
-
-      const engCount =
-        (slugKey && engagementMap.get(slugKey)) ||
-        (idKey && engagementMap.get(idKey)) ||
-        (wpKey && engagementMap.get(wpKey)) ||
-        0;
-      const visCount =
-        (idKey && visitorMap.get(idKey)) ||
-        (wpKey && visitorMap.get(wpKey)) ||
-        0;
-
-      // Genuine dynamic count of users interested or attending from MongoDB
-      const dynamicInterestedCount = engCount + visCount;
-
-      return {
-        ...doc,
-        organizer: cleanOrganizer,
-        organizerName: cleanOrganizer,
-        orgName: cleanOrganizer,
-        category: resolvedCategory,
-        categories: [resolvedCategory],
-        interestedCount: dynamicInterestedCount,
-        attendeesCount: dynamicInterestedCount
-      };
-    });
-
-    if (events && events.length > 0) {
-      memoryCache = {
-        events,
-        timestamp: now,
-        ttl: 5 * 60 * 1000
-      };
+      refreshPromise.catch((err) => {
+        console.warn('[WP-Sync] Timed-out forceRefresh completing in background:', err.message);
+      });
+      return memoryCache.events;
     }
 
-    return events;
+    return await this._fetchAndCacheEvents();
   }
 
   /**
