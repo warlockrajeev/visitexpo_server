@@ -19,6 +19,10 @@ import DeletedOrganizer from '../models/DeletedOrganizer.js';
 import DeletedEvent from '../models/DeletedEvent.js';
 import Category from '../models/Category.js';
 import Ticket from '../models/Ticket.js';
+import {
+  normalizeTicketingFields,
+  syncDefaultTicketTierForEvent
+} from '../utils/ticketingHelper.js';
 import FeaturedOrganizer from '../models/FeaturedOrganizer.js';
 import Campaign from '../models/Campaign.js';
 import Lead from '../models/Lead.js';
@@ -3171,7 +3175,8 @@ router.put('/events/:id', async (req, res, next) => {
       'title', 'slug', 'description', 'banner', 'gallery',
       'venue', 'city', 'state', 'country', 'startDate', 'endDate', 'timings',
       'categories', 'status', 'orgName', 'orgEmail', 'orgPhone',
-      'orgWebsite', 'orgDesc', 'orgLogo', 'isFreeEvent', 'paidTicketPrice', 'currency',
+      'orgWebsite', 'orgDesc', 'orgLogo', 'ticketingMode', 'isFreeEvent',
+      'freePassQuota', 'freePassUntil', 'paidTicketPrice', 'currency',
       'schedules', 'faqsList', 'sponsorsList', 'contactShortcode', 'seo'
     ];
 
@@ -3181,35 +3186,37 @@ router.put('/events/:id', async (req, res, next) => {
       }
     });
 
+    if (
+      updates.ticketingMode !== undefined ||
+      updates.isFreeEvent !== undefined ||
+      updates.paidTicketPrice !== undefined ||
+      updates.freePassQuota !== undefined ||
+      updates.freePassUntil !== undefined
+    ) {
+      const normalized = normalizeTicketingFields({
+        ticketingMode: updates.ticketingMode ?? event.ticketingMode,
+        isFreeEvent: updates.isFreeEvent ?? event.isFreeEvent,
+        paidTicketPrice: updates.paidTicketPrice ?? event.paidTicketPrice,
+        currency: updates.currency ?? event.currency,
+        freePassQuota: updates.freePassQuota ?? event.freePassQuota,
+        freePassUntil: updates.freePassUntil !== undefined ? updates.freePassUntil : event.freePassUntil
+      });
+      Object.assign(event, normalized);
+    }
+
     await event.save();
 
-    // Sync default ticket tier if ticketing fields were updated
-    if (updates.isFreeEvent !== undefined || updates.paidTicketPrice !== undefined || updates.currency !== undefined) {
+    // Sync default/early-access ticket tiers if ticketing fields were updated
+    if (
+      updates.ticketingMode !== undefined ||
+      updates.isFreeEvent !== undefined ||
+      updates.paidTicketPrice !== undefined ||
+      updates.freePassQuota !== undefined ||
+      updates.freePassUntil !== undefined ||
+      updates.currency !== undefined
+    ) {
       try {
-        const isFree = event.isFreeEvent;
-        const price = isFree ? 0 : (event.paidTicketPrice || 0);
-        const type = isFree ? 'free' : (price > 0 ? 'paid' : 'free');
-        const currency = event.currency || 'INR';
-
-        let ticket = await Ticket.findOne({ event: event._id, title: { $in: ['Default Entry Pass', 'General Admission', 'Visitor Pass'] } });
-        if (ticket) {
-          ticket.type = type;
-          ticket.price = price;
-          ticket.currency = currency;
-          ticket.title = isFree ? 'Visitor Pass' : 'General Admission';
-          ticket.description = isFree ? 'Complimentary visitor registration pass' : `Standard paid entry ticket — ${currency} ${price}`;
-          await ticket.save();
-        } else {
-          await Ticket.create({
-            title: isFree ? 'Visitor Pass' : 'General Admission',
-            description: isFree ? 'Complimentary visitor registration pass' : `Standard paid entry ticket — ${currency} ${price}`,
-            type,
-            price,
-            currency,
-            capacity: 1000,
-            event: event._id
-          });
-        }
+        await syncDefaultTicketTierForEvent(Ticket, event._id, event);
       } catch (tierErr) {
         console.warn('Failed to sync ticket tier during admin update:', tierErr);
       }

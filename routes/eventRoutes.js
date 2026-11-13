@@ -30,6 +30,10 @@ import { verifyAccessToken } from '../utils/jwt.js';
 import LocationFeasibilityService from '../services/LocationFeasibilityService.js';
 import { invalidateVenuesCache } from '../controllers/venueController.js';
 import { notifyFollowersOnActivity } from '../services/followNotificationService.js';
+import {
+  normalizeTicketingFields,
+  syncDefaultTicketTierForEvent
+} from '../utils/ticketingHelper.js';
 
 const router = express.Router();
 
@@ -39,12 +43,17 @@ const router = express.Router();
  * Starter, Enterprise, Growth & Admins: custom prices (no upper limit)
  */
 async function validateTicketPriceForPlan(userId, userRole, callerOrg, body) {
-  const isFree = body.isFreeEvent === true || body.isFreeEvent === 'true';
-  if (isFree) return null;
-  if (body.paidTicketPrice === undefined && body.price === undefined) return null;
+  const { ticketingMode, isFreeEvent, paidTicketPrice, freePassQuota, freePassUntil } =
+    normalizeTicketingFields(body);
+  if (isFreeEvent || ticketingMode === 'free') return null;
+  if (ticketingMode === 'free_then_paid' && freePassQuota <= 0 && !freePassUntil) {
+    return 'Please specify either a Free Trade Pass quota (e.g. first 100 visitors) or a Free Early Access cutoff date before paid tickets apply.';
+  }
+  if (body.paidTicketPrice === undefined && body.price === undefined && ticketingMode !== 'free_then_paid') {
+    return null;
+  }
 
-  const rawVal = body.paidTicketPrice !== undefined ? body.paidTicketPrice : body.price;
-  const numPrice = parseFloat(rawVal);
+  const numPrice = parseFloat(paidTicketPrice);
   if (isNaN(numPrice) || numPrice <= 0) {
     return 'Ticket price must be a valid amount greater than 0.';
   }
@@ -76,45 +85,11 @@ async function validateTicketPriceForPlan(userId, userRole, callerOrg, body) {
 }
 
 /**
- * Helper: Auto-create or update the default ticket tier for an event
- * based on the isFreeEvent / paidTicketPrice fields from the wizard or edit form.
+ * Helper: Auto-create or update ticket tiers for an event
+ * based on ticketingMode ('free' | 'paid' | 'free_then_paid') and pricing fields.
  */
 async function syncDefaultTicketTier(eventId, body) {
-  // Only process if ticketing data is explicitly provided
-  if (body.isFreeEvent === undefined && body.paidTicketPrice === undefined) return;
-
-  const isFree = body.isFreeEvent === true || body.isFreeEvent === 'true';
-  const price = isFree ? 0 : (parseInt(body.paidTicketPrice, 10) || 0);
-  const type = isFree ? 'free' : (price > 0 ? 'paid' : 'free');
-  const currency = body.currency || 'INR';
-
-  // Look for an existing default ticket for this event
-  let ticket = await Ticket.findOne({ event: eventId, title: { $in: ['Default Entry Pass', 'General Admission', 'Visitor Pass'] } });
-
-  if (ticket) {
-    // Update existing default tier
-    ticket.type = type;
-    ticket.price = price;
-    ticket.currency = currency;
-    ticket.title = isFree ? 'Visitor Pass' : 'General Admission';
-    ticket.description = isFree
-      ? 'Complimentary visitor registration pass'
-      : `Standard paid entry ticket — ${currency} ${price}`;
-    await ticket.save();
-  } else {
-    // Create new default tier
-    await Ticket.create({
-      title: isFree ? 'Visitor Pass' : 'General Admission',
-      description: isFree
-        ? 'Complimentary visitor registration pass'
-        : `Standard paid entry ticket — ${currency} ${price}`,
-      type,
-      price,
-      currency,
-      capacity: body.ticketCapacity || 1000,
-      event: eventId
-    });
-  }
+  await syncDefaultTicketTierForEvent(Ticket, eventId, body);
 }
 
 // ==========================================
@@ -1193,10 +1168,17 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
       return res.status(400).json({ success: false, error: priceError });
     }
 
-    const event = await EventService.createEvent(req.body, req.user.organization, req.user.id);
+    const normalizedPayload =
+      req.body.ticketingMode !== undefined ||
+      req.body.isFreeEvent !== undefined ||
+      req.body.paidTicketPrice !== undefined
+        ? { ...req.body, ...normalizeTicketingFields(req.body) }
+        : req.body;
+
+    const event = await EventService.createEvent(normalizedPayload, req.user.organization, req.user.id);
 
     // Auto-create default ticket tier if ticketing data is provided
-    await syncDefaultTicketTier(event._id, req.body);
+    await syncDefaultTicketTier(event._id, normalizedPayload);
 
     // Automatically sync event to WordPress
     await syncEventToWordPress(event._id);
@@ -1242,14 +1224,23 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
       return res.status(400).json({ success: false, error: priceError });
     }
 
-    const event = await EventService.updateEvent(req.params.id, req.body, {
+    const normalizedPayload =
+      req.body.ticketingMode !== undefined ||
+      req.body.isFreeEvent !== undefined ||
+      req.body.paidTicketPrice !== undefined ||
+      req.body.freePassQuota !== undefined ||
+      req.body.freePassUntil !== undefined
+        ? { ...req.body, ...normalizeTicketingFields(req.body) }
+        : req.body;
+
+    const event = await EventService.updateEvent(req.params.id, normalizedPayload, {
       userId: req.user.id,
       organizationId: req.user.organization,
       role: req.user.role
     });
 
     // Sync default ticket tier if ticketing data changed
-    await syncDefaultTicketTier(event._id, req.body);
+    await syncDefaultTicketTier(event._id, normalizedPayload);
 
     // Automatically sync event to WordPress
     await syncEventToWordPress(event._id);

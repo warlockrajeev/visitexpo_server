@@ -149,7 +149,15 @@ const EventSchema = new mongoose.Schema(
       }
     ],
     contactShortcode: { type: String, default: '' },
+    ticketingMode: {
+      type: String,
+      enum: ['free', 'paid', 'free_then_paid'],
+      default: 'free'
+    },
     isFreeEvent: { type: Boolean, default: true },
+    freePassQuota: { type: Number, default: 0, min: 0 },
+    freePassUntil: { type: Date, default: null },
+    freePassClaimedCount: { type: Number, default: 0, min: 0 },
     paidTicketPrice: { type: Number, default: 0 },
     currency: { type: String, default: 'INR' },
     registrationSettings: {

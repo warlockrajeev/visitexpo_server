@@ -9,7 +9,9 @@ import Event from '../models/Event.js';
 import Visitor from '../models/Visitor.js';
 import EventEngagement from '../models/EventEngagement.js';
 import Session from '../models/Session.js';
+import Ticket from '../models/Ticket.js';
 import Lead from '../models/Lead.js';
+import { resolveLivePassState } from '../utils/ticketingHelper.js';
 import User from '../models/User.js';
 import Subscription from '../models/Subscription.js';
 import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
@@ -423,6 +425,21 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       });
     }
 
+    // Check complimentary trade-pass quota/cutoff for 'free_then_paid' events during self-registration
+    if (!enforceFreePlanLimit && event.ticketingMode === 'free_then_paid') {
+      const existingRegistrations = await Visitor.countDocuments({ event: resolvedEventId });
+      const liveState = resolveLivePassState(event, existingRegistrations);
+      if (!liveState.isCurrentlyFree) {
+        return res.status(409).json({
+          success: false,
+          code: 'FREE_QUOTA_EXHAUSTED',
+          paidTicketPrice: liveState.currentPrice,
+          currency: liveState.currency,
+          error: `Complimentary early-access passes have ended. Standard paid admission (${liveState.currency} ${liveState.currentPrice}) now applies.`
+        });
+      }
+    }
+
     // 3. Create Visitor
     const visitor = await Visitor.create({
       name,
@@ -436,6 +453,27 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       notes,
       attendanceType: attendanceType || 'in_person'
     });
+
+    if (event.ticketingMode === 'free_then_paid') {
+      try {
+        const updated = await Event.findByIdAndUpdate(
+          resolvedEventId,
+          { $inc: { freePassClaimedCount: 1 } },
+          { new: true }
+        );
+        const earlyTicket = await Ticket.findOne({
+          event: resolvedEventId,
+          title: 'Complimentary Trade Pass (Early Access)'
+        });
+        if (earlyTicket) {
+          earlyTicket.soldCount = updated?.freePassClaimedCount ?? (earlyTicket.soldCount + 1);
+          if (earlyTicket.capacity !== -1 && earlyTicket.soldCount >= earlyTicket.capacity) {
+            earlyTicket.status = 'sold_out';
+          }
+          await earlyTicket.save();
+        }
+      } catch (_) {}
+    }
 
     // Sync passholder as verified active participant in EventEngagement
     try {

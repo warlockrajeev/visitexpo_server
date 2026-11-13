@@ -89,7 +89,7 @@ const SECTOR_DEFINITIONS = [
     id: 'technology',
     query: 'technology',
     label: 'Technology & AI',
-    regex: /\b(technology|artificial\s+intelligence|ai\s+india|ai\s+summit|ai\s+expo|gitex|cybersecurity|cyber\s+security|cyber-physical|cloud\s+computing|software|saas|iot|internet\s+of\s+things|data\s+center|big\s+data|analytics|semiconductor|semicon|electronics|electronica|productronica|embedded|telecom|5g|6g|devsecops|devops|quantum|virtual\s+reality|augmented\s+reality|metaverse|gaming|esports|it\s+expo|tech\s+summit|tech\s+expo|et\s+tech|india\s+mobile\s+congress|convergence\s+india|infocomm|broadcast|av\s+integration|smart\s+cards|biometrics|drone|uav|space\s+tech)\b/i
+    regex: /\b(technology|artificial\s+intelligence|ai\s+india|ai\s+summit|ai\s+expo|gitex|gartner|it\s+symposium|cio\s+symposium|cybersecurity|cyber\s+security|cyber-physical|cloud\s+computing|software|saas|iot|internet\s+of\s+things|data\s+center|big\s+data|analytics|semiconductor|semicon|electronics|electronica|productronica|embedded|telecom|5g|6g|devsecops|devops|quantum|virtual\s+reality|augmented\s+reality|metaverse|gaming|esports|it\s+expo|tech\s+summit|tech\s+expo|et\s+tech|india\s+mobile\s+congress|convergence\s+india|infocomm|broadcast|av\s+integration|smart\s+cards|biometrics|drone|uav|space\s+tech)\b/i
   },
   {
     id: 'logistics',
@@ -102,13 +102,20 @@ const SECTOR_DEFINITIONS = [
     query: 'tourism',
     label: 'Travel & Tourism',
     regex: /\b(tourism|travel\s+mart|travel\s+and\s+tourism|ttf|otm|satte|iitbm|leisure|destination|cruise|mice\s+tourism|holiday\s+expo)\b/i
+  },
+  {
+    id: 'education',
+    query: 'education',
+    label: 'Education & Training',
+    regex: /\b(education|edtech|schools?\s+exhibition|university\s+fair|study\s+abroad|academic\s+summit|didac|skill\s+development|higher\s+education)\b/i
   }
 ];
 
-const NON_SECTOR_SHOW_REGEX = /\b(pet\s+trade|pet\s+care|pet\s+universe|pet\s+industry|interzoo|anido|iiptf|aquagic|bridal|wedding|jewellery|jewelry|gems|gifts?\s+fair|stationery|toys?\s+fair|book\s+fair)\b/i;
+const NON_SECTOR_SHOW_REGEX = /\b(pet\s+trade|pet\s+care|pet\s+universe|pet\s+industry|zooexpo|interzoo|anido|iiptf|aquagic|bridal|wedding|jewellery|jewelry|gems|gifts?\s+fair|stationery|toys?\s+fair|book\s+fair|lifestyle\s+fair|trade\s+fair|fanciers)\b/i;
 
 function sanitizeSectorText(str) {
   return String(str || '')
+    .replace(/<[^>]+>/g, ' ')
     .replace(/state-of-the-art/gi, 'modern')
     .replace(/state\s+of\s+the\s+art/gi, 'modern');
 }
@@ -116,7 +123,6 @@ function sanitizeSectorText(str) {
 function classifyEventSector(event) {
   if (!event || typeof event !== 'object') return 'Trade & Industry';
   const titleText = sanitizeSectorText(event.title || event.name || '');
-  const descText = sanitizeSectorText(`${event.shortDescription || ''} ${event.description || ''}`);
 
   if (NON_SECTOR_SHOW_REGEX.test(titleText)) {
     return 'Trade & Industry';
@@ -126,15 +132,44 @@ function classifyEventSector(event) {
     if (sector.regex.test(titleText)) return sector.label;
   }
 
-  if (NON_SECTOR_SHOW_REGEX.test(descText)) {
+  // Respect explicit non-generic category metadata before falling back to description heuristics
+  const rawCats = [
+    ...(Array.isArray(event.categories) ? event.categories : []),
+    event.category
+  ]
+    .map((c) => String(c || '').trim())
+    .filter(Boolean);
+
+  for (const cat of rawCats) {
+    if (/^(trade\s*&?\s*industry|general|uncategorized|featured|events?|expo|trade\s+shows?)$/i.test(cat)) {
+      continue;
+    }
+    for (const sector of SECTOR_DEFINITIONS) {
+      if (sector.label.toLowerCase() === cat.toLowerCase() || sector.regex.test(cat)) {
+        return sector.label;
+      }
+    }
+    return cat;
+  }
+
+  const descPreview = sanitizeSectorText(`${event.shortDescription || ''} ${String(event.description || '').slice(0, 350)}`);
+  if (NON_SECTOR_SHOW_REGEX.test(descPreview)) {
     return 'Trade & Industry';
   }
 
+  // Pick the sector with the most keyword matches in the intro snippet rather than first-array-order bias
+  let bestLabel = 'Trade & Industry';
+  let bestCount = 0;
   for (const sector of SECTOR_DEFINITIONS) {
-    if (sector.regex.test(descText)) return sector.label;
+    const globalRe = new RegExp(sector.regex.source, 'gi');
+    const matches = descPreview.match(globalRe);
+    if (matches && matches.length > bestCount) {
+      bestCount = matches.length;
+      bestLabel = sector.label;
+    }
   }
 
-  return 'Trade & Industry';
+  return bestLabel;
 }
 
 function matchEventToSector(event, interestQuery) {
@@ -477,10 +512,83 @@ class RecommendationService {
       .map((i) => i.trim().toLowerCase())
       .filter((i) => i && i !== 'all');
 
-    // Use strictly the explicitly selected locations/interests from the UI filter bar.
+    // Use strictly the explicitly selected locations/interests from the UI filter bar if provided.
     // When GPS coordinates are provided (Near My GPS), ignore manual city filters so proximity works purely by GPS distance.
     const targetLocations = hasCoords ? [] : Array.from(new Set(queryLocations));
     const targetInterests = Array.from(new Set(queryInterests));
+
+    // 1b. Load logged-in user profile + recent engagement activity for true personalization
+    let userProfile = null;
+    let userEngagements = [];
+    const userSignalLocations = new Set();
+    const userSignalSectors = new Set();
+    const engagedEventIds = new Set();
+
+    if (userId) {
+      try {
+        const [u, engagements] = await Promise.all([
+          User.findById(userId)
+            .select('role city preferredLocations interests company designation organization')
+            .populate('organization', 'name city country industry')
+            .lean(),
+          EventEngagement.find({
+            user: userId,
+            $or: [
+              { isInterested: true },
+              { isFollower: true },
+              { isBookmarked: true },
+              { isRegistered: true }
+            ]
+          })
+            .sort({ updatedAt: -1 })
+            .limit(30)
+            .lean()
+        ]);
+        userProfile = u || null;
+        userEngagements = Array.isArray(engagements) ? engagements : [];
+
+        if (userProfile) {
+          [
+            ...(Array.isArray(userProfile.preferredLocations) ? userProfile.preferredLocations : []),
+            userProfile.city,
+            userProfile.organization?.city
+          ]
+            .map((loc) => String(loc || '').trim().toLowerCase())
+            .filter((loc) => loc && loc !== 'all')
+            .forEach((loc) => userSignalLocations.add(loc));
+
+          const rawUserInterests = [
+            ...(Array.isArray(userProfile.interests) ? userProfile.interests : []),
+            userProfile.organization?.industry,
+            userProfile.designation,
+            userProfile.company
+          ];
+          for (const rawInt of rawUserInterests) {
+            const text = String(rawInt || '').trim().toLowerCase();
+            if (!text || text === 'all') continue;
+            const matchedSector = SECTOR_DEFINITIONS.find(
+              (s) => s.query === text || s.id === text || s.label.toLowerCase().includes(text) || s.regex.test(text)
+            );
+            if (matchedSector) {
+              userSignalSectors.add(matchedSector.query);
+            }
+          }
+        }
+
+        for (const eng of userEngagements) {
+          if (eng.eventId) engagedEventIds.add(String(eng.eventId));
+          if (eng.eventSlug) engagedEventIds.add(String(eng.eventSlug).toLowerCase());
+          const engSectorText = String(eng.eventCategory || eng.eventTitle || '').toLowerCase();
+          for (const sector of SECTOR_DEFINITIONS) {
+            if (sector.label.toLowerCase() === engSectorText || sector.regex.test(engSectorText)) {
+              userSignalSectors.add(sector.query);
+            }
+          }
+        }
+      } catch (profileErr) {
+        console.warn('[RecommendationService] User personalization lookup warning:', profileErr.message);
+      }
+    }
 
     // 2. Fetch candidate events from database
     const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
@@ -521,9 +629,16 @@ class RecommendationService {
       );
     }
 
-    // Filter out test placeholders & apply timeframe ('upcoming' | '30days' | '90days')
+    // Filter out test placeholders, casual non-trade social meetups & apply timeframe ('upcoming' | '30days' | '90days')
     workingEvents = workingEvents.filter((ev) => {
-      if (ev.slug === 'usd-inr' || /^usd\s+inr$/i.test(String(ev.title || '').trim())) return false;
+      const cleanTitle = String(ev.title || '').trim();
+      if (
+        ev.slug === 'usd-inr' ||
+        /^usd\s+inr$/i.test(cleanTitle) ||
+        /\b(ice\s+cream\s+social|happy\s+hour|birthday\s+party|cat\s+fanciers|cat\s+club|dog\s+club|dog\s+show|kennel\s+club)\b/i.test(cleanTitle)
+      ) {
+        return false;
+      }
       const start = ev.startDate ? new Date(ev.startDate) : null;
       const end = ev.endDate ? new Date(ev.endDate) : start;
       if (timeframe === '30days') {
@@ -538,6 +653,27 @@ class RecommendationService {
       }
       return true;
     });
+
+    // Derive engaged cities from events the user followed/interested/saved
+    if (engagedEventIds.size > 0) {
+      for (const ev of workingEvents) {
+        const keyId = String(ev._id || '');
+        const keySlug = String(ev.slug || '').toLowerCase();
+        if (engagedEventIds.has(keyId) || (keySlug && engagedEventIds.has(keySlug))) {
+          const evCity = String(ev.city || '').trim().toLowerCase();
+          if (evCity && evCity !== 'india') {
+            userSignalLocations.add(evCity);
+          }
+          const evSector = classifyEventSector(ev);
+          const matchedSector = SECTOR_DEFINITIONS.find((s) => s.label === evSector);
+          if (matchedSector) userSignalSectors.add(matchedSector.query);
+        }
+      }
+    }
+
+    const profileLocationsList = Array.from(userSignalLocations);
+    const profileInterestsList = Array.from(userSignalSectors);
+    const isUsingProfilePersonalization = Boolean(userProfile && targetLocations.length === 0 && targetInterests.length === 0);
 
     // 3. Apply Strict Location or GPS Proximity Filtering
     if (hasCoords) {
@@ -630,19 +766,24 @@ class RecommendationService {
         scoreBreakdown.location = 35;
         score += 35;
         matchReasons.push(`Hosted in ${ev.city || targetLocations[0]}`);
+      } else if (profileLocationsList.length > 0 && doesEventMatchLocations(ev, profileLocationsList)) {
+        scoreBreakdown.location = 35;
+        score += 35;
+        matchReasons.push(`Matches your location (${ev.city || profileLocationsList[0]})`);
       } else {
-        scoreBreakdown.location = 24;
-        score += 24;
+        scoreBreakdown.location = 20;
+        score += 20;
       }
 
       // =========================================================================
       // Factor 2: Industry & Interests Matching (Max 45 pts)
       // =========================================================================
-      if (targetInterests.length > 0) {
+      const activeInterests = targetInterests.length > 0 ? targetInterests : profileInterestsList;
+      if (activeInterests.length > 0) {
         let bestInterestMatch = 0;
         let matchedSectorLabel = '';
 
-        for (const interest of targetInterests) {
+        for (const interest of activeInterests) {
           if (!interest || interest === 'all') continue;
           const matchResult = matchEventToSector(ev, interest);
           if (matchResult.matched) {
@@ -656,18 +797,30 @@ class RecommendationService {
 
         if (matchedSectorLabel) {
           resolvedCategory = matchedSectorLabel;
-        }
-
-        scoreBreakdown.interest = bestInterestMatch;
-        score += bestInterestMatch;
-
-        if (matchedSectorLabel) {
-          matchReasons.push(`Matches your interest in ${matchedSectorLabel}`);
+          scoreBreakdown.interest = bestInterestMatch;
+          score += bestInterestMatch;
+          matchReasons.push(
+            isUsingProfilePersonalization
+              ? `Tailored to ${matchedSectorLabel}`
+              : `Matches your interest in ${matchedSectorLabel}`
+          );
+        } else {
+          // Non-matching category gets lower baseline when user has explicit profile sectors
+          scoreBreakdown.interest = isUsingProfilePersonalization ? 24 : 0;
+          score += scoreBreakdown.interest;
         }
       } else {
-        // Neutral interest baseline if no interest specified
+        // Role-aware baseline when user has not set explicit sectors yet
+        const userRole = String(userProfile?.role || '').toLowerCase();
         scoreBreakdown.interest = 34;
         score += 34;
+        if (userRole === 'exhibitor') {
+          matchReasons.push('High buyer demand for exhibitors');
+        } else if (userRole === 'organizer') {
+          matchReasons.push('Featured industry trade expo');
+        } else if (userRole === 'visitor') {
+          matchReasons.push('Curated for trade visitors');
+        }
       }
 
       // =========================================================================
@@ -685,7 +838,7 @@ class RecommendationService {
         } else if (diffDays > 0 && diffDays <= 30) {
           scoreBreakdown.recency = 14;
           score += 14;
-          matchReasons.push(`Starts soon in ${diffDays} days`);
+          matchReasons.push(`Starts soon in ${diffDays} ${diffDays === 1 ? 'day' : 'days'}`);
         } else if (diffDays > 30 && diffDays <= 90) {
           scoreBreakdown.recency = 10;
           score += 10;
@@ -716,9 +869,12 @@ class RecommendationService {
         scoreBreakdown.social += 3;
         score += 3;
       }
-      if (ev.bannerImage || ev.image || ev.banner) {
-        scoreBreakdown.social += 2;
-        score += 2;
+      const hasCoverImage = Boolean(ev.bannerImage || ev.image || ev.banner);
+      if (hasCoverImage) {
+        scoreBreakdown.social += 6;
+        score += 6;
+      } else {
+        score -= 10;
       }
       // Differentiate score based on expected turnout & event completeness (0 to 10 pts)
       const turnoutBonus = Math.min(10, Math.round((computedTurnout / 25000) * 10));
@@ -734,6 +890,7 @@ class RecommendationService {
         category: resolvedCategory,
         categories: [resolvedCategory],
         _matchedInterests: matchedInterestBuckets,
+        _hasCoverImage: hasCoverImage,
         matchScore,
         matchReasons: matchReasons.slice(0, 3),
         scoreBreakdown
@@ -742,7 +899,7 @@ class RecommendationService {
 
     // 5. Sort results:
     // - In GPS Proximity mode: sort by shortest distance first, then title match, then startDate ascending
-    // - Otherwise: when industry sectors are selected, prioritize direct title matches first, then sort by nearest upcoming startDate ascending, then matchScore descending
+    // - In personalized user mode: prioritize higher personal match score & valid visual banners alongside nearest upcoming startDate
     scoredEvents.sort((a, b) => {
       if (hasCoords) {
         const dA = a.distanceKm ?? Infinity;
@@ -760,6 +917,12 @@ class RecommendationService {
       const expA = tA < now;
       const expB = tB < now;
       if (expA !== expB) return expA ? 1 : -1;
+      if (Boolean(b._hasCoverImage) !== Boolean(a._hasCoverImage)) {
+        return b._hasCoverImage ? 1 : -1;
+      }
+      if (isUsingProfilePersonalization && b.matchScore !== a.matchScore) {
+        return b.matchScore - a.matchScore;
+      }
       if (tA !== tB) return tA - tB;
       return b.matchScore - a.matchScore;
     });
@@ -799,15 +962,17 @@ class RecommendationService {
       }
     }
 
-    const results = finalOrdered.slice(0, parsedLimit).map(({ _matchedInterests, ...rest }) => rest);
+    const results = finalOrdered.slice(0, parsedLimit).map(({ _matchedInterests, _hasCoverImage, ...rest }) => rest);
 
     return {
       success: true,
       count: results.length,
       totalMatched: scoredEvents.length,
       criteria: {
-        targetLocations,
-        targetInterests,
+        targetLocations: targetLocations.length > 0 ? targetLocations : profileLocationsList,
+        targetInterests: targetInterests.length > 0 ? targetInterests : profileInterestsList,
+        userRole: userProfile?.role || null,
+        personalized: Boolean(userProfile),
         timeframe,
         gpsActive: hasCoords
       },
