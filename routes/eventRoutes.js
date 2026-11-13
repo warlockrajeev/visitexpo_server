@@ -29,6 +29,7 @@ import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBad
 import { verifyAccessToken } from '../utils/jwt.js';
 import LocationFeasibilityService from '../services/LocationFeasibilityService.js';
 import { invalidateVenuesCache } from '../controllers/venueController.js';
+import { notifyFollowersOnActivity } from '../services/followNotificationService.js';
 
 const router = express.Router();
 
@@ -1202,6 +1203,24 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
 
     try { invalidateVenuesCache(); } catch (_) {}
 
+    // Notify followers of the creator when a new event is created
+    try {
+      const actor = await User.findById(req.user.id).select('name email').lean();
+      const actorName = actor?.name || event.orgName || req.user.email || 'An organizer you follow';
+      notifyFollowersOnActivity({
+        actorUserId: req.user.id,
+        actorEmail: actor?.email || req.user.email,
+        actorName,
+        eventId: event._id,
+        eventSlug: event.slug,
+        eventTitle: event.title,
+        activityType: 'event_created',
+        title: `New Event by ${actorName}`,
+        message: `${actorName} created a new event: "${event.title}"${event.city ? ` in ${event.city}` : ''}.`,
+        url: `/expo/${event.slug}`
+      });
+    } catch (_) {}
+
     res.status(201).json({ success: true, message: 'Event created successfully', event });
   } catch (error) {
     if (error.statusCode === 409) {
@@ -1236,6 +1255,24 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
     await syncEventToWordPress(event._id);
 
     try { invalidateVenuesCache(); } catch (_) {}
+
+    // Notify followers of the actor or event when event details are updated
+    try {
+      const actor = await User.findById(req.user.id).select('name email').lean();
+      const actorName = actor?.name || event.orgName || req.user.email || 'An organizer';
+      notifyFollowersOnActivity({
+        actorUserId: req.user.id,
+        actorEmail: actor?.email || req.user.email,
+        actorName,
+        eventId: event._id,
+        eventSlug: event.slug,
+        eventTitle: event.title,
+        activityType: 'event_updated',
+        title: `Event Update: ${event.title}`,
+        message: `${actorName} posted updates for "${event.title}"${event.city ? ` (${event.city})` : ''}.`,
+        url: `/expo/${event.slug}`
+      });
+    } catch (_) {}
 
     res.status(200).json({ success: true, message: 'Event updated successfully', event });
   } catch (error) {

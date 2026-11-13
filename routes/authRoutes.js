@@ -17,6 +17,7 @@ import UserRepository from '../repositories/UserRepository.js';
 import { generateAccessToken, generateRefreshToken } from '../utils/jwt.js';
 import { isUserCorporateEmail } from '../utils/emailValidator.js';
 import { sendWorkEmailVerificationCode, verifyWorkEmailCode } from '../services/workEmailVerificationService.js';
+import { resolveUserCompany, syncUserCompanyName } from '../services/companyProfileHelper.js';
 
 const router = express.Router();
 
@@ -432,6 +433,8 @@ router.get('/me', protect, async (req, res, next) => {
     const isPlanActive = isPaidOrganizer ? true : (activeSub ? activeSub.status === 'active' : (userDoc.isPlanActive ?? true));
     const isVerified = isPaidOrganizer ? true : Boolean(userDoc.isVerified);
 
+    const resolvedCompany = await resolveUserCompany(userDoc);
+
     res.status(200).json({
       success: true,
       user: {
@@ -439,7 +442,7 @@ router.get('/me', protect, async (req, res, next) => {
         name: userDoc.name,
         email: userDoc.email,
         phone: userDoc.phone || '',
-        company: userDoc.company || '',
+        company: resolvedCompany || userDoc.company || '',
         designation: userDoc.designation || '',
         city: userDoc.city || '',
         workEmail: userDoc.workEmail || '',
@@ -515,7 +518,11 @@ router.put('/organization', protect, async (req, res, next) => {
       }
     }
 
-    if (name) org.name = name;
+    if (name) {
+      org.name = name;
+      userDoc.company = String(name).trim();
+      await userDoc.save();
+    }
     if (logo !== undefined) org.logo = logo;
     if (website !== undefined) org.website = website;
     if (gst !== undefined) org.gst = gst;
@@ -626,7 +633,12 @@ router.put('/profile', protect, async (req, res, next) => {
 
     await userDoc.save();
 
+    if (company !== undefined && String(company).trim().length >= 2) {
+      await syncUserCompanyName(userDoc._id, company);
+    }
+
     const updatedUser = await User.findById(userDoc._id).select('-password').populate('organization');
+    const resolvedCompany = await resolveUserCompany(updatedUser);
 
     res.status(200).json({
       success: true,
@@ -636,7 +648,7 @@ router.put('/profile', protect, async (req, res, next) => {
         name: updatedUser.name,
         email: updatedUser.email,
         phone: updatedUser.phone || '',
-        company: updatedUser.company || '',
+        company: resolvedCompany || updatedUser.company || '',
         designation: updatedUser.designation || '',
         city: updatedUser.city || '',
         avatar: updatedUser.avatar || updatedUser.photoURL || '',

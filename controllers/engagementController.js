@@ -12,6 +12,7 @@ import Lead from '../models/Lead.js';
 import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import { deleteUserAndAllPlatformData } from '../services/userDeletionService.js';
 import { notifyOrganizerOnFollow, notifyOrganizerOnInterest } from '../services/oneSignalService.js';
+import { notifyFollowersOnActivity } from '../services/followNotificationService.js';
 
 /**
  * @desc Toggle interest or follow for a user on a specific event
@@ -57,14 +58,33 @@ export const toggleEngagement = async (req, res) => {
     }
 
     const userId = String(currentUser.id || currentUser._id || '');
-    const userName = currentUser.name || userEmail.split('@')[0];
-    const userRole = currentUser.role || 'visitor';
-    const userPhone = currentUser.phone || '';
-    const userCompany = currentUser.company || currentUser.organization?.name || '';
-    const userDesignation = currentUser.designation || '';
-    const userCity = currentUser.city || '';
-    const userCountry = currentUser.country || '';
-    const userAvatar = currentUser.avatar || '';
+    let dbUser = null;
+    try {
+      if (userId && mongoose.isValidObjectId(userId)) {
+        dbUser = await User.findById(userId).populate('organization', 'name').select('name email role company organization').lean();
+      }
+      if (!dbUser && userEmail) {
+        dbUser = await User.findOne({ email: userEmail }).populate('organization', 'name').select('name email role company organization').lean();
+      }
+    } catch (_) {}
+
+    const rawProvidedName = String(customUser?.name || currentUser.name || dbUser?.name || '').trim();
+    const userName = rawProvidedName && !rawProvidedName.includes('@') ? rawProvidedName : 'Verified Member';
+    const userRole = customUser?.role || dbUser?.role || currentUser.role || 'visitor';
+    const userPhone = customUser?.phone || currentUser.phone || '';
+    const userCompany = String(
+      customUser?.company ||
+      customUser?.organization?.name ||
+      dbUser?.company ||
+      dbUser?.organization?.name ||
+      currentUser.company ||
+      currentUser.organization?.name ||
+      ''
+    ).trim();
+    const userDesignation = customUser?.designation || currentUser.designation || '';
+    const userCity = customUser?.city || currentUser.city || '';
+    const userCountry = customUser?.country || currentUser.country || '';
+    const userAvatar = customUser?.avatar || currentUser.avatar || '';
 
     // Lookup matching Event from MongoDB to ensure complete, accurate event metadata
     let dbEvent = null;
@@ -302,6 +322,29 @@ export const toggleEngagement = async (req, res) => {
       console.warn('[EngagementController] Failed to auto-sync Lead:', leadSyncErr.message);
     }
 
+    // Notify people who follow this user about their event follow / interest activity
+    if ((action === 'follower' && isFollower) || (action === 'interested' && isInterested)) {
+      try {
+        notifyFollowersOnActivity({
+          actorUserId: userId,
+          actorEmail: userEmail,
+          actorName: userName,
+          eventTitle: resolvedTitle,
+          activityType: action === 'follower' ? 'followed_event' : 'marked_interested',
+          title:
+            action === 'follower'
+              ? `${userName} followed an event`
+              : `${userName} is interested in an event`,
+          message:
+            action === 'follower'
+              ? `${userName} started following "${resolvedTitle}"${resolvedCity ? ` in ${resolvedCity}` : ''}.`
+              : `${userName} marked Interested in "${resolvedTitle}"${resolvedCity ? ` in ${resolvedCity}` : ''}.`,
+          url: `/expo/${cleanSlug}`,
+          metadata: { eventSlug: cleanSlug, eventTitle: resolvedTitle }
+        });
+      } catch (_) {}
+    }
+
     // Aggregate live counts for this event directly from MongoDB
     const [interestedCount, followersCount, visitorCount] = await Promise.all([
       EventEngagement.countDocuments({
@@ -392,8 +435,8 @@ export const getEventEngagements = async (req, res) => {
         { type: { $in: ['interested', 'follower', 'both'] } }
       ]
     };
-    const [attendees, interestedCount, followersCount] = await Promise.all([
-      EventEngagement.find(networkQuery).sort({ createdAt: -1 }),
+    const [rawAttendees, interestedCount, followersCount] = await Promise.all([
+      EventEngagement.find(networkQuery).sort({ createdAt: -1 }).lean(),
       EventEngagement.countDocuments({
         eventSlug: cleanSlug,
         status: 'active',
@@ -415,12 +458,72 @@ export const getEventEngagements = async (req, res) => {
     // Check user's current engagement
     let userEngagement = null;
     if (emailQuery || userIdQuery) {
-      userEngagement = attendees.find(
+      userEngagement = rawAttendees.find(
         (a) =>
           (emailQuery && a.userEmail === emailQuery) ||
           (userIdQuery && String(a.userId) === String(userIdQuery))
       );
     }
+
+    // Enrich attendees with live User name & company (never exposing private email or contact details)
+    const lookupIds = rawAttendees
+      .map((a) => String(a.userId || a.user || '').trim())
+      .filter((id) => mongoose.isValidObjectId(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+    const lookupEmails = rawAttendees
+      .map((a) => String(a.userEmail || '').trim().toLowerCase())
+      .filter(Boolean);
+
+    const userLookupOr = [];
+    if (lookupIds.length > 0) userLookupOr.push({ _id: { $in: lookupIds } });
+    if (lookupEmails.length > 0) userLookupOr.push({ email: { $in: lookupEmails } });
+
+    const userDocs = userLookupOr.length > 0
+      ? await User.find({ $or: userLookupOr })
+          .populate('organization', 'name')
+          .select('name email company organization role avatar')
+          .lean()
+      : [];
+
+    const usersById = new Map();
+    const usersByEmail = new Map();
+    for (const u of userDocs) {
+      usersById.set(String(u._id), u);
+      if (u.email) usersByEmail.set(String(u.email).trim().toLowerCase(), u);
+    }
+
+    const attendees = rawAttendees.map((a) => {
+      const uid = String(a.userId || a.user || '').trim();
+      const eml = String(a.userEmail || '').trim().toLowerCase();
+      const dbUser = (uid && usersById.get(uid)) || (eml && usersByEmail.get(eml)) || null;
+      const candidateName = String(dbUser?.name || a.userName || '').trim();
+      const emailPrefix = eml.includes('@') ? eml.split('@')[0] : '';
+      const resolvedName =
+        candidateName && !candidateName.includes('@') && (dbUser?.name || candidateName !== emailPrefix)
+          ? candidateName
+          : dbUser?.name && !dbUser.name.includes('@')
+          ? dbUser.name.trim()
+          : candidateName && !candidateName.includes('@')
+          ? candidateName
+          : 'Verified Member';
+      const resolvedCompany = String(
+        dbUser?.company || dbUser?.organization?.name || a.userCompany || ''
+      ).trim();
+
+      return {
+        _id: a._id,
+        userId: dbUser?._id ? String(dbUser._id) : uid,
+        userName: resolvedName,
+        userCompany: resolvedCompany,
+        userRole: dbUser?.role || a.userRole || 'visitor',
+        userAvatar: dbUser?.avatar || a.userAvatar || '',
+        type: a.type,
+        status: a.status,
+        isInterested: Boolean(a.isInterested || ['interested', 'both'].includes(a.type)),
+        isFollowed: Boolean(a.isFollowed || ['follower', 'both'].includes(a.type)),
+        createdAt: a.createdAt
+      };
+    });
 
     const isInterested = Boolean(userEngagement?.status === 'active' && (
       userEngagement.isInterested || userEngagement.type === 'interested' || userEngagement.type === 'both'
@@ -443,7 +546,7 @@ export const getEventEngagements = async (req, res) => {
         userStatus: {
           isInterested,
           isFollower,
-          engagement: userEngagement || null
+          engagement: userEngagement ? { _id: userEngagement._id, type: userEngagement.type, status: userEngagement.status } : null
         }
       }
     });

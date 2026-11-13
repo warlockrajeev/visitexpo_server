@@ -23,6 +23,8 @@ import FeaturedOrganizer from '../models/FeaturedOrganizer.js';
 import Campaign from '../models/Campaign.js';
 import Lead from '../models/Lead.js';
 import Review from '../models/Review.js';
+import BoothRequest from '../models/BoothRequest.js';
+import EventRequest from '../models/EventRequest.js';
 import { verifyPromotionSMTP } from '../services/promotionEmailService.js';
 import mongoose from 'mongoose';
 import { protect, authorize } from '../middlewares/auth.js';
@@ -2568,13 +2570,17 @@ router.get('/pending-summary', async (req, res, next) => {
       pendingExhibitorsCount,
       pendingClaims,
       pendingEvents,
-      pendingFeatured
+      pendingFeatured,
+      pendingBoothRequests,
+      pendingEventRequests
     ] = await Promise.all([
       User.countDocuments({ role: 'organizer', isVerified: false }),
       Exhibitor.countDocuments({ status: 'pending' }),
       Event.countDocuments({ isClaimed: true, status: 'draft' }),
       Event.countDocuments({ status: 'pending' }),
-      FeaturedOrganizer.countDocuments({ status: 'pending' })
+      FeaturedOrganizer.countDocuments({ status: 'pending' }),
+      BoothRequest.countDocuments({ status: 'new' }),
+      EventRequest.countDocuments({ status: 'new' })
     ]);
 
     const pendingExhibitors = pendingExhibitorsCount;
@@ -2588,6 +2594,8 @@ router.get('/pending-summary', async (req, res, next) => {
         pendingClaims,
         pendingEvents,
         pendingFeatured,
+        pendingBoothRequests,
+        pendingEventRequests,
         totalPending
       }
     });

@@ -9,10 +9,13 @@ import mongoose from 'mongoose';
 import Review from '../models/Review.js';
 import Venue from '../models/Venue.js';
 import Event from '../models/Event.js';
+import User from '../models/User.js';
 import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { invalidateVenuesCache } from '../controllers/venueController.js';
 import { DEFAULT_VENUES } from '../data/defaultVenues.js';
+import { syncUserCompanyName } from '../services/companyProfileHelper.js';
+import { notifyFollowersOnActivity } from '../services/followNotificationService.js';
 
 const router = express.Router();
 
@@ -25,12 +28,36 @@ function optionalProtect(req, _res, next) {
   if (token) {
     try {
       const decoded = verifyAccessToken(token);
-      if (decoded) req.user = { id: decoded.id, _id: decoded.id, email: decoded.email };
+      if (decoded) {
+        req.user = {
+          id: decoded.id,
+          _id: decoded.id,
+          email: decoded.email,
+          role: decoded.role
+        };
+      }
     } catch (error) {
       // Public review browsing remains available if an optional session has expired.
     }
   }
   next();
+}
+
+function isAdminUser(user) {
+  return ['super_admin', 'admin', 'sub_admin', 'subadmin'].includes(user?.role);
+}
+
+function isReviewOwner(review, user) {
+  if (!review || !user) return false;
+  if (user.id && review.userId && String(review.userId) === String(user.id)) {
+    return true;
+  }
+  const reviewEmail = String(review.email || '').trim().toLowerCase();
+  const userEmail = String(user.email || '').trim().toLowerCase();
+  if (reviewEmail && userEmail && reviewEmail === userEmail) {
+    return true;
+  }
+  return false;
 }
 
 async function getVenueReviewAggregate(venueSlug) {
@@ -127,10 +154,9 @@ async function syncEventRating(eventSlug) {
 
 /**
  * POST /api/reviews
- * Submit a new review (public — no auth required).
- * Review is created with status: 'pending' and must be approved by admin.
+ * Submit a new review (authenticated user — tracks author userId/email and syncs updated company).
  */
-router.post('/', async (req, res) => {
+router.post('/', protect, async (req, res) => {
   try {
     const {
       name, email, role, title, company, avatar,
@@ -191,9 +217,14 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Please enter a meaningful review using letters, numbers, and common punctuation.' });
     }
 
+    const resolvedStatus = ['pending', 'approved'].includes(status) ? status : 'approved';
+    const resolvedEmail = String(req.user?.email || email || '').trim().toLowerCase();
+    const resolvedUserId = req.user?.id ? String(req.user.id) : '';
+
     const newReview = await Review.create({
       name: nameText,
-      email: (email || '').trim(),
+      email: resolvedEmail,
+      userId: resolvedUserId,
       role: (role || 'Verified Trade Buyer').trim(),
       title: titleText || 'Trade Professional',
       company: companyText,
@@ -205,17 +236,40 @@ router.post('/', async (req, res) => {
       headline: headlineText,
       review: reviewText,
       tags: Array.isArray(tags) ? tags.map(t => t.trim()).filter(Boolean) : (typeof tags === 'string' ? tags.split(',').map(t => t.trim()).filter(Boolean) : []),
-      status: status || 'approved', // Approved so user comments display immediately!
+      status: resolvedStatus, // Approved on event pages so comments display immediately; landing page reviews default to pending when specified
       isFeaturedOnLanding: false,
       submittedAt: new Date()
     });
 
+    // Sync user's company name in backend if a valid company name was provided
+    let updatedCompany = companyText;
+    if (resolvedUserId && companyText && companyText.length >= 2) {
+      const syncRes = await syncUserCompanyName(resolvedUserId, companyText);
+      if (syncRes?.company) updatedCompany = syncRes.company;
+    }
+
     const aggregate = await syncEventRating(newReview.eventSlug);
+
+    // Notify followers of the reviewer & followers of the event about this review activity
+    try {
+      notifyFollowersOnActivity({
+        actorUserId: resolvedUserId || null,
+        actorEmail: resolvedEmail,
+        actorName: nameText,
+        eventSlug: newReview.eventSlug,
+        eventTitle: eventTitleText,
+        activityType: 'review_posted',
+        title: `New Review by ${nameText}`,
+        message: `${nameText} rated "${eventTitleText}" (${newReview.rating}/5 ★).`,
+        url: newReview.eventSlug ? `/expo/${newReview.eventSlug}` : '/events'
+      });
+    } catch (_) {}
 
     res.status(201).json({
       success: true,
       message: 'Comment posted successfully!',
-      data: newReview,
+      data: { ...newReview.toObject(), isOwner: true },
+      updatedCompany,
       count: aggregate?.count ?? 1,
       averageRating: aggregate?.averageRating ?? newReview.rating
     });
@@ -238,7 +292,7 @@ function extractVoterId(req) {
   ).toString().trim().toLowerCase();
 }
 
-function attachUserReaction(review, voterId) {
+function attachUserReaction(review, voterId, user = null) {
   const helpfulVoters = Array.isArray(review.helpfulVoters) ? review.helpfulVoters : [];
   const notHelpfulVoters = Array.isArray(review.notHelpfulVoters) ? review.notHelpfulVoters : [];
 
@@ -258,11 +312,14 @@ function attachUserReaction(review, voterId) {
     ? Math.max(review.notHelpfulCount, notHelpfulVoters.length)
     : notHelpfulVoters.length;
 
+  const isOwner = isReviewOwner(review, user);
+
   return {
     ...review,
     helpfulCount,
     notHelpfulCount,
-    userReaction
+    userReaction,
+    isOwner
   };
 }
 
@@ -356,7 +413,7 @@ router.get('/', optionalProtect, async (req, res) => {
       .limit(Number(limit) || 50)
       .lean();
 
-    const formatted = reviews.map((r) => attachUserReaction(r, voterId));
+    const formatted = reviews.map((r) => attachUserReaction(r, voterId, req.user));
     res.status(200).json({ success: true, count: formatted.length, data: formatted });
   } catch (err) {
     console.error('Error fetching reviews:', err);
@@ -380,7 +437,7 @@ router.get('/featured', optionalProtect, async (req, res) => {
       .limit(30)
       .lean();
 
-    const formatted = reviews.map((r) => attachUserReaction(r, voterId));
+    const formatted = reviews.map((r) => attachUserReaction(r, voterId, req.user));
     res.status(200).json({ success: true, count: formatted.length, data: formatted });
   } catch (err) {
     console.error('Error fetching featured reviews:', err);
@@ -410,7 +467,7 @@ router.get('/event/:slug', optionalProtect, async (req, res) => {
       getEventReviewAggregate(slug)
     ]);
 
-    const formatted = reviews.map((r) => attachUserReaction(r, voterId));
+    const formatted = reviews.map((r) => attachUserReaction(r, voterId, req.user));
     res.status(200).json({
       success: true,
       count: aggregate.count,
@@ -583,7 +640,7 @@ router.delete('/venue/:id', protect, async (req, res) => {
     if (!review || !review.venueSlug) {
       return res.status(404).json({ success: false, error: 'Venue review not found.' });
     }
-    if (review.userId !== String(req.user.id)) {
+    if (review.userId !== String(req.user.id) && !isAdminUser(req.user)) {
       return res.status(403).json({ success: false, error: 'You can only delete your own review.' });
     }
 
@@ -697,11 +754,157 @@ router.post('/:id/reaction', optionalProtect, async (req, res) => {
 });
 
 /**
- * PUT /api/reviews/:id
- * Edit an existing comment/review.
+ * GET /api/reviews/organizer/my-events
+ * Fetch all reviews added to expos owned/created/claimed by the authenticated organizer.
  */
-router.put('/:id', async (req, res) => {
+router.get('/organizer/my-events', protect, authorize('organizer', 'super_admin', 'admin'), async (req, res) => {
   try {
+    const escapeRegex = (s) => String(s || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const userDoc = await User.findById(req.user.id).select('organization email role').lean();
+
+    const ownerConditions = [
+      { createdBy: req.user.id },
+      { claimedBy: req.user.id },
+      { organizer: req.user.id }
+    ];
+    if (userDoc?.organization) {
+      ownerConditions.push({ organizer: userDoc.organization });
+    }
+    if (userDoc?.email) {
+      ownerConditions.push({ orgEmail: { $regex: new RegExp(`^${escapeRegex(userDoc.email.trim())}$`, 'i') } });
+    }
+
+    const organizerEvents = await Event.find({ $or: ownerConditions })
+      .select('_id title slug city startDate endDate status banner')
+      .sort({ startDate: -1 })
+      .lean();
+
+    if (organizerEvents.length === 0) {
+      return res.status(200).json({
+        success: true,
+        events: [],
+        stats: { total: 0, averageRating: 0, approved: 0, pending: 0, rejected: 0, featured: 0, helpfulTotal: 0 },
+        data: []
+      });
+    }
+
+    const eventBySlug = new Map();
+    const eventByTitle = new Map();
+    const slugRegexes = [];
+    const titleRegexes = [];
+
+    for (const ev of organizerEvents) {
+      if (ev.slug) {
+        const s = String(ev.slug).trim().toLowerCase();
+        eventBySlug.set(s, ev);
+        slugRegexes.push(new RegExp(`^${escapeRegex(s)}$`, 'i'));
+      }
+      if (ev.title) {
+        const t = String(ev.title).trim().toLowerCase();
+        eventByTitle.set(t, ev);
+        titleRegexes.push(new RegExp(`^${escapeRegex(ev.title.trim())}$`, 'i'));
+      }
+    }
+
+    const matchConditions = [];
+    if (slugRegexes.length > 0) matchConditions.push({ eventSlug: { $in: slugRegexes } });
+    if (titleRegexes.length > 0) matchConditions.push({ eventTitle: { $in: titleRegexes } });
+
+    const { eventSlug, status, rating, search } = req.query;
+    const baseFilter = matchConditions.length > 0 ? { $or: matchConditions } : { _id: null };
+
+    // Calculate summary stats across all reviews for the organizer's events (before view filters)
+    const allOrgReviews = await Review.find(baseFilter).sort({ createdAt: -1 }).lean();
+
+    const stats = {
+      total: allOrgReviews.length,
+      approved: allOrgReviews.filter((r) => r.status === 'approved').length,
+      featured: allOrgReviews.filter((r) => r.status === 'featured').length,
+      pending: allOrgReviews.filter((r) => r.status === 'pending').length,
+      rejected: allOrgReviews.filter((r) => r.status === 'rejected').length,
+      helpfulTotal: allOrgReviews.reduce((acc, r) => acc + (Number(r.helpfulCount) || 0), 0),
+      averageRating:
+        allOrgReviews.length > 0
+          ? Number((allOrgReviews.reduce((acc, r) => acc + (Number(r.rating) || 0), 0) / allOrgReviews.length).toFixed(1))
+          : 0
+    };
+
+    const filtered = allOrgReviews
+      .filter((r) => {
+        if (eventSlug && eventSlug !== 'all') {
+          const targetSlug = String(eventSlug).trim().toLowerCase();
+          const matchedEvent = eventBySlug.get(targetSlug);
+          const revSlug = String(r.eventSlug || '').trim().toLowerCase();
+          const revTitle = String(r.eventTitle || '').trim().toLowerCase();
+          if (revSlug !== targetSlug && (!matchedEvent || revTitle !== String(matchedEvent.title || '').trim().toLowerCase())) {
+            return false;
+          }
+        }
+        if (status && status !== 'all' && r.status !== status) return false;
+        if (rating && Number(r.rating) !== Number(rating)) return false;
+        if (search && search.trim()) {
+          const q = search.trim().toLowerCase();
+          const haystack = [r.name, r.company, r.role, r.eventTitle, r.headline, r.review]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase();
+          if (!haystack.includes(q)) return false;
+        }
+        return true;
+      })
+      .map((r) => {
+        const linkedEvent =
+          eventBySlug.get(String(r.eventSlug || '').trim().toLowerCase()) ||
+          eventByTitle.get(String(r.eventTitle || '').trim().toLowerCase()) ||
+          null;
+        return {
+          ...r,
+          isOwner: isReviewOwner(r, req.user),
+          eventDetails: linkedEvent
+            ? {
+                _id: linkedEvent._id,
+                title: linkedEvent.title,
+                slug: linkedEvent.slug,
+                city: linkedEvent.city,
+                startDate: linkedEvent.startDate
+              }
+            : null
+        };
+      });
+
+    res.status(200).json({
+      success: true,
+      events: organizerEvents,
+      stats,
+      count: filtered.length,
+      data: filtered
+    });
+  } catch (err) {
+    console.error('Error fetching organizer expo reviews:', err);
+    res.status(500).json({ success: false, error: 'Failed to fetch organizer expo reviews.' });
+  }
+});
+
+/**
+ * PUT /api/reviews/:id
+ * Edit an existing comment/review (only the author who created it or an admin).
+ */
+router.put('/:id', protect, async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+    const existing = await Review.findById(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+    if (!isReviewOwner(existing, req.user) && !isAdminUser(req.user)) {
+      return res.status(403).json({
+        success: false,
+        error: 'You are not authorized to edit another user\'s review.'
+      });
+    }
+
     const { review, comment, company, rating } = req.body;
     const txt = (review || comment || '').trim();
     if (!txt) {
@@ -715,13 +918,13 @@ router.put('/:id', async (req, res) => {
     if (rating !== undefined) updateData.rating = Math.min(5, Math.max(1, Number(rating) || 5));
 
     const updated = await Review.findByIdAndUpdate(req.params.id, updateData, { new: true });
-    if (!updated) {
-      return res.status(404).json({ success: false, error: 'Review not found.' });
+    if (isReviewOwner(existing, req.user) && company !== undefined && String(company).trim().length >= 2) {
+      await syncUserCompanyName(req.user.id, company.trim());
     }
     const aggregate = await syncEventRating(updated.eventSlug);
     res.status(200).json({
       success: true,
-      data: updated,
+      data: { ...updated.toObject(), isOwner: isReviewOwner(updated, req.user) },
       count: aggregate?.count ?? 0,
       averageRating: aggregate?.averageRating ?? 0,
       message: 'Review updated successfully.'
@@ -734,15 +937,29 @@ router.put('/:id', async (req, res) => {
 
 /**
  * DELETE /api/reviews/:id
- * Delete a review (by id).
+ * Delete a review (strictly only the user who made it OR an admin).
  */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', protect, async (req, res) => {
   try {
-    const review = await Review.findByIdAndDelete(req.params.id);
-    if (!review) {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(404).json({ success: false, error: 'Review not found.' });
     }
-    const aggregate = await syncEventRating(review.eventSlug);
+    const existing = await Review.findById(req.params.id);
+    if (!existing) {
+      return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+    if (!isReviewOwner(existing, req.user) && !isAdminUser(req.user)) {
+      return res.status(403).json({
+        success: false,
+        error: 'You are not authorized to delete another user\'s review.'
+      });
+    }
+
+    await existing.deleteOne();
+    const aggregate = await syncEventRating(existing.eventSlug);
+    if (existing.venueSlug) {
+      await syncVenueRating(existing.venueSlug);
+    }
     res.status(200).json({
       success: true,
       count: aggregate?.count ?? 0,
@@ -763,7 +980,7 @@ router.delete('/:id', async (req, res) => {
  * GET /api/reviews/admin/all
  * List all reviews across all statuses (admin only).
  */
-router.get('/admin/all', protect, authorize('super_admin'), async (req, res) => {
+router.get('/admin/all', protect, authorize('super_admin', 'admin'), async (req, res) => {
   try {
     const { status, search, rating, page = 1, limit = 50 } = req.query;
     const filter = {};
@@ -823,7 +1040,7 @@ router.get('/admin/all', protect, authorize('super_admin'), async (req, res) => 
  * PUT /api/reviews/admin/:id/status
  * Update review status (approve / reject / feature).
  */
-router.put('/admin/:id/status', protect, authorize('super_admin'), async (req, res) => {
+router.put('/admin/:id/status', protect, authorize('super_admin', 'admin'), async (req, res) => {
   try {
     const { status } = req.body;
     if (!['pending', 'approved', 'rejected', 'featured'].includes(status)) {
@@ -857,7 +1074,7 @@ router.put('/admin/:id/status', protect, authorize('super_admin'), async (req, r
  * PUT /api/reviews/admin/:id/feature
  * Toggle isFeaturedOnLanding flag.
  */
-router.put('/admin/:id/feature', protect, authorize('super_admin'), async (req, res) => {
+router.put('/admin/:id/feature', protect, authorize('super_admin', 'admin'), async (req, res) => {
   try {
     const review = await Review.findById(req.params.id);
     if (!review) {
@@ -887,11 +1104,15 @@ router.put('/admin/:id/feature', protect, authorize('super_admin'), async (req, 
  * DELETE /api/reviews/admin/:id
  * Permanently delete a review.
  */
-router.delete('/admin/:id', protect, authorize('super_admin'), async (req, res) => {
+router.delete('/admin/:id', protect, authorize('super_admin', 'admin'), async (req, res) => {
   try {
     const review = await Review.findByIdAndDelete(req.params.id);
     if (!review) {
       return res.status(404).json({ success: false, error: 'Review not found.' });
+    }
+    await syncEventRating(review.eventSlug);
+    if (review.venueSlug) {
+      await syncVenueRating(review.venueSlug);
     }
     res.status(200).json({ success: true, message: 'Review deleted permanently.' });
   } catch (err) {

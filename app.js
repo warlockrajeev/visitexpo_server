@@ -36,6 +36,9 @@ import planRoutes from './routes/planRoutes.js';
 import featuredOrganizerRoutes from './routes/featuredOrganizerRoutes.js';
 import notificationRoutes from './routes/notificationRoutes.js';
 import bannerRoutes from './routes/bannerRoutes.js';
+import boothRequestRoutes from './routes/boothRequestRoutes.js';
+import eventRequestRoutes from './routes/eventRequestRoutes.js';
+import followRoutes from './routes/followRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -139,6 +142,9 @@ app.use('/api/plans', planRoutes);
 app.use('/api/featured-organizers', featuredOrganizerRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/banners', bannerRoutes);
+app.use('/api/booth-requests', boothRequestRoutes);
+app.use('/api/event-requests', eventRequestRoutes);
+app.use('/api/follows', followRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
