@@ -23,13 +23,18 @@ const router = express.Router();
 const FREE_VISITOR_REGISTRATION_LIMIT = 3;
 
 async function getOrganizerEventIds(user) {
-  const ownershipQuery = {
-    $or: [
-      ...(user.organization ? [{ organizer: user.organization }] : []),
-      { claimedBy: user._id }
-    ]
-  };
-  return Event.distinct('_id', ownershipQuery);
+  if (!user) return [];
+  const orgId = user.organization?._id || user.organization;
+  const userId = user._id || user.id;
+  const clauses = [];
+  if (orgId && mongoose.isValidObjectId(orgId)) {
+    clauses.push({ organizer: orgId });
+  }
+  if (userId && mongoose.isValidObjectId(userId)) {
+    clauses.push({ claimedBy: userId });
+  }
+  if (clauses.length === 0) return [];
+  return Event.distinct('_id', { $or: clauses });
 }
 
 async function getOrganizerBasePlan(user) {
@@ -693,13 +698,22 @@ router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manag
     if (eventId) {
       query.event = eventId;
     } else if (req.user.role === 'organizer') {
-      const myEvents = await Event.find({
-        $or: [
-          { organizer: req.user.organization },
-          { claimedBy: req.user.id }
-        ]
-      });
-      query.event = { $in: myEvents.map(e => e._id) };
+      const myEventIds = await getOrganizerEventIds(req.user);
+      if (myEventIds.length === 0) {
+        return res.status(200).json({
+          success: true,
+          data: {
+            total: 0,
+            checkedIn: 0,
+            notCheckedIn: 0,
+            virtual: 0,
+            confirmed: 0,
+            pending: 0,
+            expired: 0
+          }
+        });
+      }
+      query.event = { $in: myEventIds };
     }
 
     const [total, checkedIn, notCheckedIn, virtual, confirmed, pending, expired] = await Promise.all([
@@ -767,13 +781,19 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
       query.event = eventId;
     } else {
       if (req.user.role === 'organizer') {
-        const myEvents = await Event.find({
-          $or: [
-            { organizer: req.user.organization },
-            { claimedBy: req.user.id }
-          ]
-        });
-        const myEventIds = myEvents.map(e => e._id);
+        const myEventIds = await getOrganizerEventIds(req.user);
+        if (myEventIds.length === 0) {
+          return res.status(200).json({
+            success: true,
+            data: {
+              docs: [],
+              total: 0,
+              limit: parseInt(limit, 10) || 20,
+              page: parseInt(page, 10) || 1,
+              pages: 0
+            }
+          });
+        }
         query.event = { $in: myEventIds };
       }
     }

@@ -484,6 +484,166 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+// @desc    Get current organizer plan & subscription status
+// @route   GET /api/plans/my-plan
+router.get('/my-plan', protect, async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    const isCorporate = isUserCorporateEmail(user);
+    // Find active BASE subscription (excluding Growth add-on)
+    let sub = await Subscription.findOne({
+      $or: [
+        ...(user.organization ? [{ organization: user.organization }] : []),
+        { user: user._id }
+      ],
+      plan: { $ne: 'growth' },
+      status: 'active'
+    }).sort({ createdAt: -1 });
+
+    if (!sub && user.organization) {
+      sub = await Subscription.findOne({
+        $or: [
+          { organization: user.organization },
+          { user: user._id }
+        ],
+        plan: { $ne: 'growth' }
+      }).sort({ createdAt: -1 });
+    }
+
+    // Check Growth add-on subscription
+    const growthSub = await Subscription.findOne({
+      $or: [
+        ...(user.organization ? [{ organization: user.organization }] : []),
+        { user: user._id }
+      ],
+      plan: 'growth',
+      status: 'active'
+    });
+    const hasGrowthPlan = Boolean(user.hasGrowthPlan || growthSub);
+
+    let needsSave = false;
+    if (user.hasGrowthPlan !== hasGrowthPlan) {
+      user.hasGrowthPlan = hasGrowthPlan;
+      needsSave = true;
+    }
+
+    // If user.plan was mistakenly set to 'growth', recover base plan
+    if (user.plan === 'growth') {
+      user.plan = sub?.plan || 'enterprise';
+      needsSave = true;
+    }
+
+    // Auto-sync plan from active base subscription if present
+    if (sub && sub.status === 'active' && sub.plan && sub.plan !== 'growth') {
+      if (user.plan !== sub.plan || !user.isPlanActive || !user.isVerified) {
+        user.plan = sub.plan;
+        user.planStatus = 'active';
+        user.isPlanActive = true;
+        user.isVerified = true;
+        needsSave = true;
+      }
+    } else if (['enterprise', 'starter'].includes(user.plan)) {
+      if (!user.isPlanActive || !user.isVerified) {
+        user.isPlanActive = true;
+        user.isVerified = true;
+        user.planStatus = 'active';
+        needsSave = true;
+      }
+    }
+
+    if (needsSave) {
+      await user.save();
+    }
+
+    const freePlan = await Plan.findOne({ planId: 'free' });
+    const generalPrice = freePlan?.pricing?.generalEmailPrice !== undefined ? freePlan.pricing.generalEmailPrice : 1499;
+    const isNoChargeGeneral = generalPrice === 0;
+
+    // Auto-activate for corporate email OR when general email is configured as no-charge (if on free tier)
+    if (user.role === 'organizer' && (isCorporate || isNoChargeGeneral) && !user.isPlanActive && (!sub || sub.status !== 'active') && !['enterprise', 'starter'].includes(user.plan)) {
+      user.isVerified = true;
+      user.emailType = isCorporate ? 'corporate' : 'general';
+      user.plan = 'free';
+      user.planStatus = 'active';
+      user.isPlanActive = true;
+      user.planPaidAmount = 0;
+      await user.save();
+
+      if (user.organization && (!sub || sub.status !== 'active')) {
+        sub = await Subscription.findOneAndUpdate(
+          { organization: user.organization, plan: { $ne: 'growth' } },
+          {
+            plan: 'free',
+            emailType: user.emailType,
+            status: 'active',
+            price: 0,
+            paymentCycle: 'quarterly',
+            user: user._id,
+            startDate: new Date(),
+            endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
+          },
+          { upsert: true, new: true }
+        );
+      }
+    }
+
+    const resolvedBasePlan = (sub?.plan && sub.plan !== 'growth')
+      ? sub.plan
+      : (user.plan && user.plan !== 'growth' ? user.plan : 'free');
+
+    const isPaidOrganizer = ['enterprise', 'starter'].includes(resolvedBasePlan);
+    const isPlanActive = isPaidOrganizer ? true : (sub ? sub.status === 'active' : !!user.isPlanActive);
+    const isVerified = isPaidOrganizer ? true : (user.isVerified ?? false);
+
+    const activePlanDoc = await Plan.findOne({ planId: resolvedBasePlan });
+    const defaultFallbackName = resolvedBasePlan === 'enterprise' ? 'Organizer Enterprise' : resolvedBasePlan === 'starter' ? 'Organizer Starter' : 'Free Organizer';
+    const planName = activePlanDoc?.name || defaultFallbackName;
+    const planBadge = activePlanDoc?.badge || (resolvedBasePlan === 'enterprise' ? 'For Large Organizers' : resolvedBasePlan === 'starter' ? '👑 Most Popular →' : 'Get Started');
+
+    res.status(200).json({
+      success: true,
+      plan: resolvedBasePlan,
+      basePlan: resolvedBasePlan,
+      planName,
+      planBadge,
+      hasGrowthPlan,
+      growthSubscription: growthSub,
+      planStatus: sub?.status || user.planStatus || 'active',
+      isPlanActive,
+      isCorporate,
+      emailType: user.emailType || (isCorporate ? 'corporate' : 'general'),
+      planPaidAmount: sub?.price !== undefined ? sub.price : (user.planPaidAmount || 0),
+      generalEmailPrice: generalPrice,
+      noChargeForGeneralMail: isNoChargeGeneral,
+      hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch,
+      unlockedResearchLocations: user.unlockedResearchLocations || [],
+      subscription: sub,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        workEmail: user.workEmail || '',
+        workEmailVerified: !!user.workEmailVerified,
+        workEmailVerificationRequired: !!user.workEmailVerificationRequired,
+        plan: resolvedBasePlan,
+        basePlan: resolvedBasePlan,
+        hasGrowthPlan,
+        isVerified,
+        planStatus: sub?.status || user.planStatus || 'active',
+        isPlanActive,
+        hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @desc    Get single plan details by planId
 // @route   GET /api/plans/:planId
 router.get('/:planId', async (req, res, next) => {
@@ -1524,165 +1684,7 @@ router.post('/check-email', async (req, res, next) => {
   }
 });
 
-// @desc    Get current organizer plan & subscription status
-// @route   GET /api/plans/my-plan
-router.get('/my-plan', protect, async (req, res, next) => {
-  try {
-    const user = await User.findById(req.user.id);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'User not found.' });
-    }
-
-    const isCorporate = isUserCorporateEmail(user);
-    // Find active BASE subscription (excluding Growth add-on)
-    let sub = await Subscription.findOne({
-      $or: [
-        ...(user.organization ? [{ organization: user.organization }] : []),
-        { user: user._id }
-      ],
-      plan: { $ne: 'growth' },
-      status: 'active'
-    }).sort({ createdAt: -1 });
-
-    if (!sub && user.organization) {
-      sub = await Subscription.findOne({
-        $or: [
-          { organization: user.organization },
-          { user: user._id }
-        ],
-        plan: { $ne: 'growth' }
-      }).sort({ createdAt: -1 });
-    }
-
-    // Check Growth add-on subscription
-    const growthSub = await Subscription.findOne({
-      $or: [
-        ...(user.organization ? [{ organization: user.organization }] : []),
-        { user: user._id }
-      ],
-      plan: 'growth',
-      status: 'active'
-    });
-    const hasGrowthPlan = Boolean(user.hasGrowthPlan || growthSub);
-
-    let needsSave = false;
-    if (user.hasGrowthPlan !== hasGrowthPlan) {
-      user.hasGrowthPlan = hasGrowthPlan;
-      needsSave = true;
-    }
-
-    // If user.plan was mistakenly set to 'growth', recover base plan
-    if (user.plan === 'growth') {
-      user.plan = sub?.plan || 'enterprise';
-      needsSave = true;
-    }
-
-    // Auto-sync plan from active base subscription if present
-    if (sub && sub.status === 'active' && sub.plan && sub.plan !== 'growth') {
-      if (user.plan !== sub.plan || !user.isPlanActive || !user.isVerified) {
-        user.plan = sub.plan;
-        user.planStatus = 'active';
-        user.isPlanActive = true;
-        user.isVerified = true;
-        needsSave = true;
-      }
-    } else if (['enterprise', 'starter'].includes(user.plan)) {
-      if (!user.isPlanActive || !user.isVerified) {
-        user.isPlanActive = true;
-        user.isVerified = true;
-        user.planStatus = 'active';
-        needsSave = true;
-      }
-    }
-
-    if (needsSave) {
-      await user.save();
-    }
-
-    const freePlan = await Plan.findOne({ planId: 'free' });
-    const generalPrice = freePlan?.pricing?.generalEmailPrice !== undefined ? freePlan.pricing.generalEmailPrice : 1499;
-    const isNoChargeGeneral = generalPrice === 0;
-
-    // Auto-activate for corporate email OR when general email is configured as no-charge (if on free tier)
-    if (user.role === 'organizer' && (isCorporate || isNoChargeGeneral) && !user.isPlanActive && (!sub || sub.status !== 'active') && !['enterprise', 'starter'].includes(user.plan)) {
-      user.isVerified = true;
-      user.emailType = isCorporate ? 'corporate' : 'general';
-      user.plan = 'free';
-      user.planStatus = 'active';
-      user.isPlanActive = true;
-      user.planPaidAmount = 0;
-      await user.save();
-
-      if (user.organization && (!sub || sub.status !== 'active')) {
-        sub = await Subscription.findOneAndUpdate(
-          { organization: user.organization, plan: { $ne: 'growth' } },
-          {
-            plan: 'free',
-            emailType: user.emailType,
-            status: 'active',
-            price: 0,
-            paymentCycle: 'quarterly',
-            user: user._id,
-            startDate: new Date(),
-            endDate: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000)
-          },
-          { upsert: true, new: true }
-        );
-      }
-    }
-
-    const resolvedBasePlan = (sub?.plan && sub.plan !== 'growth')
-      ? sub.plan
-      : (user.plan && user.plan !== 'growth' ? user.plan : 'free');
-
-    const isPaidOrganizer = ['enterprise', 'starter'].includes(resolvedBasePlan);
-    const isPlanActive = isPaidOrganizer ? true : (sub ? sub.status === 'active' : !!user.isPlanActive);
-    const isVerified = isPaidOrganizer ? true : (user.isVerified ?? false);
-
-    const activePlanDoc = await Plan.findOne({ planId: resolvedBasePlan });
-    const defaultFallbackName = resolvedBasePlan === 'enterprise' ? 'Organizer Enterprise' : resolvedBasePlan === 'starter' ? 'Organizer Starter' : 'Free Organizer';
-    const planName = activePlanDoc?.name || defaultFallbackName;
-    const planBadge = activePlanDoc?.badge || (resolvedBasePlan === 'enterprise' ? 'For Large Organizers' : resolvedBasePlan === 'starter' ? '👑 Most Popular →' : 'Get Started');
-
-    res.status(200).json({
-      success: true,
-      plan: resolvedBasePlan,
-      basePlan: resolvedBasePlan,
-      planName,
-      planBadge,
-      hasGrowthPlan,
-      growthSubscription: growthSub,
-      planStatus: sub?.status || user.planStatus || 'active',
-      isPlanActive,
-      isCorporate,
-      emailType: user.emailType || (isCorporate ? 'corporate' : 'general'),
-      planPaidAmount: sub?.price !== undefined ? sub.price : (user.planPaidAmount || 0),
-      generalEmailPrice: generalPrice,
-      noChargeForGeneralMail: isNoChargeGeneral,
-      hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch,
-      unlockedResearchLocations: user.unlockedResearchLocations || [],
-      subscription: sub,
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role,
-        workEmail: user.workEmail || '',
-        workEmailVerified: !!user.workEmailVerified,
-        workEmailVerificationRequired: !!user.workEmailVerificationRequired,
-        plan: resolvedBasePlan,
-        basePlan: resolvedBasePlan,
-        hasGrowthPlan,
-        isVerified,
-        planStatus: sub?.status || user.planStatus || 'active',
-        isPlanActive,
-        hasUnlockedLocationResearch: !!user.hasUnlockedLocationResearch
-      }
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+// /my-plan is registered earlier before /:planId to avoid route shadowing
 
 // @desc    Activate Free Organizer Plan (₹0 for corporate or no-charge general, ₹1,499 standard general)
 // @route   POST /api/plans/activate-free-plan

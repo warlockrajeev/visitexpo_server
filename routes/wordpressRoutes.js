@@ -37,6 +37,7 @@ function isEventConcluded(event, now = new Date()) {
 }
 
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
+import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -44,23 +45,39 @@ import { fileURLToPath } from 'url';
 const __wpFilename = fileURLToPath(import.meta.url);
 const __wpDirname = path.dirname(__wpFilename);
 
-function getWpImage(slug, id, wpPostId, title) {
+let wpImageMapCache = null;
+let wpImageEntriesCache = null;
+
+function loadWpImageMap() {
+  if (wpImageMapCache !== null) return wpImageMapCache;
   try {
     const imgPath = path.join(__wpDirname, '../data/wordpress-event-images.json');
     if (fs.existsSync(imgPath)) {
-      const data = JSON.parse(fs.readFileSync(imgPath, 'utf8'));
-      if (slug && data[slug]) return data[slug];
-      if (id && data[String(id)]) return data[String(id)];
-      if (wpPostId && data[String(wpPostId)]) return data[String(wpPostId)];
-      if (title) {
-        const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-        if (data[titleSlug]) return data[titleSlug];
-        const lowerTitle = title.toLowerCase();
-        for (const [k, url] of Object.entries(data)) {
-          if (k.length > 5 && isNaN(Number(k))) {
-            const rk = k.replace(/-/g, ' ');
-            if (lowerTitle.includes(rk) || (rk.length > 10 && rk.includes(lowerTitle))) return url;
-          }
+      wpImageMapCache = JSON.parse(fs.readFileSync(imgPath, 'utf8')) || {};
+      wpImageEntriesCache = Object.entries(wpImageMapCache)
+        .filter(([k]) => k.length > 5 && isNaN(Number(k)))
+        .map(([k, url]) => ({ rk: k.replace(/-/g, ' '), url }));
+      return wpImageMapCache;
+    }
+  } catch {}
+  wpImageMapCache = {};
+  wpImageEntriesCache = [];
+  return wpImageMapCache;
+}
+
+function getWpImage(slug, id, wpPostId, title) {
+  try {
+    const data = loadWpImageMap();
+    if (slug && data[slug]) return data[slug];
+    if (id && data[String(id)]) return data[String(id)];
+    if (wpPostId && data[String(wpPostId)]) return data[String(wpPostId)];
+    if (title) {
+      const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      if (data[titleSlug]) return data[titleSlug];
+      const lowerTitle = title.toLowerCase();
+      for (const entry of wpImageEntriesCache || []) {
+        if (lowerTitle.includes(entry.rk) || (entry.rk.length > 10 && entry.rk.includes(lowerTitle))) {
+          return entry.url;
         }
       }
     }
@@ -169,74 +186,93 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
  * GET /api/wordpress/claimable-events
  * Fetch available events, optionally excluding events with active exhibitor registrations.
  */
+const CLAIMABLE_TITLE_EXCLUDE_RE = /cart|checkout|my account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about us|blog|home/i;
+const CLAIMABLE_SLUG_EXCLUDE_RE = /cart|checkout|my-account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about-us|blog|home/i;
+
 router.get('/claimable-events', wordpressLimiter, async (req, res, next) => {
   try {
     const { search, city, limit = 2500, page = 1 } = req.query;
     const forExhibitor = req.query.forExhibitor === 'true';
 
-    const query = {
-      isClaimed: { $ne: true },
-      title: { $not: /cart|checkout|my account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about us|blog|home/i },
-      slug: { $not: /cart|checkout|my-account|password|profile|registration|refund|terms|privacy|login|thank|faqs|sample|contact|about-us|blog|home/i }
-    };
-
-    if (search && search.trim()) {
-      const s = search.trim();
-      query.$or = [
-        { title: { $regex: s, $options: 'i' } },
-        { venue: { $regex: s, $options: 'i' } },
-        { city: { $regex: s, $options: 'i' } },
-        { categories: { $in: [new RegExp(s, 'i')] } }
-      ];
-    }
-
-    if (city && city.trim()) {
-      query.city = { $regex: city.trim(), $options: 'i' };
-    }
-
-    if (forExhibitor) {
-      const occupiedEventIds = await Exhibitor.distinct('event', {
-        status: { $ne: 'rejected' }
-      });
-      query._id = { $nin: occupiedEventIds };
-    }
-
     const pgLimit = limit === 'all' ? 2500 : (parseInt(limit, 10) || 2500);
     const pgNum = parseInt(page, 10) || 1;
     const skip = (pgNum - 1) * pgLimit;
 
-    const [rawDocs, total] = await Promise.all([
-      Event.find(query)
-        .select('title slug description venue city country startDate endDate banner wpPostId wpUrl isClaimed orgName orgEmail orgPhone orgWebsite orgDesc orgLogo')
-        .sort({ startDate: -1, title: 1 })
-        .skip(skip)
-        .limit(pgLimit)
-        .lean(),
-      Event.countDocuments(query)
+    const searchRegex = search && search.trim()
+      ? new RegExp(search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      : null;
+    const cityRegex = city && city.trim()
+      ? new RegExp(city.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i')
+      : null;
+
+    const [fastEvents, claimedIds, occupiedEventIds] = await Promise.all([
+      WordPressDirectorySyncService.getFastStoredEvents(),
+      Event.distinct('_id', { isClaimed: true }),
+      forExhibitor
+        ? Exhibitor.distinct('event', { status: { $ne: 'rejected' } })
+        : Promise.resolve([])
     ]);
 
-    const docs = rawDocs.map((e, idx) => ({
-      _id: String(e._id),
-      id: String(e.wpPostId || e._id),
-      wpPostId: e.wpPostId || String(e._id),
-      title: e.title,
-      slug: e.slug,
-      description: e.description || '',
-      image: e.banner || getWpImage(e.slug, e._id, e.wpPostId, e.title) || null,
-      banner: e.banner || getWpImage(e.slug, e._id, e.wpPostId, e.title) || null,
-      startDate: e.startDate ? new Date(e.startDate).toISOString() : null,
-      endDate: e.endDate ? new Date(e.endDate).toISOString() : null,
-      venue: e.venue || 'Exhibition Center',
-      city: e.city || 'India',
-      country: e.country || 'India',
-      isClaimed: !!e.isClaimed,
-      orgName: e.orgName || 'Verified Organizer',
-      orgEmail: e.orgEmail || '',
-      orgPhone: e.orgPhone || '',
-      orgWebsite: e.orgWebsite || '',
-      orgDesc: e.orgDesc || '',
-      orgLogo: e.orgLogo || ''
-    }));
+    const claimedIdSet = new Set((claimedIds || []).map((id) => String(id)));
+    const occupiedIdSet = new Set((occupiedEventIds || []).map((id) => String(id)));
+
+    const filtered = (fastEvents || []).filter((e) => {
+      if (!e || e.isClaimed === true) return false;
+      const idStr = String(e._id || '');
+      if (claimedIdSet.has(idStr)) return false;
+      if (forExhibitor && occupiedIdSet.has(idStr)) return false;
+      if (e.title && CLAIMABLE_TITLE_EXCLUDE_RE.test(e.title)) return false;
+      if (e.slug && CLAIMABLE_SLUG_EXCLUDE_RE.test(e.slug)) return false;
+
+      if (cityRegex && (!e.city || !cityRegex.test(e.city))) return false;
+      if (searchRegex) {
+        const matchesCat = Array.isArray(e.categories) && e.categories.some((c) => searchRegex.test(c));
+        const matchesField =
+          (e.title && searchRegex.test(e.title)) ||
+          (e.venue && searchRegex.test(e.venue)) ||
+          (e.city && searchRegex.test(e.city));
+        if (!matchesCat && !matchesField) return false;
+      }
+      return true;
+    });
+
+    filtered.sort((a, b) => {
+      const aTime = a.startDate ? new Date(a.startDate).getTime() : 0;
+      const bTime = b.startDate ? new Date(b.startDate).getTime() : 0;
+      const safeA = Number.isNaN(aTime) ? 0 : aTime;
+      const safeB = Number.isNaN(bTime) ? 0 : bTime;
+      if (safeB !== safeA) return safeB - safeA;
+      return String(a.title || '').localeCompare(String(b.title || ''));
+    });
+
+    const total = filtered.length;
+    const rawDocs = filtered.slice(skip, skip + pgLimit);
+
+    const docs = rawDocs.map((e) => {
+      const resolvedBanner = e.banner || getWpImage(e.slug, e._id, e.wpPostId, e.title) || null;
+      return {
+        _id: String(e._id),
+        id: String(e.wpPostId || e._id),
+        wpPostId: e.wpPostId || String(e._id),
+        title: e.title,
+        slug: e.slug,
+        description: e.description || '',
+        image: resolvedBanner,
+        banner: resolvedBanner,
+        startDate: e.startDate ? new Date(e.startDate).toISOString() : null,
+        endDate: e.endDate ? new Date(e.endDate).toISOString() : null,
+        venue: e.venue || 'Exhibition Center',
+        city: e.city || 'India',
+        country: e.country || 'India',
+        isClaimed: !!e.isClaimed,
+        orgName: e.orgName || 'Verified Organizer',
+        orgEmail: e.orgEmail || '',
+        orgPhone: e.orgPhone || '',
+        orgWebsite: e.orgWebsite || '',
+        orgDesc: e.orgDesc || '',
+        orgLogo: e.orgLogo || ''
+      };
+    });
 
     return res.status(200).json({
       success: true,

@@ -162,7 +162,14 @@ class EventRepository extends BaseRepository {
       const rawIds = Array.isArray(filters.organizerId)
         ? filters.organizerId
         : String(filters.organizerId).split(',').map(s => s.trim()).filter(Boolean);
-      const ids = rawIds.map(id => (mongoose.isValidObjectId(id) ? new mongoose.Types.ObjectId(id) : id));
+      const ids = rawIds
+        .filter(id => mongoose.isValidObjectId(id))
+        .map(id => new mongoose.Types.ObjectId(id));
+      if (ids.length === 0) {
+        const page = parseInt(options.page, 10) || 1;
+        const limit = parseInt(options.limit, 10) || 10;
+        return { docs: [], total: 0, limit, page, pages: 0 };
+      }
       filter.$or = [
         { organizer: { $in: ids } },
         { claimedBy: { $in: ids } }
