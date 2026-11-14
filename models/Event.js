@@ -267,5 +267,7 @@ const EventSchema = new mongoose.Schema(
 
 // Compound Index for WordPress widgets sorting by start date and status
 EventSchema.index({ status: 1, startDate: 1 });
+// Compound Index for admin moderation queues and event history sorted by latest update
+EventSchema.index({ status: 1, isClaimed: 1, updatedAt: -1 });
 
 export default mongoose.model('Event', EventSchema);

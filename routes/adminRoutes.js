@@ -80,6 +80,52 @@ let categoriesCache = {
   timestamp: 0,
   ttl: 5 * 60 * 1000 // 5 minutes
 };
+let categoriesInFlight = null;
+
+// Short-lived cache for admin dashboard analytics so rapid reloads are instant
+let dashboardCache = {
+  data: null,
+  timestamp: 0,
+  ttl: 45 * 1000 // 45 seconds
+};
+let dashboardInFlight = null;
+
+// Lean projection for moderation queues and event history endpoints
+const EVENT_MODERATION_SELECT = [
+  'title',
+  'slug',
+  'venue',
+  'city',
+  'country',
+  'startDate',
+  'endDate',
+  'timings',
+  'banner',
+  'description',
+  'orgName',
+  'orgLogo',
+  'orgEmail',
+  'orgPhone',
+  'orgWebsite',
+  'orgDesc',
+  'category',
+  'categories',
+  'organizer',
+  'isClaimed',
+  'claimedBy',
+  'claimedAt',
+  'wpPostId',
+  'wpUrl',
+  'rejectionReason',
+  'status',
+  'seo',
+  'schedules',
+  'sponsorsList',
+  'faqsList',
+  'contactShortcode',
+  'updatedAt',
+  'createdAt'
+].join(' ');
 
 const CATEGORIES_META = [
   {
@@ -278,32 +324,21 @@ const INITIAL_SPONSORS = [
   }
 ];
 
-async function getAggregatedCategories() {
-  const now = Date.now();
-  if (categoriesCache.data && (now - categoriesCache.timestamp < categoriesCache.ttl)) {
-    return categoriesCache.data;
-  }
-
-  const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-  const wpKey = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
-
-  let rawDocs = [];
-  try {
-    const wpRes = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
-      headers: { 'X-VisitExpo-Key': wpKey },
-      signal: AbortSignal.timeout(25000)
-    });
-    if (wpRes.ok) {
-      const data = await wpRes.json();
-      rawDocs = data.data?.docs || [];
-    }
-  } catch (err) {
-    console.warn('[Admin] inspect-event-meta fetch failed, falling back to MongoDB:', err.message);
-  }
+async function _computeAggregatedCategories() {
+  // Reuse WordPressDirectorySyncService warm memory/disk cache so admin endpoints never stall on 25s WP scrapes or unprojected 15MB Event scans
+  const { default: wpDirectorySync } = await import('../services/WordPressDirectorySyncService.js');
 
   const [mongoEvents, deletedEvents, customCategories] = await Promise.all([
-    Event.find().lean(),
-    DeletedEvent.find().lean(),
+    wpDirectorySync.getFastStoredEvents().catch(async (err) => {
+      console.warn('[Admin] getFastStoredEvents fallback to projected Event query:', err.message);
+      return Event.find(
+        { status: { $ne: 'cancelled' } },
+        '_id title slug wpPostId categories category venue city banner coverImage thumbnail image startDate endDate organizerName orgName status wpUrl'
+      )
+        .limit(3500)
+        .lean();
+    }),
+    DeletedEvent.find().select('eventId slug wpPostId title').lean(),
     Category.find().lean()
   ]);
 
@@ -326,12 +361,14 @@ async function getAggregatedCategories() {
   };
 
   const catMap = {};
+  const seenKeysByCat = {};
   CATEGORIES_META.forEach(c => {
     catMap[c.name] = {
       ...c,
       isCustom: false,
       events: []
     };
+    seenKeysByCat[c.name] = new Set();
   });
 
   (customCategories || []).forEach(c => {
@@ -348,56 +385,15 @@ async function getAggregatedCategories() {
       isCustom: true,
       events: []
     };
+    seenKeysByCat[c.name] = new Set();
   });
 
-  rawDocs.forEach((d, idx) => {
-    if (isEventDeleted(d.id, d.slug, d.title, d.id)) return;
-    const m = d.meta || {};
-    const startTs = m.ovaem_date_start_time?.[0];
-    const endTs = m.ovaem_date_end_time?.[0];
-    const venue = m.ovaem_address_event?.[0] || m.ovaem_venue?.[0] || m.ovaem_address?.[0] || 'Exhibition Center';
-    const desc = m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || '';
-    const cat = inferCategory(d.title, desc);
-
-    const cleanCity = (venue.includes('New Delhi') || venue.includes('Delhi') || venue.includes('Pragati') || venue.includes('Bharat Mandapam')) ? 'New Delhi' :
-                      (venue.includes('Mumbai') || venue.includes('BKC') || venue.includes('Jio')) ? 'Mumbai' :
-                      (venue.includes('Bengaluru') || venue.includes('BIEC')) ? 'Bengaluru' :
-                      (venue.includes('Chennai')) ? 'Chennai' :
-                      (venue.includes('Hyderabad')) ? 'Hyderabad' :
-                      (venue.includes('Ahmedabad') || venue.includes('Gandhinagar')) ? 'Ahmedabad' : 'India';
-
-    const realImg = getWpImage(d.slug, d.id, d.id, d.title);
-    const evtObj = {
-      id: String(d.id || `wp-${idx}`),
-      title: d.title || 'Exhibition Event',
-      slug: d.slug,
-      category: cat,
-      venue: venue,
-      city: cleanCity,
-      image: realImg,
-      banner: realImg,
-      startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
-      endDate: endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000).toISOString() : null,
-      dates: startTs ? new Date(parseInt(startTs) * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming 2026',
-      organizer: m.ovaem_org_name?.[0] || 'Verified Organizer',
-      status: 'published',
-      wpUrl: `https://visitexpo.in/event/${d.slug}/`,
-      isWordPress: true
-    };
-
-    if (catMap[cat]) {
-      catMap[cat].events.push(evtObj);
-    } else {
-      catMap['Trade & Industry'].events.push(evtObj);
-    }
-  });
-
-  mongoEvents.forEach(me => {
+  (mongoEvents || []).forEach(me => {
     if (isEventDeleted(me._id, me.slug, me.title, me.wpPostId)) return;
     const catName = Array.isArray(me.categories) && me.categories[0]
       ? me.categories[0]
       : (me.category || (Array.isArray(me.categories) ? me.categories[0] : me.categories) || 'Trade & Industry');
-    
+
     if (catName && !catMap[catName]) {
       catMap[catName] = {
         name: catName,
@@ -411,12 +407,15 @@ async function getAggregatedCategories() {
         isCustom: true,
         events: []
       };
+      seenKeysByCat[catName] = new Set();
     }
 
     const matchedCat = catMap[catName] ? catName : inferCategory(me.title, me.description);
-    
-    const alreadyExists = catMap[matchedCat]?.events.some(e => e.slug === me.slug);
-    if (!alreadyExists && catMap[matchedCat]) {
+    const dedupeKey = me.slug || String(me._id);
+    const seenSet = seenKeysByCat[matchedCat];
+
+    if (catMap[matchedCat] && seenSet && !seenSet.has(dedupeKey)) {
+      seenSet.add(dedupeKey);
       const realMongoImg = me.banner || me.coverImage || me.thumbnail || me.image || getWpImage(me.slug, me._id, me.wpPostId, me.title);
       catMap[matchedCat].events.push({
         id: String(me._id),
@@ -430,10 +429,10 @@ async function getAggregatedCategories() {
         startDate: me.startDate,
         endDate: me.endDate,
         dates: me.startDate ? new Date(me.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming',
-        organizer: me.organizerName || 'Platform Tenant',
+        organizer: me.organizerName || me.orgName || 'Platform Tenant',
         status: me.status || 'published',
         wpUrl: me.wpUrl || '',
-        isWordPress: false
+        isWordPress: Boolean(me.wpPostId)
       });
     }
   });
@@ -468,6 +467,40 @@ async function getAggregatedCategories() {
   };
 
   return result;
+}
+
+async function getAggregatedCategories({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  const ttl = categoriesCache.ttl || 5 * 60 * 1000;
+  const isFresh = Boolean(categoriesCache.data) && (now - categoriesCache.timestamp < ttl);
+
+  if (!forceRefresh && isFresh) {
+    return categoriesCache.data;
+  }
+
+  if (!forceRefresh && categoriesCache.data) {
+    if (!categoriesInFlight) {
+      categoriesInFlight = _computeAggregatedCategories()
+        .catch((err) => {
+          console.warn('[Admin] Background categories refresh failed:', err.message);
+          return categoriesCache.data;
+        })
+        .finally(() => {
+          categoriesInFlight = null;
+        });
+    }
+    return categoriesCache.data;
+  }
+
+  if (categoriesInFlight) {
+    return categoriesInFlight;
+  }
+
+  categoriesInFlight = _computeAggregatedCategories().finally(() => {
+    categoriesInFlight = null;
+  });
+
+  return categoriesInFlight;
 }
 
 const ORGANIZERS_KNOWN_METADATA = [
@@ -1327,206 +1360,233 @@ router.use(authorize('super_admin', 'sub_admin', 'admin'));
 
 // @desc    Get admin dashboard summary KPIs
 // @route   GET /api/admin/dashboard
-router.get('/dashboard', async (req, res, next) => {
-  try {
-    const [
+async function _computeDashboardAnalytics() {
+  const [
+    totalUsers,
+    totalOrganizations,
+    totalEvents,
+    activeSubscriptions,
+    completedOrders,
+    pendingOrganizers,
+    pendingExhibitors,
+    pendingClaims,
+    pendingEvents,
+    newContactInquiries,
+    totalEngagements,
+    totalVisitors,
+    subscriptions,
+    recentInquiries,
+    rawTotalSponsors,
+    rawRecentSponsors,
+    dbOrgs,
+    orgUsers,
+    categoriesSummary
+  ] = await Promise.all([
+    User.countDocuments(),
+    Organization.countDocuments(),
+    Event.countDocuments(),
+    Subscription.countDocuments({ status: 'active' }),
+    Order.find({ status: 'completed' }).select('totalAmount createdAt').sort({ createdAt: 1 }).lean(),
+    User.countDocuments({ role: 'organizer', isVerified: false }),
+    Exhibitor.countDocuments({ status: 'pending' }),
+    Event.countDocuments({ isClaimed: true, status: 'draft' }),
+    Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } }),
+    ContactMessage.countDocuments({ status: 'new' }),
+    EventEngagement.countDocuments(),
+    Visitor.countDocuments(),
+    Subscription.find({ status: 'active' }).select('plan').lean(),
+    ContactMessage.find().sort({ createdAt: -1 }).limit(6).lean(),
+    Sponsor.countDocuments(),
+    Sponsor.find().sort({ createdAt: -1 }).limit(6).lean(),
+    Organization.find()
+      .populate('teamMembers.user', 'name email phone')
+      .populate('subscription')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean(),
+    User.find({ role: 'organizer' })
+      .select('name email organization isSuspended createdAt')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean(),
+    getAggregatedCategories().catch((catErr) => {
+      console.warn('Dashboard categories fetch warning:', catErr.message);
+      return { totalCategories: 11, totalEvents: 2660, categories: [] };
+    })
+  ]);
+
+  // Sum revenue from real completed orders
+  const totalRevenue = completedOrders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
+
+  // Group real monthly revenue
+  const monthsOrderMap = {};
+  completedOrders.forEach((o) => {
+    if (o.createdAt) {
+      const d = new Date(o.createdAt);
+      const key = d.toLocaleString('en-US', { month: 'short' });
+      monthsOrderMap[key] = (monthsOrderMap[key] || 0) + (o.totalAmount || 0);
+    }
+  });
+
+  const now = new Date();
+  const monthlyRevenue = [];
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const mName = d.toLocaleString('en-US', { month: 'short' });
+    monthlyRevenue.push({
+      month: mName,
+      revenue: monthsOrderMap[mName] || 0
+    });
+  }
+  // If all rolling months have 0 but orders exist in another month, include all active order months
+  if (monthlyRevenue.every(m => m.revenue === 0) && Object.keys(monthsOrderMap).length > 0) {
+    monthlyRevenue.length = 0;
+    Object.keys(monthsOrderMap).forEach(mName => {
+      monthlyRevenue.push({ month: mName, revenue: monthsOrderMap[mName] });
+    });
+  }
+
+  // Get active subscription packages breakdown
+  const packagesCount = {
+    free: 0,
+    growth: 0,
+    enterprise: 0
+  };
+
+  subscriptions.forEach((sub) => {
+    if (packagesCount[sub.plan] !== undefined) {
+      packagesCount[sub.plan]++;
+    }
+  });
+
+  // Real platform tenants on Free tier: all organizations not currently on paid growth/enterprise plan
+  const paidCount = packagesCount.growth + packagesCount.enterprise;
+  packagesCount.free = Math.max(totalOrganizations - paidCount, 0) + packagesCount.free;
+
+  const totalSponsors = rawTotalSponsors === 0 ? INITIAL_SPONSORS.length : rawTotalSponsors;
+  const recentSponsors = (!rawRecentSponsors || rawRecentSponsors.length === 0)
+    ? INITIAL_SPONSORS.slice(0, 6)
+    : rawRecentSponsors;
+
+  const recentTenants = [];
+  const seenOrgNames = new Set();
+
+  dbOrgs.forEach((org) => {
+    const ownerUser = org.teamMembers?.[0]?.user;
+    const ownerName = ownerUser?.name || org.contact?.email?.split('@')[0] || 'Organization Admin';
+    const ownerContact = ownerUser?.email || org.contact?.email || 'N/A';
+    seenOrgNames.add(org.name.toLowerCase().trim());
+
+    recentTenants.push({
+      id: String(org._id),
+      name: org.name,
+      owner: `${ownerName} (${ownerContact})`,
+      org: org.address?.city ? `${org.address.city}, India` : 'Registered Tenant',
+      plan: org.subscription?.plan || 'free',
+      status: org.subscription?.status || 'active',
+      signed: org.createdAt ? new Date(org.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'
+    });
+  });
+
+  orgUsers.forEach((u) => {
+    const derivedOrgName = u.organization?.name || (u.email?.includes('@indiandjexpo.com') ? 'Indian DJ Expo' : u.email?.includes('@techhubexpo.com') ? 'TechHub Expo' : `${u.name}'s Events`);
+    if (!seenOrgNames.has(derivedOrgName.toLowerCase().trim())) {
+      seenOrgNames.add(derivedOrgName.toLowerCase().trim());
+      recentTenants.push({
+        id: String(u._id),
+        name: derivedOrgName,
+        owner: `${u.name} (${u.email})`,
+        org: 'Organizer Account',
+        plan: 'free',
+        status: u.isSuspended ? 'suspended' : 'active',
+        signed: u.createdAt ? new Date(u.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'
+      });
+    }
+  });
+
+  const totalAttendees = totalEngagements + totalVisitors;
+
+  const analytics = {
+    kpis: {
       totalUsers,
       totalOrganizations,
-      totalEvents,
+      totalEvents: categoriesSummary.totalEvents || totalEvents,
       activeSubscriptions,
-      completedOrders,
+      totalRevenue,
       pendingOrganizers,
       pendingExhibitors,
       pendingClaims,
       pendingEvents,
       newContactInquiries,
-      totalEngagements,
-      totalVisitors
-    ] = await Promise.all([
-      User.countDocuments(),
-      Organization.countDocuments(),
-      Event.countDocuments(),
-      Subscription.countDocuments({ status: 'active' }),
-      Order.find({ status: 'completed' }).sort({ createdAt: 1 }).lean(),
-      User.countDocuments({ role: 'organizer', isVerified: false }),
-      Exhibitor.countDocuments({ status: 'pending' }),
-      Event.countDocuments({ isClaimed: true, status: 'draft' }),
-      Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } }),
-      ContactMessage.countDocuments({ status: 'new' }),
-      EventEngagement.countDocuments(),
-      Visitor.countDocuments()
-    ]);
+      totalCategories: categoriesSummary.totalCategories || 11,
+      totalSponsors,
+      totalAttendees
+    },
+    packagesBreakdown: packagesCount,
+    categoryBreakdown: (categoriesSummary.categories || []).map(c => ({
+      name: c.name,
+      slug: c.slug,
+      count: c.count,
+      color: c.color,
+      bg: c.bg,
+      icon: c.icon
+    })),
+    monthlyRevenue,
+    recentTenants,
+    recentSponsors: recentSponsors.map(sp => ({
+      _id: sp._id,
+      name: sp.name,
+      tier: sp.tier,
+      expo: sp.eventTitle || sp.expo || 'Partner Trade Expo',
+      logo: sp.logo,
+      website: sp.website,
+      color: sp.tier === 'platinum' ? 'text-purple-500 bg-purple-500/10' : sp.tier === 'gold' ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 bg-slate-500/10'
+    })),
+    recentInquiries
+  };
 
-    // Sum revenue from real completed orders
-    const totalRevenue = completedOrders.reduce((sum, order) => sum + (order.totalAmount || 0), 0);
+  dashboardCache = {
+    data: analytics,
+    timestamp: Date.now(),
+    ttl: 45 * 1000
+  };
 
-    // Group real monthly revenue
-    const monthsOrderMap = {};
-    completedOrders.forEach((o) => {
-      if (o.createdAt) {
-        const d = new Date(o.createdAt);
-        const key = d.toLocaleString('en-US', { month: 'short' });
-        monthsOrderMap[key] = (monthsOrderMap[key] || 0) + (o.totalAmount || 0);
+  return analytics;
+}
+
+router.get('/dashboard', async (req, res, next) => {
+  try {
+    const now = Date.now();
+    const forceRefresh = req.query.refresh === 'true';
+
+    if (!forceRefresh && dashboardCache.data && (now - dashboardCache.timestamp < dashboardCache.ttl)) {
+      return res.status(200).json({ success: true, analytics: dashboardCache.data });
+    }
+
+    if (!forceRefresh && dashboardCache.data) {
+      if (!dashboardInFlight) {
+        dashboardInFlight = _computeDashboardAnalytics()
+          .catch((err) => {
+            console.warn('[Admin] Background dashboard refresh failed:', err.message);
+            return dashboardCache.data;
+          })
+          .finally(() => {
+            dashboardInFlight = null;
+          });
       }
-    });
+      return res.status(200).json({ success: true, analytics: dashboardCache.data });
+    }
 
-    const now = new Date();
-    const monthlyRevenue = [];
-    for (let i = 5; i >= 0; i--) {
-      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const mName = d.toLocaleString('en-US', { month: 'short' });
-      monthlyRevenue.push({
-        month: mName,
-        revenue: monthsOrderMap[mName] || 0
+    if (!dashboardInFlight) {
+      dashboardInFlight = _computeDashboardAnalytics().finally(() => {
+        dashboardInFlight = null;
       });
     }
-    // If all rolling months have 0 but orders exist in another month, include all active order months
-    if (monthlyRevenue.every(m => m.revenue === 0) && Object.keys(monthsOrderMap).length > 0) {
-      monthlyRevenue.length = 0;
-      Object.keys(monthsOrderMap).forEach(mName => {
-        monthlyRevenue.push({ month: mName, revenue: monthsOrderMap[mName] });
-      });
-    }
 
-    // Get active subscription packages breakdown
-    const subscriptions = await Subscription.find({ status: 'active' }).lean();
-    const packagesCount = {
-      free: 0,
-      growth: 0,
-      enterprise: 0
-    };
-
-    subscriptions.forEach((sub) => {
-      if (packagesCount[sub.plan] !== undefined) {
-        packagesCount[sub.plan]++;
-      }
-    });
-
-    // Real platform tenants on Free tier: all organizations not currently on paid growth/enterprise plan
-    const paidCount = packagesCount.growth + packagesCount.enterprise;
-    packagesCount.free = Math.max(totalOrganizations - paidCount, 0) + packagesCount.free;
-
-    // Get recent contact form inquiries
-    const recentInquiries = await ContactMessage.find()
-      .sort({ createdAt: -1 })
-      .limit(6)
-      .lean();
-
-    // Sponsors
-    let totalSponsors = await Sponsor.countDocuments();
-    if (totalSponsors === 0) {
-      totalSponsors = INITIAL_SPONSORS.length;
-    }
-
-    let recentSponsors = await Sponsor.find()
-      .sort({ createdAt: -1 })
-      .limit(6)
-      .lean();
-    if (!recentSponsors || recentSponsors.length === 0) {
-      recentSponsors = INITIAL_SPONSORS.slice(0, 6);
-    }
-
-    // Recent real tenants / registered organizations & organizers
-    const [dbOrgs, orgUsers] = await Promise.all([
-      Organization.find()
-        .populate('teamMembers.user', 'name email phone')
-        .populate('subscription')
-        .sort({ createdAt: -1 })
-        .limit(100)
-        .lean(),
-      User.find({ role: 'organizer' })
-        .sort({ createdAt: -1 })
-        .limit(100)
-        .lean()
-    ]);
-
-    const recentTenants = [];
-    const seenOrgNames = new Set();
-
-    dbOrgs.forEach((org) => {
-      const ownerUser = org.teamMembers?.[0]?.user;
-      const ownerName = ownerUser?.name || org.contact?.email?.split('@')[0] || 'Organization Admin';
-      const ownerContact = ownerUser?.email || org.contact?.email || 'N/A';
-      seenOrgNames.add(org.name.toLowerCase().trim());
-
-      recentTenants.push({
-        id: String(org._id),
-        name: org.name,
-        owner: `${ownerName} (${ownerContact})`,
-        org: org.address?.city ? `${org.address.city}, India` : 'Registered Tenant',
-        plan: org.subscription?.plan || 'free',
-        status: org.subscription?.status || 'active',
-        signed: org.createdAt ? new Date(org.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'
-      });
-    });
-
-    orgUsers.forEach((u) => {
-      const derivedOrgName = u.organization?.name || (u.email?.includes('@indiandjexpo.com') ? 'Indian DJ Expo' : u.email?.includes('@techhubexpo.com') ? 'TechHub Expo' : `${u.name}'s Events`);
-      if (!seenOrgNames.has(derivedOrgName.toLowerCase().trim())) {
-        seenOrgNames.add(derivedOrgName.toLowerCase().trim());
-        recentTenants.push({
-          id: String(u._id),
-          name: derivedOrgName,
-          owner: `${u.name} (${u.email})`,
-          org: 'Organizer Account',
-          plan: 'free',
-          status: u.isSuspended ? 'suspended' : 'active',
-          signed: u.createdAt ? new Date(u.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Recent'
-        });
-      }
-    });
-
-    // Total Attendees & Followers KPI
-    const totalAttendees = totalEngagements + totalVisitors;
-
-    // Categories summary
-    let categoriesSummary = { totalCategories: 11, totalEvents: 2660, categories: [] };
-    try {
-      categoriesSummary = await getAggregatedCategories();
-    } catch (catErr) {
-      console.warn('Dashboard categories fetch warning:', catErr.message);
-    }
-
+    const analytics = await dashboardInFlight;
     res.status(200).json({
       success: true,
-      analytics: {
-        kpis: {
-          totalUsers,
-          totalOrganizations,
-          totalEvents: categoriesSummary.totalEvents || totalEvents,
-          activeSubscriptions,
-          totalRevenue,
-          pendingOrganizers,
-          pendingExhibitors,
-          pendingClaims,
-          pendingEvents,
-          newContactInquiries,
-          totalCategories: categoriesSummary.totalCategories || 11,
-          totalSponsors: totalSponsors,
-          totalAttendees
-        },
-        packagesBreakdown: packagesCount,
-        categoryBreakdown: (categoriesSummary.categories || []).map(c => ({
-          name: c.name,
-          slug: c.slug,
-          count: c.count,
-          color: c.color,
-          bg: c.bg,
-          icon: c.icon
-        })),
-        monthlyRevenue,
-        recentTenants,
-        recentSponsors: recentSponsors.map(sp => ({
-          _id: sp._id,
-          name: sp.name,
-          tier: sp.tier,
-          expo: sp.eventTitle || sp.expo || 'Partner Trade Expo',
-          logo: sp.logo,
-          website: sp.website,
-          color: sp.tier === 'platinum' ? 'text-purple-500 bg-purple-500/10' : sp.tier === 'gold' ? 'text-amber-500 bg-amber-500/10' : 'text-slate-500 bg-slate-500/10'
-        })),
-        recentInquiries
-      }
+      analytics
     });
   } catch (error) {
     next(error);
@@ -2931,10 +2991,14 @@ router.get('/exhibitor-history', async (req, res, next) => {
 // @route   GET /api/admin/pending-claims
 router.get('/pending-claims', async (req, res, next) => {
   try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 500);
     const pendingClaims = await Event.find({ isClaimed: true, status: 'draft' })
+      .select(EVENT_MODERATION_SELECT)
       .populate('claimedBy', 'name email')
       .populate('organizer', 'name contact')
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1 })
+      .limit(limit)
+      .lean();
 
     res.status(200).json({
       success: true,
@@ -2949,10 +3013,14 @@ router.get('/pending-claims', async (req, res, next) => {
 // @route   GET /api/admin/claim-history
 router.get('/claim-history', async (req, res, next) => {
   try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 150, 1), 500);
     const claimHistory = await Event.find({ isClaimed: true, status: 'published' })
+      .select(EVENT_MODERATION_SELECT)
       .populate('claimedBy', 'name email')
       .populate('organizer', 'name contact')
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1 })
+      .limit(limit)
+      .lean();
 
     res.status(200).json({
       success: true,
@@ -3294,9 +3362,13 @@ router.post('/events/:id/sync-wp', async (req, res, next) => {
 // @route   GET /api/admin/pending-events
 router.get('/pending-events', async (req, res, next) => {
   try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 200, 1), 500);
     const pendingEvents = await Event.find({ status: 'draft', isClaimed: { $ne: true } })
+      .select(EVENT_MODERATION_SELECT)
       .populate('organizer', 'name contact')
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1 })
+      .limit(limit)
+      .lean();
 
     res.status(200).json({
       success: true,
@@ -3311,9 +3383,13 @@ router.get('/pending-events', async (req, res, next) => {
 // @route   GET /api/admin/event-history
 router.get('/event-history', async (req, res, next) => {
   try {
+    const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 60, 1), 500);
     const eventHistory = await Event.find({ status: { $in: ['published', 'cancelled'] }, isClaimed: { $ne: true } })
+      .select(EVENT_MODERATION_SELECT)
       .populate('organizer', 'name contact')
-      .sort({ updatedAt: -1 });
+      .sort({ updatedAt: -1 })
+      .limit(limit)
+      .lean();
 
     res.status(200).json({
       success: true,
