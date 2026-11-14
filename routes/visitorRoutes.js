@@ -383,7 +383,6 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       if (enforceFreePlanLimit) {
         return res.status(400).json({ success: false, error: 'You are already registered for this event' });
       }
-      await ensureVisitorQrCode(existing);
       const { isExpired, passStatus } = await syncVisitorPassExpiration(existing, event);
       if (isExpired) {
         return res.status(400).json({
@@ -392,6 +391,91 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
           error: 'This event has ended and your visitor pass has expired.'
         });
       }
+
+      // Allow re-submitting a fresh pass request if the previous one was cancelled
+      if (existing.registrationStatus === 'cancelled') {
+        if (isEventPastEndDate(event)) {
+          return res.status(400).json({
+            success: false,
+            code: 'EVENT_ENDED',
+            error: 'Registrations are closed because this event has already ended.'
+          });
+        }
+        existing.name = name || existing.name;
+        existing.phone = phone || existing.phone;
+        existing.company = company || existing.company;
+        existing.designation = designation || existing.designation;
+        existing.country = country || existing.country || 'India';
+        existing.notes = notes || existing.notes;
+        existing.attendanceType = attendanceType || existing.attendanceType || 'in_person';
+        existing.registrationStatus = 'pending';
+        existing.qrCode = '';
+        await existing.save();
+
+        return res.status(201).json({
+          success: true,
+          pendingApproval: true,
+          message: 'Pass request sent to admin for approval.',
+          visitor: {
+            id: existing._id,
+            passId: `VIS-${existing._id.toString().toUpperCase()}`,
+            name: existing.name,
+            email: existing.email,
+            phone: existing.phone,
+            company: existing.company,
+            designation: existing.designation,
+            country: existing.country,
+            qrCode: '',
+            registrationStatus: existing.registrationStatus,
+            isExpired: false,
+            passStatus: 'pending',
+            attendanceType: existing.attendanceType,
+            event: {
+              id: event._id,
+              title: event.title,
+              startDate: event.startDate,
+              endDate: event.endDate,
+              venue: event.venue,
+              city: event.city
+            }
+          }
+        });
+      }
+
+      if (existing.registrationStatus === 'pending') {
+        return res.status(200).json({
+          success: true,
+          alreadyRegistered: true,
+          alreadyRequested: true,
+          pendingApproval: true,
+          message: 'Your pass request has already been sent and is awaiting admin approval.',
+          visitor: {
+            id: existing._id,
+            passId: `VIS-${existing._id.toString().toUpperCase()}`,
+            name: existing.name,
+            email: existing.email,
+            phone: existing.phone,
+            company: existing.company,
+            designation: existing.designation,
+            country: existing.country,
+            qrCode: '',
+            registrationStatus: existing.registrationStatus,
+            isExpired: false,
+            passStatus: 'pending',
+            attendanceType: existing.attendanceType,
+            event: {
+              id: event._id,
+              title: event.title,
+              startDate: event.startDate,
+              endDate: event.endDate,
+              venue: event.venue,
+              city: event.city
+            }
+          }
+        });
+      }
+
+      await ensureVisitorQrCode(existing);
       return res.status(200).json({
         success: true,
         alreadyRegistered: true,
@@ -445,7 +529,10 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       }
     }
 
-    // 3. Create Visitor
+    // 3. Create Visitor (Self-registration submits a pending Pass Request to Admin; organizer onboarding is immediate)
+    const initialRegistrationStatus = enforceFreePlanLimit ? 'confirmed' : 'pending';
+    const initialQrCode = enforceFreePlanLimit ? createVisitorQrCode() : '';
+
     const visitor = await Visitor.create({
       name,
       email: email.toLowerCase(),
@@ -453,7 +540,8 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       company,
       designation,
       country: country || 'India',
-      qrCode: createVisitorQrCode(),
+      qrCode: initialQrCode,
+      registrationStatus: initialRegistrationStatus,
       event: resolvedEventId,
       notes,
       attendanceType: attendanceType || 'in_person'
@@ -480,7 +568,7 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       } catch (_) {}
     }
 
-    // Sync passholder as verified active participant in EventEngagement
+    // Sync passholder / pass-request participant in EventEngagement
     try {
       const cleanSlug = (event?.slug || '').toLowerCase().trim();
       if (cleanSlug) {
@@ -499,8 +587,8 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
               eventCity: event?.city || '',
               eventVenue: event?.venue || '',
               isInterested: true,
-              status: 'active',
-              passType: 'Standard Trade Visitor'
+              status: enforceFreePlanLimit ? 'active' : 'pending',
+              passType: enforceFreePlanLimit ? 'Standard Trade Visitor' : 'Pending Admin Approval'
             }
           },
           { upsert: true, new: true }
@@ -525,11 +613,13 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       source: 'website',
       status: 'new',
       event: resolvedEventId,
-      notes: notes || `Registered online (${attendanceType || 'in_person'}) via WordPress integration.`,
+      notes: notes || `Registered online (${attendanceType || 'in_person'}) — ${enforceFreePlanLimit ? 'Confirmed' : 'Pass requested for admin approval'}.`,
       activityTimeline: [
         {
           type: 'note',
-          content: `Lead captured automatically from online event registration (${attendanceType || 'in_person'}).`
+          content: enforceFreePlanLimit
+            ? `Lead captured automatically from organizer visitor onboarding (${attendanceType || 'in_person'}).`
+            : `Visitor pass request submitted online (${attendanceType || 'in_person'}) and queued for admin approval.`
         }
       ]
     });
@@ -543,7 +633,10 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
 
     res.status(201).json({
       success: true,
-      message: 'Registration completed successfully',
+      pendingApproval: !enforceFreePlanLimit,
+      message: enforceFreePlanLimit
+        ? 'Registration completed successfully'
+        : 'Pass request sent to admin for approval.',
       visitor: {
         id: visitor._id,
         passId: `VIS-${visitor._id.toString().toUpperCase()}`,
@@ -556,7 +649,7 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
         qrCode: visitor.qrCode,
         registrationStatus: visitor.registrationStatus,
         isExpired: false,
-        passStatus: 'active',
+        passStatus: enforceFreePlanLimit ? 'active' : 'pending',
         attendanceType: visitor.attendanceType,
         event: {
           id: event._id,
@@ -600,8 +693,8 @@ router.post('/my-passes/:id/cancel', protect, async (req, res, next) => {
     if (isExpired || visitor.registrationStatus === 'expired') {
       return res.status(409).json({ success: false, error: 'Expired passes cannot be cancelled.' });
     }
-    if (visitor.registrationStatus !== 'confirmed') {
-      return res.status(409).json({ success: false, error: 'Only active visitor passes can be cancelled.' });
+    if (!['confirmed', 'pending'].includes(visitor.registrationStatus)) {
+      return res.status(409).json({ success: false, error: 'Only active or pending visitor passes can be cancelled.' });
     }
 
     const hasBeenUsed =
@@ -613,11 +706,12 @@ router.post('/my-passes/:id/cancel', protect, async (req, res, next) => {
       return res.status(409).json({ success: false, error: 'Already-used passes cannot be cancelled.' });
     }
 
+    const wasPending = visitor.registrationStatus === 'pending';
     const cancelledVisitor = await Visitor.findOneAndUpdate(
       {
         _id: visitor._id,
         email: userEmail,
-        registrationStatus: 'confirmed',
+        registrationStatus: { $in: ['confirmed', 'pending'] },
         checkInStatus: { $ne: 'checked_in' },
         virtualJoinStatus: { $ne: 'checked_in' },
         virtualSessionsAttended: { $not: { $elemMatch: {} } },
@@ -636,7 +730,7 @@ router.post('/my-passes/:id/cancel', protect, async (req, res, next) => {
 
     return res.status(200).json({
       success: true,
-      message: 'Visitor pass cancelled successfully.',
+      message: wasPending ? 'Pass request withdrawn successfully.' : 'Visitor pass cancelled successfully.',
       data: {
         registrationStatus: 'cancelled',
         passStatus: 'cancelled',
@@ -1080,14 +1174,22 @@ router.delete('/clear-seed', protect, authorize('super_admin', 'organizer'), asy
 // Update visitor registration status or check-in status
 router.put('/:id/status', protect, authorize('super_admin', 'organizer'), async (req, res, next) => {
   try {
-    const { registrationStatus, checkInStatus } = req.body;
-    const visitor = await Visitor.findById(req.params.id);
+    const registrationStatus = req.body.registrationStatus || req.body.status;
+    const { checkInStatus } = req.body;
+    const visitor = await Visitor.findById(req.params.id).populate('event', 'title slug city venue startDate endDate');
     if (!visitor) {
       return res.status(404).json({ success: false, error: 'Visitor not found' });
     }
 
     if (registrationStatus && ['confirmed', 'pending', 'cancelled', 'expired'].includes(registrationStatus)) {
       visitor.registrationStatus = registrationStatus;
+      if (registrationStatus === 'confirmed') {
+        if (!visitor.qrCode || visitor.qrCode.startsWith('visitexpo-')) {
+          visitor.qrCode = createVisitorQrCode();
+        }
+      } else if (registrationStatus === 'cancelled' || registrationStatus === 'pending') {
+        visitor.qrCode = '';
+      }
     }
 
     if (checkInStatus && ['checked_in', 'not_checked_in'].includes(checkInStatus)) {
@@ -1101,10 +1203,38 @@ router.put('/:id/status', protect, authorize('super_admin', 'organizer'), async 
 
     await visitor.save();
 
+    if (registrationStatus && visitor.event?.slug && visitor.email) {
+      const nextPassType =
+        visitor.registrationStatus === 'confirmed'
+          ? 'Standard Trade Visitor'
+          : visitor.registrationStatus === 'cancelled'
+            ? 'Cancelled'
+            : 'Pending Admin Approval';
+      try {
+        await EventEngagement.findOneAndUpdate(
+          { userEmail: visitor.email.toLowerCase(), eventSlug: String(visitor.event.slug).toLowerCase().trim() },
+          {
+            $set: {
+              status: visitor.registrationStatus === 'confirmed' ? 'active' : visitor.registrationStatus,
+              passType: nextPassType
+            }
+          }
+        );
+      } catch (_) {}
+    }
+
+    const { isExpired, passStatus } = await syncVisitorPassExpiration(visitor, visitor.event);
+    const serializedVisitor = {
+      ...(typeof visitor.toObject === 'function' ? visitor.toObject() : visitor),
+      passId: `VIS-${visitor._id.toString().toUpperCase()}`,
+      isExpired,
+      passStatus
+    };
+
     res.status(200).json({
       success: true,
       message: 'Visitor status updated successfully',
-      visitor
+      visitor: serializedVisitor
     });
   } catch (error) {
     next(error);

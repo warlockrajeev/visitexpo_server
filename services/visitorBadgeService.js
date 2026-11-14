@@ -6,7 +6,7 @@ export function createVisitorQrCode() {
 }
 
 export async function ensureVisitorQrCode(visitor) {
-  if (visitor.registrationStatus === 'cancelled') {
+  if (visitor.registrationStatus === 'cancelled' || visitor.registrationStatus === 'pending') {
     if (visitor.qrCode) {
       visitor.qrCode = '';
       if (typeof visitor.save === 'function') await visitor.save();

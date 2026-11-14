@@ -2584,7 +2584,8 @@ router.get('/pending-summary', async (req, res, next) => {
       pendingEvents,
       pendingFeatured,
       pendingBoothRequests,
-      pendingEventRequests
+      pendingEventRequests,
+      pendingPassRequests
     ] = await Promise.all([
       User.countDocuments({ role: 'organizer', isVerified: false }),
       Exhibitor.countDocuments({ status: 'pending' }),
@@ -2592,11 +2593,13 @@ router.get('/pending-summary', async (req, res, next) => {
       Event.countDocuments({ status: 'pending' }),
       FeaturedOrganizer.countDocuments({ status: 'pending' }),
       BoothRequest.countDocuments({ status: 'new' }),
-      EventRequest.countDocuments({ status: 'new' })
+      EventRequest.countDocuments({ status: 'new' }),
+      Visitor.countDocuments({ registrationStatus: 'pending' })
     ]);
 
     const pendingExhibitors = pendingExhibitorsCount;
-    const totalPending = pendingOrganizers + pendingExhibitors + pendingClaims + pendingEvents + pendingFeatured;
+    const totalPending =
+      pendingOrganizers + pendingExhibitors + pendingClaims + pendingEvents + pendingFeatured + pendingPassRequests;
 
     res.status(200).json({
       success: true,
@@ -2608,6 +2611,7 @@ router.get('/pending-summary', async (req, res, next) => {
         pendingFeatured,
         pendingBoothRequests,
         pendingEventRequests,
+        pendingPassRequests,
         totalPending
       }
     });
