@@ -764,6 +764,15 @@ let organizersCache = {
   timestamp: 0,
   ttl: 5 * 60 * 1000
 };
+let organizersInFlight = null;
+
+// Short-lived cache for unfiltered admin expo reports
+let expoReportsCache = {
+  data: null,
+  timestamp: 0,
+  ttl: 60 * 1000 // 60 seconds
+};
+let expoReportsInFlight = null;
 
 // Generate deterministic brand palette for dynamic organizers
 function getDynamicBrandColors(name) {
@@ -998,39 +1007,22 @@ export function parseWpLocation(rawLocation = '', rawCity = '') {
   };
 }
 
-export async function getAggregatedOrganizers(forceRefresh = false) {
-  const now = Date.now();
-  if (!forceRefresh && organizersCache.data && (now - organizersCache.timestamp < organizersCache.ttl)) {
-    return organizersCache.data;
-  }
-
-  const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-  const wpKey = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
-
-  let rawDocs = [];
-  // Only execute remote WordPress HTTP call if explicitly force-refreshed
-  if (forceRefresh) {
-    try {
-      const wpRes = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
-        headers: { 'X-VisitExpo-Key': wpKey },
-        signal: AbortSignal.timeout(5000)
-      });
-      if (wpRes.ok) {
-        const data = await wpRes.json();
-        rawDocs = data.data?.docs || [];
-      }
-    } catch (err) {
-      console.warn('[Admin] inspect-event-meta fetch failed for organizers, falling back to MongoDB:', err.message);
-    }
-  }
+async function _computeAggregatedOrganizers(forceRefresh = false) {
+  const { default: wpDirectorySync } = await import('../services/WordPressDirectorySyncService.js');
 
   const [mongoEvents, mongoOrgs, deletedOrgs, deletedEvents] = await Promise.all([
-    Event.find()
-      .select('title slug description venue city country startDate endDate timings banner wpPostId wpUrl isClaimed claimedBy organizer orgName orgEmail orgPhone orgWebsite orgDesc orgLogo categories')
-      .lean(),
-    Organization.find().lean(),
-    DeletedOrganizer.find().lean(),
-    DeletedEvent.find().lean()
+    wpDirectorySync.getFastStoredEvents({ forceRefresh }).catch(async (err) => {
+      console.warn('[Admin] getFastStoredEvents fallback for organizers:', err.message);
+      return Event.find(
+        { status: { $ne: 'cancelled' } },
+        'title slug venue city country startDate endDate timings banner wpPostId wpUrl isClaimed claimedBy organizer orgName orgEmail orgPhone orgWebsite orgDesc orgLogo categories status'
+      )
+        .limit(3500)
+        .lean();
+    }),
+    Organization.find().select('name logo website description contact').lean(),
+    DeletedOrganizer.find().select('name slugId').lean(),
+    DeletedEvent.find().select('eventId slug wpPostId title').lean()
   ]);
 
   const deletedNames = new Set((deletedOrgs || []).map(d => (d.name || '').toLowerCase().trim()));
@@ -1078,10 +1070,12 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     };
   });
 
-  // Merge registered MongoDB Organizations
+  // Merge registered MongoDB Organizations & index by ID for O(1) lookup
+  const mongoOrgsById = new Map();
   mongoOrgs.forEach(mo => {
+    mongoOrgsById.set(String(mo._id), mo);
     const moKey = getOrgKey(mo.name);
-    const matchedKnown = orgMap[moKey] || Object.values(orgMap).find(o => 
+    const matchedKnown = orgMap[moKey] || Object.values(orgMap).find(o =>
       o.name.toLowerCase() === mo.name.toLowerCase() ||
       (mo.name.toLowerCase().includes('global tech') && o.name.toLowerCase().includes('global tech'))
     );
@@ -1127,105 +1121,25 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
     return clean;
   }
 
-  // Process WordPress Docs
-  rawDocs.forEach((d, idx) => {
-    if (isEventDeleted(d.id, d.slug, d.title, d.id)) return;
-    const m = d.meta || {};
-    const startTs = m.ovaem_date_start_time?.[0];
-    const endTs = m.ovaem_date_end_time?.[0];
-    const rawLoc = m.ovaem_address_event?.[0] || m.ovaem_event_map_address?.[0] || m.ovaem_event_map_name?.[0] || m.ovaem_address?.[0] || m.ovaem_venue?.[0] || '';
-    const loc = parseWpLocation(rawLoc, m.ovaem_city?.[0]);
-    const desc = m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || '';
-    const cat = inferCategory(d.title, desc);
-
-    const rawOrgName = m.ovaem_org_name?.[0] || d.organizer || 'Verified Organizer';
-    const resolvedName = resolveOrganizer(rawOrgName);
-    const orgKey = getOrgKey(resolvedName);
-
-    if (!orgMap[orgKey]) {
-      const colors = getDynamicBrandColors(resolvedName);
-      orgMap[orgKey] = {
-        id: orgKey,
-        name: resolvedName,
-        shortName: resolvedName,
-        brandColor: colors.brand,
-        accentColor: colors.accent,
-        website: m.ovaem_org_website?.[0] || '',
-        logoUrl: null,
-        badge: resolvedName === 'VisitExpo Verified Partner Expos' ? 'Partner Fairs' : 'Trade Organizer',
-        type: resolvedName === 'VisitExpo Verified Partner Expos' ? 'national' : 'independent',
-        scope: m.ovaem_org_desc?.[0] || `Official trade organizer promoting leading industrial events across India.`,
-        email: m.ovaem_org_email?.[0] || '',
-        phone: m.ovaem_org_phone?.[0] || '',
-        isRegisteredTenant: false,
-        events: []
-      };
-    } else {
-      if (!orgMap[orgKey].website && m.ovaem_org_website?.[0]) {
-        orgMap[orgKey].website = m.ovaem_org_website[0];
-      }
-      if (!orgMap[orgKey].email && m.ovaem_org_email?.[0]) {
-        orgMap[orgKey].email = m.ovaem_org_email[0];
-      }
-      if (!orgMap[orgKey].phone && m.ovaem_org_phone?.[0]) {
-        orgMap[orgKey].phone = m.ovaem_org_phone[0];
-      }
-      if ((!orgMap[orgKey].scope || orgMap[orgKey].scope.length < 30) && m.ovaem_org_desc?.[0]) {
-        orgMap[orgKey].scope = m.ovaem_org_desc[0];
-      }
-    }
-
-    const realImg = getWpImage(d.slug, d.id, d.id, d.title);
-    const evtObj = {
-      id: String(d.id || `wp-${idx}`),
-      title: d.title || 'Exhibition Event',
-      slug: d.slug,
-      category: cat,
-      venue: loc.venue,
-      address: loc.address,
-      location: loc.location,
-      city: loc.city,
-      country: loc.country,
-      image: realImg,
-      banner: realImg,
-      startDate: startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000).toISOString() : null,
-      endDate: endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000).toISOString() : null,
-      dates: startTs ? new Date(parseInt(startTs) * 1000).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }) : 'Upcoming 2026',
-      organizer: resolvedName,
-      status: 'published',
-      wpUrl: `https://visitexpo.in/event/${d.slug}/`,
-      mapUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc.address || loc.venue)}`,
-      isWordPress: true
-    };
-
-    orgMap[orgKey].events.push(evtObj);
-  });
-
-  // Process MongoDB Events with slug deduplication
+  // Process Events with slug deduplication
   const processedSlugs = new Set();
-  rawDocs.forEach(d => {
-    if (d.slug) processedSlugs.add(d.slug);
-  });
 
-  mongoEvents.forEach(me => {
-    // If this event was deleted, skip
+  (mongoEvents || []).forEach(me => {
     if (isEventDeleted(me._id, me.slug, me.title, me.wpPostId)) return;
 
-    // If this event was already ingested from WordPress, skip duplicating
     if (me.slug && processedSlugs.has(me.slug)) return;
     if (me.slug) processedSlugs.add(me.slug);
 
-    // Resolve Mongo event organizer from me.orgName or me.organizer (Organization ref)
     let orgName = me.orgName || me.organizerName;
-    const orgRefId = me.organizer || me.organization;
+    const orgRefId = me.organizer && typeof me.organizer === 'object' ? me.organizer._id : me.organizer || me.organization;
     if (orgRefId) {
-      const parentOrg = mongoOrgs.find(o => String(o._id) === String(orgRefId));
+      const parentOrg = mongoOrgsById.get(String(orgRefId));
       if (parentOrg && parentOrg.name) {
         orgName = parentOrg.name;
       }
     }
 
-    if (!orgName || orgName === 'Platform Tenant' || orgName === 'Verified Organizer') {
+    if (!orgName || orgName === 'Platform Tenant' || orgName === 'Verified Organizer' || orgName === 'VisitExpo Verified Organizer') {
       orgName = 'VisitExpo Verified Partner Expos';
     }
 
@@ -1242,8 +1156,8 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
         accentColor: colors.accent,
         website: me.orgWebsite || '',
         logoUrl: me.orgLogo || null,
-        badge: 'Platform Tenant',
-        type: 'independent',
+        badge: resolvedName === 'VisitExpo Verified Partner Expos' ? 'Partner Fairs' : 'Platform Tenant',
+        type: resolvedName === 'VisitExpo Verified Partner Expos' ? 'national' : 'independent',
         scope: me.orgDesc || 'Platform registered organizer hosting verified conventions.',
         email: me.orgEmail || '',
         phone: me.orgPhone || '',
@@ -1270,7 +1184,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       id: String(me._id),
       title: me.title,
       slug: me.slug,
-      category: Array.isArray(me.categories) && me.categories[0] ? me.categories[0] : (me.categories || 'Trade & Industry'),
+      category: Array.isArray(me.categories) && me.categories[0] ? me.categories[0] : (me.category || me.categories || 'Trade & Industry'),
       venue: me.venue || 'Convention Center',
       city: me.city || 'India',
       country: me.country || 'India',
@@ -1288,7 +1202,7 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
       organizerId: me.claimedBy ? String(me.claimedBy) : (orgRefId ? String(orgRefId) : (orgMap[orgKey].tenantId || orgKey)),
       status: me.status || 'published',
       wpUrl: me.wpUrl || '',
-      isWordPress: false
+      isWordPress: Boolean(me.wpPostId)
     });
   });
 
@@ -1350,6 +1264,40 @@ export async function getAggregatedOrganizers(forceRefresh = false) {
   };
 
   return result;
+}
+
+export async function getAggregatedOrganizers(forceRefresh = false) {
+  const now = Date.now();
+  const ttl = organizersCache.ttl || 5 * 60 * 1000;
+  const isFresh = Boolean(organizersCache.data) && (now - organizersCache.timestamp < ttl);
+
+  if (!forceRefresh && isFresh) {
+    return organizersCache.data;
+  }
+
+  if (!forceRefresh && organizersCache.data) {
+    if (!organizersInFlight) {
+      organizersInFlight = _computeAggregatedOrganizers(false)
+        .catch((err) => {
+          console.warn('[Admin] Background organizers refresh failed:', err.message);
+          return organizersCache.data;
+        })
+        .finally(() => {
+          organizersInFlight = null;
+        });
+    }
+    return organizersCache.data;
+  }
+
+  if (organizersInFlight) {
+    return organizersInFlight;
+  }
+
+  organizersInFlight = _computeAggregatedOrganizers(forceRefresh).finally(() => {
+    organizersInFlight = null;
+  });
+
+  return organizersInFlight;
 }
 
 const router = express.Router();
@@ -3147,6 +3095,7 @@ router.get('/events', async (req, res, next) => {
 
     const [events, totalEvents, publishedCount, draftCount, cancelledCount, wpSyncedCount, filteredTotal] = await Promise.all([
       Event.find(query)
+        .select('title slug venue city country startDate endDate timings banner orgName orgLogo orgEmail orgWebsite category categories organizer isClaimed wpPostId wpUrl status isFreeEvent ticketingMode freePassQuota freePassUntil paidTicketPrice currency updatedAt createdAt')
         .populate('organizer', 'name logo website email contact')
         .sort({ updatedAt: -1 })
         .skip(skip)
@@ -4633,11 +4582,440 @@ async function buildExpoDetailedReports(eventsList = [], { granularOnly = false 
 
 // @desc    Get all expos with aggregated report metrics for Admin Reports Console
 // @route   GET /api/admin/expo-reports
+async function _computeExpoReports(query = {}, { isUnfiltered = false, deletedSlugSet = null, deletedIdSet = null } = {}) {
+  const { default: wpDirectorySync } = await import('../services/WordPressDirectorySyncService.js');
+
+  const eventsPromise = isUnfiltered
+    ? wpDirectorySync.getFastStoredEvents()
+        .then((events) => {
+          if ((!deletedSlugSet || deletedSlugSet.size === 0) && (!deletedIdSet || deletedIdSet.size === 0)) {
+            return events || [];
+          }
+          return (events || []).filter((ev) => {
+            const idStr = ev._id ? String(ev._id) : '';
+            const slugStr = (ev.slug || '').toLowerCase().trim();
+            if (deletedIdSet && idStr && deletedIdSet.has(idStr)) return false;
+            if (deletedSlugSet && slugStr && deletedSlugSet.has(slugStr)) return false;
+            return true;
+          });
+        })
+        .catch(async (err) => {
+        console.warn('[Admin] getFastStoredEvents fallback for expo-reports:', err.message);
+        return Event.aggregate([
+          { $match: query },
+          { $sort: { startDate: 1, updatedAt: -1 } },
+          {
+            $project: {
+              title: 1,
+              slug: 1,
+              description: { $substrCP: [{ $ifNull: ['$description', ''] }, 0, 220] },
+              banner: 1,
+              categories: 1,
+              venue: 1,
+              city: 1,
+              country: 1,
+              startDate: 1,
+              endDate: 1,
+              timings: 1,
+              eventType: 1,
+              status: 1,
+              isClaimed: 1,
+              claimedAt: 1,
+              wpPostId: 1,
+              wpUrl: 1,
+              orgName: 1,
+              isFreeEvent: 1,
+              paidTicketPrice: 1,
+              currency: 1,
+              organizer: 1,
+              createdBy: 1,
+              createdAt: 1,
+              updatedAt: 1
+            }
+          }
+        ]);
+      })
+    : Event.aggregate([
+        { $match: query },
+        { $sort: { startDate: 1, updatedAt: -1 } },
+        {
+          $project: {
+            title: 1,
+            slug: 1,
+            description: { $substrCP: [{ $ifNull: ['$description', ''] }, 0, 220] },
+            banner: 1,
+            categories: 1,
+            venue: 1,
+            city: 1,
+            country: 1,
+            startDate: 1,
+            endDate: 1,
+            timings: 1,
+            eventType: 1,
+            status: 1,
+            isClaimed: 1,
+            claimedAt: 1,
+            wpPostId: 1,
+            wpUrl: 1,
+            website: 1,
+            orgName: 1,
+            orgEmail: 1,
+            orgPhone: 1,
+            orgWebsite: 1,
+            isFreeEvent: 1,
+            paidTicketPrice: 1,
+            currency: 1,
+            organizer: 1,
+            createdBy: 1,
+            createdAt: 1,
+            updatedAt: 1,
+            schedulesCount: { $size: { $ifNull: ['$schedules', []] } },
+            faqsCount: { $size: { $ifNull: ['$faqsList', []] } },
+            speakersCount: { $size: { $ifNull: ['$speakers', []] } },
+            embeddedExhibitorsCount: {
+              $add: [
+                { $size: { $ifNull: ['$exhibitors', []] } },
+                { $size: { $ifNull: ['$virtualBooths', []] } }
+              ]
+            },
+            embeddedSponsorsCount: { $size: { $ifNull: ['$sponsorsList', []] } }
+          }
+        }
+      ]);
+
+  const [
+    rawEvents,
+    visitorAgg,
+    leadAgg,
+    exhibitorAgg,
+    engagementBySlugAgg,
+    engagementByIdAgg,
+    orderAgg,
+    ticketAgg,
+    campaignAgg,
+    reviewAgg,
+    sponsorAgg
+  ] = await Promise.all([
+    eventsPromise,
+    Visitor.aggregate([
+      {
+        $group: {
+          _id: '$event',
+          total: { $sum: 1 },
+          checkedIn: {
+            $sum: {
+              $cond: [
+                { $or: [{ $eq: ['$checkInStatus', 'checked_in'] }, { $eq: ['$virtualJoinStatus', 'checked_in'] }] },
+                1,
+                0
+              ]
+            }
+          }
+        }
+      }
+    ]),
+    Lead.aggregate([
+      {
+        $group: {
+          _id: '$event',
+          total: { $sum: 1 },
+          qualified: {
+            $sum: {
+              $cond: [{ $in: ['$status', ['qualified', 'proposal', 'won']] }, 1, 0]
+            }
+          }
+        }
+      }
+    ]),
+    Exhibitor.aggregate([
+      {
+        $group: {
+          _id: '$event',
+          total: { $sum: 1 },
+          approved: {
+            $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] }
+          }
+        }
+      }
+    ]),
+    EventEngagement.aggregate([
+      {
+        $group: {
+          _id: '$eventSlug',
+          total: { $sum: 1 },
+          interested: {
+            $sum: { $cond: [{ $in: ['$type', ['interested', 'both']] }, 1, 0] }
+          },
+          followers: {
+            $sum: { $cond: [{ $in: ['$type', ['follower', 'both']] }, 1, 0] }
+          }
+        }
+      }
+    ]),
+    EventEngagement.aggregate([
+      {
+        $group: {
+          _id: '$eventId',
+          total: { $sum: 1 },
+          interested: {
+            $sum: { $cond: [{ $in: ['$type', ['interested', 'both']] }, 1, 0] }
+          },
+          followers: {
+            $sum: { $cond: [{ $in: ['$type', ['follower', 'both']] }, 1, 0] }
+          }
+        }
+      }
+    ]),
+    Order.aggregate([
+      {
+        $group: {
+          _id: '$event',
+          totalOrders: { $sum: 1 },
+          completedOrders: {
+            $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] }
+          },
+          revenue: {
+            $sum: { $cond: [{ $eq: ['$status', 'completed'] }, '$totalAmount', 0] }
+          }
+        }
+      }
+    ]),
+    Ticket.aggregate([
+      {
+        $group: {
+          _id: '$event',
+          tiers: { $sum: 1 },
+          sold: { $sum: '$soldCount' }
+        }
+      }
+    ]),
+    Campaign.aggregate([
+      {
+        $group: {
+          _id: '$event',
+          total: { $sum: 1 },
+          sent: { $sum: '$sentCount' }
+        }
+      }
+    ]),
+    Review.aggregate([
+      {
+        $group: {
+          _id: '$eventSlug',
+          total: { $sum: 1 },
+          avgRating: { $avg: '$rating' }
+        }
+      }
+    ]),
+    Sponsor.aggregate([
+      {
+        $group: {
+          _id: { event: '$event', eventId: '$eventId', eventTitle: '$eventTitle' },
+          total: { $sum: 1 }
+        }
+      }
+    ])
+  ]);
+
+  // Batch-resolve distinct organizer & createdBy references in two tiny lookups
+  const orgIds = [...new Set((rawEvents || []).map((e) => (e.organizer && mongoose.isValidObjectId(e.organizer) ? String(e.organizer) : null)).filter(Boolean))];
+  const userIds = [...new Set((rawEvents || []).map((e) => (e.createdBy && mongoose.isValidObjectId(e.createdBy) ? String(e.createdBy) : null)).filter(Boolean))];
+  const [orgsList, usersList] = await Promise.all([
+    orgIds.length > 0 ? Organization.find({ _id: { $in: orgIds } }).select('name logo website email contact').lean().catch(() => []) : [],
+    userIds.length > 0 ? User.find({ _id: { $in: userIds } }).select('name email phone').lean().catch(() => []) : []
+  ]);
+  const orgById = new Map((orgsList || []).map((o) => [String(o._id), o]));
+  const userById = new Map((usersList || []).map((u) => [String(u._id), u]));
+
+  const toMap = (agg) => {
+    const m = new Map();
+    for (const item of agg || []) {
+      if (item._id !== null && item._id !== undefined) {
+        m.set(String(item._id).toLowerCase().trim(), item);
+      }
+    }
+    return m;
+  };
+
+  const visitorMap = toMap(visitorAgg);
+  const leadMap = toMap(leadAgg);
+  const exhibitorMap = toMap(exhibitorAgg);
+  const engSlugMap = toMap(engagementBySlugAgg);
+  const engIdMap = toMap(engagementByIdAgg);
+  const orderMap = toMap(orderAgg);
+  const ticketMap = toMap(ticketAgg);
+  const campaignMap = toMap(campaignAgg);
+  const reviewMap = toMap(reviewAgg);
+
+  // Pre-index sponsor counts by event/eventId and eventTitle for O(1) lookup across 2600+ expos
+  const sponsorByIdCount = new Map();
+  const sponsorByTitleCount = new Map();
+  for (const sItem of sponsorAgg || []) {
+    const g = sItem._id || {};
+    const cnt = sItem.total || 0;
+    if (g.event) {
+      const k = String(g.event).toLowerCase().trim();
+      sponsorByIdCount.set(k, (sponsorByIdCount.get(k) || 0) + cnt);
+    }
+    if (g.eventId) {
+      const k = String(g.eventId).toLowerCase().trim();
+      sponsorByIdCount.set(k, (sponsorByIdCount.get(k) || 0) + cnt);
+    }
+    if (g.eventTitle) {
+      const k = String(g.eventTitle).toLowerCase().trim();
+      sponsorByTitleCount.set(k, (sponsorByTitleCount.get(k) || 0) + cnt);
+    }
+  }
+
+  let totalVisitorsAll = 0;
+  let totalCheckedInAll = 0;
+  let totalAttendeesAll = 0;
+  let totalLeadsAll = 0;
+  let totalExhibitorsAll = 0;
+  let totalSponsorsAll = 0;
+  let totalOrdersAll = 0;
+  let totalRevenueAll = 0;
+
+  const expos = (rawEvents || []).map(ev => {
+    const idKey = String(ev._id || '').toLowerCase().trim();
+    const wpKey = String(ev.wpPostId || '').toLowerCase().trim();
+    const slugKey = (ev.slug || '').toLowerCase().trim();
+    const titleLower = (ev.title || '').toLowerCase().trim();
+    const orgDoc = (ev.organizer && mongoose.isValidObjectId(ev.organizer)) ? orgById.get(String(ev.organizer)) : null;
+    const creatorDoc = (ev.createdBy && mongoose.isValidObjectId(ev.createdBy)) ? userById.get(String(ev.createdBy)) : null;
+
+    const vStat = visitorMap.get(idKey) || { total: 0, checkedIn: 0 };
+    const lStat = leadMap.get(idKey) || { total: 0, qualified: 0 };
+    const exStat = exhibitorMap.get(idKey) || { total: 0, approved: 0 };
+    const ordStat = orderMap.get(idKey) || { totalOrders: 0, completedOrders: 0, revenue: 0 };
+    const tktStat = ticketMap.get(idKey) || { tiers: 0, sold: 0 };
+    const cmpStat = campaignMap.get(idKey) || { total: 0, sent: 0 };
+    const revStat = (slugKey && reviewMap.get(slugKey)) || { total: 0, avgRating: 0 };
+
+    const engSlugStat = (slugKey && engSlugMap.get(slugKey)) || { total: 0, interested: 0, followers: 0 };
+    const engIdStat = (idKey && engIdMap.get(idKey)) || (wpKey && engIdMap.get(wpKey)) || { total: 0, interested: 0, followers: 0 };
+    const attendeesCount = Math.max(engSlugStat.total, engIdStat.total);
+    const interestedCount = Math.max(engSlugStat.interested, engIdStat.interested);
+    const followersCount = Math.max(engSlugStat.followers, engIdStat.followers);
+
+    const exhibitorsCount = exStat.total + (ev.embeddedExhibitorsCount || 0);
+
+    const dbSponsorsCount =
+      (idKey ? sponsorByIdCount.get(idKey) || 0 : 0) +
+      (wpKey && wpKey !== idKey ? sponsorByIdCount.get(wpKey) || 0 : 0) +
+      (titleLower ? sponsorByTitleCount.get(titleLower) || 0 : 0);
+    const sponsorsCount = dbSponsorsCount + (ev.embeddedSponsorsCount || 0);
+
+    totalVisitorsAll += vStat.total;
+    totalCheckedInAll += vStat.checkedIn;
+    totalAttendeesAll += attendeesCount;
+    totalLeadsAll += lStat.total;
+    totalExhibitorsAll += exhibitorsCount;
+    totalSponsorsAll += sponsorsCount;
+    totalOrdersAll += ordStat.totalOrders;
+    totalRevenueAll += ordStat.revenue;
+
+    return {
+      _id: ev._id,
+      title: ev.title || 'Untitled Exhibition',
+      slug: ev.slug || '',
+      description: ev.description || '',
+      banner: ev.banner || getWpImage(ev.slug, ev._id, ev.wpPostId, ev.title) || null,
+      categories: Array.isArray(ev.categories) && ev.categories.length > 0 ? ev.categories : ['Trade & Industry'],
+      category: Array.isArray(ev.categories) && ev.categories[0] ? ev.categories[0] : 'Trade & Industry',
+      venue: ev.venue || '',
+      city: ev.city || 'India',
+      country: ev.country || 'India',
+      startDate: ev.startDate || null,
+      endDate: ev.endDate || null,
+      timings: ev.timings || '09:00 AM - 06:00 PM',
+      eventType: ev.eventType || 'hybrid',
+      status: ev.status || 'published',
+      isClaimed: !!ev.isClaimed,
+      claimedAt: ev.claimedAt || null,
+      wpPostId: ev.wpPostId || '',
+      wpUrl: ev.wpUrl || (ev.slug ? `https://visitexpo.in/event/${ev.slug}/` : ''),
+      website: ev.website || ev.orgWebsite || orgDoc?.website || '',
+      orgName: ev.orgName || orgDoc?.name || (typeof ev.organizer === 'string' && !mongoose.isValidObjectId(ev.organizer) ? ev.organizer : '') || 'VisitExpo Verified Organizer',
+      orgEmail: ev.orgEmail || orgDoc?.email || creatorDoc?.email || '',
+      orgPhone: ev.orgPhone || orgDoc?.contact?.phone || creatorDoc?.phone || '',
+      orgWebsite: ev.orgWebsite || orgDoc?.website || '',
+      isFreeEvent: ev.isFreeEvent !== false,
+      paidTicketPrice: Number(ev.paidTicketPrice) || 0,
+      currency: ev.currency || 'INR',
+      createdAt: ev.createdAt,
+      updatedAt: ev.updatedAt,
+      metrics: {
+        visitorsCount: vStat.total,
+        checkedInCount: vStat.checkedIn,
+        attendeesCount,
+        interestedCount,
+        followersCount,
+        leadsCount: lStat.total,
+        qualifiedLeadsCount: lStat.qualified,
+        exhibitorsCount,
+        sponsorsCount,
+        ticketTiersCount: tktStat.tiers,
+        ordersCount: ordStat.totalOrders,
+        completedOrdersCount: ordStat.completedOrders,
+        ticketsSoldCount: Math.max(tktStat.sold, ordStat.completedOrders),
+        ticketRevenue: ordStat.revenue,
+        campaignsCount: cmpStat.total,
+        reviewsCount: revStat.total,
+        avgRating: revStat.avgRating ? Number(revStat.avgRating.toFixed(1)) : 0,
+        schedulesCount: ev.schedulesCount || 0,
+        faqsCount: ev.faqsCount || 0,
+        speakersCount: ev.speakersCount || 0,
+        totalRecords:
+          vStat.total +
+          attendeesCount +
+          lStat.total +
+          exhibitorsCount +
+          sponsorsCount +
+          ordStat.totalOrders +
+          cmpStat.total +
+          revStat.total
+      }
+    };
+  });
+
+  return {
+    expos,
+    summary: {
+      totalExpos: expos.length,
+      publishedExpos: expos.filter(e => e.status === 'published').length,
+      draftExpos: expos.filter(e => e.status === 'draft').length,
+      claimedExpos: expos.filter(e => e.isClaimed).length,
+      wpSyncedExpos: expos.filter(e => !!e.wpPostId).length,
+      totalVisitors: totalVisitorsAll,
+      totalCheckedIn: totalCheckedInAll,
+      totalAttendees: totalAttendeesAll,
+      totalLeads: totalLeadsAll,
+      totalExhibitors: totalExhibitorsAll,
+      totalSponsors: totalSponsorsAll,
+      totalOrders: totalOrdersAll,
+      totalRevenue: totalRevenueAll
+    }
+  };
+}
+
 router.get('/expo-reports', async (req, res, next) => {
   try {
-    const { status, category, city, search } = req.query;
-    const query = {};
+    const { status, category, city, search, refresh } = req.query;
+    const isUnfiltered =
+      (!status || status === 'all') &&
+      (!category || category === 'all') &&
+      (!city || city === 'all') &&
+      (!search || !search.trim());
+    const now = Date.now();
 
+    if (isUnfiltered && refresh !== 'true' && expoReportsCache.data) {
+      if (now - expoReportsCache.timestamp < expoReportsCache.ttl) {
+        return res.status(200).json({ success: true, data: expoReportsCache.data });
+      }
+    }
+
+    const query = {};
     if (status && status !== 'all') {
       query.status = status;
     }
@@ -4661,328 +5039,61 @@ router.get('/expo-reports', async (req, res, next) => {
     }
 
     // Exclude permanently deleted events
+    let deletedSlugSet = null;
+    let deletedIdSet = null;
     try {
       const deletedDocs = await DeletedEvent.find().select('slug title eventId').lean();
       if (deletedDocs && deletedDocs.length > 0) {
         const delSlugs = deletedDocs.map(d => d.slug).filter(Boolean);
         const delIds = deletedDocs.map(d => d.eventId).filter(id => id && mongoose.isValidObjectId(id));
-        if (delIds.length > 0) query._id = { $nin: delIds };
-        if (delSlugs.length > 0) query.slug = { $nin: delSlugs };
+        if (delIds.length > 0) {
+          query._id = { $nin: delIds };
+          deletedIdSet = new Set(delIds.map(String));
+        }
+        if (delSlugs.length > 0) {
+          query.slug = { $nin: delSlugs };
+          deletedSlugSet = new Set(delSlugs.map((s) => String(s).toLowerCase().trim()));
+        }
       }
     } catch {}
 
-    const [
-      events,
-      visitorAgg,
-      leadAgg,
-      exhibitorAgg,
-      engagementBySlugAgg,
-      engagementByIdAgg,
-      orderAgg,
-      ticketAgg,
-      campaignAgg,
-      reviewAgg,
-      sponsorAgg
-    ] = await Promise.all([
-      Event.find(query)
-        .populate('organizer', 'name logo website email contact')
-        .populate('createdBy', 'name email phone')
-        .sort({ startDate: 1, updatedAt: -1 })
-        .lean(),
-      Visitor.aggregate([
-        {
-          $group: {
-            _id: '$event',
-            total: { $sum: 1 },
-            checkedIn: {
-              $sum: {
-                $cond: [
-                  { $or: [{ $eq: ['$checkInStatus', 'checked_in'] }, { $eq: ['$virtualJoinStatus', 'checked_in'] }] },
-                  1,
-                  0
-                ]
-              }
-            }
-          }
+    if (isUnfiltered) {
+      if (refresh !== 'true' && expoReportsCache.data) {
+        if (!expoReportsInFlight) {
+          expoReportsInFlight = _computeExpoReports(query, { isUnfiltered: true, deletedSlugSet, deletedIdSet })
+            .then((fresh) => {
+              expoReportsCache = { data: fresh, timestamp: Date.now(), ttl: 60 * 1000 };
+              return fresh;
+            })
+            .catch((err) => {
+              console.warn('[Admin] Background expo-reports refresh failed:', err.message);
+              return expoReportsCache.data;
+            })
+            .finally(() => {
+              expoReportsInFlight = null;
+            });
         }
-      ]),
-      Lead.aggregate([
-        {
-          $group: {
-            _id: '$event',
-            total: { $sum: 1 },
-            qualified: {
-              $sum: {
-                $cond: [{ $in: ['$status', ['qualified', 'proposal', 'won']] }, 1, 0]
-              }
-            }
-          }
-        }
-      ]),
-      Exhibitor.aggregate([
-        {
-          $group: {
-            _id: '$event',
-            total: { $sum: 1 },
-            approved: {
-              $sum: { $cond: [{ $eq: ['$status', 'approved'] }, 1, 0] }
-            }
-          }
-        }
-      ]),
-      EventEngagement.aggregate([
-        {
-          $group: {
-            _id: '$eventSlug',
-            total: { $sum: 1 },
-            interested: {
-              $sum: { $cond: [{ $in: ['$type', ['interested', 'both']] }, 1, 0] }
-            },
-            followers: {
-              $sum: { $cond: [{ $in: ['$type', ['follower', 'both']] }, 1, 0] }
-            }
-          }
-        }
-      ]),
-      EventEngagement.aggregate([
-        {
-          $group: {
-            _id: '$eventId',
-            total: { $sum: 1 },
-            interested: {
-              $sum: { $cond: [{ $in: ['$type', ['interested', 'both']] }, 1, 0] }
-            },
-            followers: {
-              $sum: { $cond: [{ $in: ['$type', ['follower', 'both']] }, 1, 0] }
-            }
-          }
-        }
-      ]),
-      Order.aggregate([
-        {
-          $group: {
-            _id: '$event',
-            totalOrders: { $sum: 1 },
-            completedOrders: {
-              $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] }
-            },
-            revenue: {
-              $sum: { $cond: [{ $eq: ['$status', 'completed'] }, '$totalAmount', 0] }
-            }
-          }
-        }
-      ]),
-      Ticket.aggregate([
-        {
-          $group: {
-            _id: '$event',
-            tiers: { $sum: 1 },
-            sold: { $sum: '$soldCount' }
-          }
-        }
-      ]),
-      Campaign.aggregate([
-        {
-          $group: {
-            _id: '$event',
-            total: { $sum: 1 },
-            sent: { $sum: '$sentCount' }
-          }
-        }
-      ]),
-      Review.aggregate([
-        {
-          $group: {
-            _id: '$eventSlug',
-            total: { $sum: 1 },
-            avgRating: { $avg: '$rating' }
-          }
-        }
-      ]),
-      Sponsor.aggregate([
-        {
-          $group: {
-            _id: { event: '$event', eventId: '$eventId', eventTitle: '$eventTitle' },
-            total: { $sum: 1 }
-          }
-        }
-      ])
-    ]);
+        return res.status(200).json({ success: true, data: expoReportsCache.data });
+      }
 
-    const toMap = (agg) => {
-      const m = new Map();
-      for (const item of agg || []) {
-        if (item._id !== null && item._id !== undefined) {
-          m.set(String(item._id).toLowerCase().trim(), item);
-        }
+      if (!expoReportsInFlight) {
+        expoReportsInFlight = _computeExpoReports(query, { isUnfiltered: true, deletedSlugSet, deletedIdSet })
+          .then((fresh) => {
+            expoReportsCache = { data: fresh, timestamp: Date.now(), ttl: 60 * 1000 };
+            return fresh;
+          })
+          .finally(() => {
+            expoReportsInFlight = null;
+          });
       }
-      return m;
-    };
-
-    const visitorMap = toMap(visitorAgg);
-    const leadMap = toMap(leadAgg);
-    const exhibitorMap = toMap(exhibitorAgg);
-    const engSlugMap = toMap(engagementBySlugAgg);
-    const engIdMap = toMap(engagementByIdAgg);
-    const orderMap = toMap(orderAgg);
-    const ticketMap = toMap(ticketAgg);
-    const campaignMap = toMap(campaignAgg);
-    const reviewMap = toMap(reviewAgg);
-
-    // Pre-index sponsor counts by event/eventId and eventTitle for O(1) lookup across 2600+ expos
-    const sponsorByIdCount = new Map();
-    const sponsorByTitleCount = new Map();
-    for (const sItem of sponsorAgg || []) {
-      const g = sItem._id || {};
-      const cnt = sItem.total || 0;
-      if (g.event) {
-        const k = String(g.event).toLowerCase().trim();
-        sponsorByIdCount.set(k, (sponsorByIdCount.get(k) || 0) + cnt);
-      }
-      if (g.eventId) {
-        const k = String(g.eventId).toLowerCase().trim();
-        sponsorByIdCount.set(k, (sponsorByIdCount.get(k) || 0) + cnt);
-      }
-      if (g.eventTitle) {
-        const k = String(g.eventTitle).toLowerCase().trim();
-        sponsorByTitleCount.set(k, (sponsorByTitleCount.get(k) || 0) + cnt);
-      }
+      const data = await expoReportsInFlight;
+      return res.status(200).json({ success: true, data });
     }
 
-    // Summary accumulators
-    let totalVisitorsAll = 0;
-    let totalCheckedInAll = 0;
-    let totalAttendeesAll = 0;
-    let totalLeadsAll = 0;
-    let totalExhibitorsAll = 0;
-    let totalSponsorsAll = 0;
-    let totalOrdersAll = 0;
-    let totalRevenueAll = 0;
-
-    const expos = events.map(ev => {
-      const idKey = String(ev._id || '').toLowerCase().trim();
-      const wpKey = String(ev.wpPostId || '').toLowerCase().trim();
-      const slugKey = (ev.slug || '').toLowerCase().trim();
-      const titleLower = (ev.title || '').toLowerCase().trim();
-
-      const vStat = visitorMap.get(idKey) || { total: 0, checkedIn: 0 };
-      const lStat = leadMap.get(idKey) || { total: 0, qualified: 0 };
-      const exStat = exhibitorMap.get(idKey) || { total: 0, approved: 0 };
-      const ordStat = orderMap.get(idKey) || { totalOrders: 0, completedOrders: 0, revenue: 0 };
-      const tktStat = ticketMap.get(idKey) || { tiers: 0, sold: 0 };
-      const cmpStat = campaignMap.get(idKey) || { total: 0, sent: 0 };
-      const revStat = (slugKey && reviewMap.get(slugKey)) || { total: 0, avgRating: 0 };
-
-      const engSlugStat = (slugKey && engSlugMap.get(slugKey)) || { total: 0, interested: 0, followers: 0 };
-      const engIdStat = (idKey && engIdMap.get(idKey)) || (wpKey && engIdMap.get(wpKey)) || { total: 0, interested: 0, followers: 0 };
-      const attendeesCount = Math.max(engSlugStat.total, engIdStat.total);
-      const interestedCount = Math.max(engSlugStat.interested, engIdStat.interested);
-      const followersCount = Math.max(engSlugStat.followers, engIdStat.followers);
-
-      const embeddedExhibitorsCount = (Array.isArray(ev.exhibitors) ? ev.exhibitors.length : 0) +
-        (Array.isArray(ev.virtualBooths) ? ev.virtualBooths.length : 0);
-      const exhibitorsCount = exStat.total + embeddedExhibitorsCount;
-
-      const dbSponsorsCount =
-        (idKey ? sponsorByIdCount.get(idKey) || 0 : 0) +
-        (wpKey && wpKey !== idKey ? sponsorByIdCount.get(wpKey) || 0 : 0) +
-        (titleLower ? sponsorByTitleCount.get(titleLower) || 0 : 0);
-      const embeddedSponsorsCount = Array.isArray(ev.sponsorsList) ? ev.sponsorsList.length : 0;
-      const sponsorsCount = dbSponsorsCount + embeddedSponsorsCount;
-
-      totalVisitorsAll += vStat.total;
-      totalCheckedInAll += vStat.checkedIn;
-      totalAttendeesAll += attendeesCount;
-      totalLeadsAll += lStat.total;
-      totalExhibitorsAll += exhibitorsCount;
-      totalSponsorsAll += sponsorsCount;
-      totalOrdersAll += ordStat.totalOrders;
-      totalRevenueAll += ordStat.revenue;
-
-      return {
-        _id: ev._id,
-        title: ev.title || 'Untitled Exhibition',
-        slug: ev.slug || '',
-        description: ev.description || '',
-        banner: ev.banner || getWpImage(ev.slug, ev._id, ev.wpPostId, ev.title) || null,
-        categories: Array.isArray(ev.categories) && ev.categories.length > 0 ? ev.categories : ['Trade & Industry'],
-        category: Array.isArray(ev.categories) && ev.categories[0] ? ev.categories[0] : 'Trade & Industry',
-        venue: ev.venue || '',
-        city: ev.city || 'India',
-        country: ev.country || 'India',
-        startDate: ev.startDate || null,
-        endDate: ev.endDate || null,
-        timings: ev.timings || '09:00 AM - 06:00 PM',
-        eventType: ev.eventType || 'hybrid',
-        status: ev.status || 'published',
-        isClaimed: !!ev.isClaimed,
-        claimedAt: ev.claimedAt || null,
-        wpPostId: ev.wpPostId || '',
-        wpUrl: ev.wpUrl || (ev.slug ? `https://visitexpo.in/event/${ev.slug}/` : ''),
-        website: ev.website || ev.orgWebsite || ev.organizer?.website || '',
-        orgName: ev.orgName || ev.organizer?.name || 'VisitExpo Verified Organizer',
-        orgEmail: ev.orgEmail || ev.organizer?.email || ev.createdBy?.email || '',
-        orgPhone: ev.orgPhone || ev.organizer?.contact?.phone || ev.createdBy?.phone || '',
-        orgWebsite: ev.orgWebsite || ev.organizer?.website || '',
-        isFreeEvent: ev.isFreeEvent !== false,
-        paidTicketPrice: Number(ev.paidTicketPrice) || 0,
-        currency: ev.currency || 'INR',
-        createdAt: ev.createdAt,
-        updatedAt: ev.updatedAt,
-        metrics: {
-          visitorsCount: vStat.total,
-          checkedInCount: vStat.checkedIn,
-          attendeesCount,
-          interestedCount,
-          followersCount,
-          leadsCount: lStat.total,
-          qualifiedLeadsCount: lStat.qualified,
-          exhibitorsCount,
-          sponsorsCount,
-          ticketTiersCount: tktStat.tiers,
-          ordersCount: ordStat.totalOrders,
-          completedOrdersCount: ordStat.completedOrders,
-          ticketsSoldCount: Math.max(tktStat.sold, ordStat.completedOrders),
-          ticketRevenue: ordStat.revenue,
-          campaignsCount: cmpStat.total,
-          reviewsCount: revStat.total,
-          avgRating: revStat.avgRating ? Number(revStat.avgRating.toFixed(1)) : 0,
-          schedulesCount: Array.isArray(ev.schedules) ? ev.schedules.length : 0,
-          faqsCount: Array.isArray(ev.faqsList) ? ev.faqsList.length : 0,
-          speakersCount: Array.isArray(ev.speakers) ? ev.speakers.length : 0,
-          totalRecords:
-            vStat.total +
-            attendeesCount +
-            lStat.total +
-            exhibitorsCount +
-            sponsorsCount +
-            ordStat.totalOrders +
-            cmpStat.total +
-            revStat.total
-        }
-      };
-    });
-
+    const data = await _computeExpoReports(query);
     res.status(200).json({
       success: true,
-      data: {
-        expos,
-        summary: {
-          totalExpos: expos.length,
-          publishedExpos: expos.filter(e => e.status === 'published').length,
-          draftExpos: expos.filter(e => e.status === 'draft').length,
-          claimedExpos: expos.filter(e => e.isClaimed).length,
-          wpSyncedExpos: expos.filter(e => !!e.wpPostId).length,
-          totalVisitors: totalVisitorsAll,
-          totalCheckedIn: totalCheckedInAll,
-          totalAttendees: totalAttendeesAll,
-          totalLeads: totalLeadsAll,
-          totalExhibitors: totalExhibitorsAll,
-          totalSponsors: totalSponsorsAll,
-          totalOrders: totalOrdersAll,
-          totalRevenue: totalRevenueAll
-        }
-      }
+      data
     });
   } catch (error) {
     next(error);

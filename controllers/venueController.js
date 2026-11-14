@@ -19,10 +19,13 @@ function slugify(text) {
     .replace(/^-+|-+$/g, '');
 }
 
+let defaultVenuesSynced = false;
+
 /**
  * Ensures initial default venues are seeded into MongoDB.
  */
 async function ensureDefaultVenuesSeeded() {
+  if (defaultVenuesSynced) return;
   const count = await Venue.countDocuments();
   if (count === 0) {
     try {
@@ -31,38 +34,44 @@ async function ensureDefaultVenuesSeeded() {
     } catch (err) {
       console.warn('[Venues] Seeding initial venues note:', err.message);
     }
-  } else {
-    try {
-      // Sync verified default venues ratingSource
-      for (const d of DEFAULT_VENUES) {
-        await Venue.updateOne(
-          { slug: d.slug },
-          {
-            $set: {
-              rating: d.rating,
-              ratingsCount: d.ratingsCount,
-              ratingSource: d.ratingSource || 'Google Verified Reviews'
-            }
-          }
-        );
-      }
-      // Clean up any historical dummy ratings on auto-discovered venues
-      await Venue.updateMany(
-        {
-          slug: { $nin: DEFAULT_VENUES.map((d) => d.slug) },
-          $or: [
-            { rating: 4.8, ratingsCount: 500 },
-            { rating: 4.8, ratingsCount: 0 },
-            { ratingSource: { $exists: false } },
-            { ratingSource: '' }
-          ]
-        },
-        {
-          $set: { rating: 0, ratingsCount: 0, ratingSource: 'No reviews yet' }
-        }
-      );
-    } catch (_) {}
+    defaultVenuesSynced = true;
+    return;
   }
+
+  // Mark synced immediately and run metadata reconciliation in background so first GET /api/venues never blocks
+  defaultVenuesSynced = true;
+  void (async () => {
+    try {
+      await Promise.all([
+        ...DEFAULT_VENUES.map((d) =>
+          Venue.updateOne(
+            { slug: d.slug },
+            {
+              $set: {
+                rating: d.rating,
+                ratingsCount: d.ratingsCount,
+                ratingSource: d.ratingSource || 'Google Verified Reviews'
+              }
+            }
+          )
+        ),
+        Venue.updateMany(
+          {
+            slug: { $nin: DEFAULT_VENUES.map((d) => d.slug) },
+            $or: [
+              { rating: 4.8, ratingsCount: 500 },
+              { rating: 4.8, ratingsCount: 0 },
+              { ratingSource: { $exists: false } },
+              { ratingSource: '' }
+            ]
+          },
+          {
+            $set: { rating: 0, ratingsCount: 0, ratingSource: 'No reviews yet' }
+          }
+        )
+      ]);
+    } catch (_) {}
+  })();
 }
 
 /**
@@ -130,10 +139,167 @@ let venuesCache = {
   timestamp: 0,
   ttl: 15 * 60 * 1000 // 15 mins cache
 };
+let venuesInFlight = null;
 
 export function invalidateVenuesCache() {
   venuesCache.data = null;
   venuesCache.timestamp = 0;
+}
+
+async function _computeAllVenuesPayload() {
+  await ensureDefaultVenuesSeeded();
+
+  const now = new Date();
+  const [venues, countsAgg, reviewAgg] = await Promise.all([
+    Venue.find().sort({ isFeatured: -1, name: 1 }).lean(),
+    Event.aggregate([
+      { $match: { venue: { $exists: true, $ne: '' } } },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$venue' } } },
+          total: { $sum: 1 },
+          upcoming: {
+            $sum: {
+              $cond: [
+                { $or: [{ $gte: ['$endDate', now] }, { $gte: ['$startDate', now] }] },
+                1,
+                0
+              ]
+            }
+          }
+        }
+      }
+    ]).catch((aggErr) => {
+      console.warn('[Venues] Count aggregation warning:', aggErr.message);
+      return [];
+    }),
+    Review.aggregate([
+      {
+        $match: {
+          venueSlug: { $exists: true, $ne: '' },
+          status: { $in: ['approved', 'featured'] }
+        }
+      },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$venueSlug' } } },
+          count: { $sum: 1 },
+          averageRating: { $avg: '$rating' }
+        }
+      }
+    ]).catch((reviewErr) => {
+      console.warn('[Venues] Review aggregation warning:', reviewErr.message);
+      return [];
+    })
+  ]);
+
+  // Build fast lookup map
+  const countMap = new Map();
+  countsAgg.forEach((c) => {
+    if (c._id) {
+      countMap.set(c._id, { total: c.total, upcoming: c.upcoming });
+    }
+  });
+
+  const reviewMap = new Map();
+  reviewAgg.forEach((r) => {
+    if (r._id) {
+      reviewMap.set(r._id, {
+        count: r.count,
+        averageRating: Math.round((r.averageRating || 0) * 10) / 10
+      });
+    }
+  });
+
+  const enrichedVenues = venues.map((v) => {
+    const vShort = (v.shortName || v.name || '').toLowerCase().trim();
+    const vName = (v.name || '').toLowerCase().trim();
+
+    let liveTotal = 0;
+    let liveUpcoming = 0;
+
+    // Fast in-memory lookup
+    for (const [vKey, stat] of countMap.entries()) {
+      if (vKey === vShort || vKey === vName || (vShort.length > 4 && vKey.includes(vShort)) || (vName.length > 5 && vKey.includes(vName))) {
+        liveTotal += stat.total;
+        liveUpcoming += stat.upcoming;
+      }
+    }
+
+    // Resolve genuine rating from live user reviews, verified external source, or unrated
+    const slugKey = (v.slug || '').toLowerCase().trim();
+    const liveReview = reviewMap.get(slugKey);
+
+    let finalRating = 0;
+    let finalCount = 0;
+    let finalSource = '';
+
+    if (liveReview && liveReview.count > 0) {
+      finalRating = liveReview.averageRating;
+      finalCount = liveReview.count;
+      finalSource = 'VisitExpo Verified Reviews';
+    } else if (v.ratingSource && v.ratingsCount > 0 && v.rating > 0 && v.ratingSource !== 'No reviews yet') {
+      finalRating = v.rating;
+      finalCount = v.ratingsCount;
+      finalSource = v.ratingSource;
+    } else {
+      const defaultMatch = DEFAULT_VENUES.find((d) => d.slug === slugKey);
+      if (defaultMatch && defaultMatch.ratingsCount > 0 && defaultMatch.rating > 0) {
+        finalRating = defaultMatch.rating;
+        finalCount = defaultMatch.ratingsCount;
+        finalSource = defaultMatch.ratingSource || 'Google Verified Reviews';
+      } else {
+        finalRating = 0;
+        finalCount = 0;
+        finalSource = 'No reviews yet';
+      }
+    }
+
+    return {
+      ...v,
+      rating: finalRating,
+      ratingsCount: finalCount,
+      ratingSource: finalSource,
+      liveTotalEvents: liveTotal,
+      liveUpcomingEvents: liveUpcoming
+    };
+  });
+
+  const responsePayload = {
+    success: true,
+    count: enrichedVenues.length,
+    data: enrichedVenues
+  };
+
+  venuesCache = {
+    data: responsePayload,
+    timestamp: Date.now(),
+    ttl: 15 * 60 * 1000
+  };
+
+  // Run background venue discovery if count is low without blocking request
+  if (venues.length < 5) {
+    syncDiscoveredVenuesFromEvents().catch(() => {});
+  }
+
+  return responsePayload;
+}
+
+export async function warmVenuesCache() {
+  try {
+    if (venuesCache.data && (Date.now() - venuesCache.timestamp < venuesCache.ttl)) {
+      return venuesCache.data;
+    }
+    if (!venuesInFlight) {
+      venuesInFlight = _computeAllVenuesPayload().finally(() => {
+        venuesInFlight = null;
+      });
+    }
+    return await venuesInFlight;
+  } catch (err) {
+    console.warn('[Venues] Boot warm cache failed:', err.message);
+    return null;
+  }
 }
 
 /**
@@ -148,148 +314,28 @@ export async function getAllVenues(req, res) {
       return res.status(200).json(venuesCache.data);
     }
 
-    await ensureDefaultVenuesSeeded();
-
-    // Query all venues from MongoDB
-    const venues = await Venue.find().sort({ isFeatured: -1, name: 1 }).lean();
-    const now = new Date();
-
-    // Compute live event counts for all venues in a single fast aggregation
-    let countsAgg = [];
-    try {
-      countsAgg = await Event.aggregate([
-        { $match: { venue: { $exists: true, $ne: '' } } },
-        {
-          $group: {
-            _id: { $toLower: { $trim: { input: '$venue' } } },
-            total: { $sum: 1 },
-            upcoming: {
-              $sum: {
-                $cond: [
-                  { $or: [{ $gte: ['$endDate', now] }, { $gte: ['$startDate', now] }] },
-                  1,
-                  0
-                ]
-              }
-            }
-          }
-        }
-      ]);
-    } catch (aggErr) {
-      console.warn('[Venues] Count aggregation warning:', aggErr.message);
+    // Serve stale immediately while refreshing in background so UI never stalls
+    if (!force && venuesCache.data) {
+      if (!venuesInFlight) {
+        venuesInFlight = _computeAllVenuesPayload()
+          .catch((err) => {
+            console.warn('[Venues] Background refresh failed:', err.message);
+            return venuesCache.data;
+          })
+          .finally(() => {
+            venuesInFlight = null;
+          });
+      }
+      return res.status(200).json(venuesCache.data);
     }
 
-    // Build fast lookup map
-    const countMap = new Map();
-    countsAgg.forEach((c) => {
-      if (c._id) {
-        countMap.set(c._id, { total: c.total, upcoming: c.upcoming });
-      }
-    });
-
-    // Compute genuine user review aggregates directly from Review collection
-    let reviewAgg = [];
-    try {
-      reviewAgg = await Review.aggregate([
-        {
-          $match: {
-            venueSlug: { $exists: true, $ne: '' },
-            status: { $in: ['approved', 'featured'] }
-          }
-        },
-        {
-          $group: {
-            _id: { $toLower: { $trim: { input: '$venueSlug' } } },
-            count: { $sum: 1 },
-            averageRating: { $avg: '$rating' }
-          }
-        }
-      ]);
-    } catch (reviewErr) {
-      console.warn('[Venues] Review aggregation warning:', reviewErr.message);
+    if (!venuesInFlight) {
+      venuesInFlight = _computeAllVenuesPayload().finally(() => {
+        venuesInFlight = null;
+      });
     }
 
-    const reviewMap = new Map();
-    reviewAgg.forEach((r) => {
-      if (r._id) {
-        reviewMap.set(r._id, {
-          count: r.count,
-          averageRating: Math.round((r.averageRating || 0) * 10) / 10
-        });
-      }
-    });
-
-    const enrichedVenues = venues.map((v) => {
-      const vShort = (v.shortName || v.name || '').toLowerCase().trim();
-      const vName = (v.name || '').toLowerCase().trim();
-      
-      let liveTotal = 0;
-      let liveUpcoming = 0;
-
-      // Fast in-memory lookup
-      for (const [vKey, stat] of countMap.entries()) {
-        if (vKey === vShort || vKey === vName || (vShort.length > 4 && vKey.includes(vShort)) || (vName.length > 5 && vKey.includes(vName))) {
-          liveTotal += stat.total;
-          liveUpcoming += stat.upcoming;
-        }
-      }
-
-      // Resolve genuine rating from live user reviews, verified external source, or unrated
-      const slugKey = (v.slug || '').toLowerCase().trim();
-      const liveReview = reviewMap.get(slugKey);
-
-      let finalRating = 0;
-      let finalCount = 0;
-      let finalSource = '';
-
-      if (liveReview && liveReview.count > 0) {
-        finalRating = liveReview.averageRating;
-        finalCount = liveReview.count;
-        finalSource = 'VisitExpo Verified Reviews';
-      } else if (v.ratingSource && v.ratingsCount > 0 && v.rating > 0 && v.ratingSource !== 'No reviews yet') {
-        finalRating = v.rating;
-        finalCount = v.ratingsCount;
-        finalSource = v.ratingSource;
-      } else {
-        const defaultMatch = DEFAULT_VENUES.find((d) => d.slug === slugKey);
-        if (defaultMatch && defaultMatch.ratingsCount > 0 && defaultMatch.rating > 0) {
-          finalRating = defaultMatch.rating;
-          finalCount = defaultMatch.ratingsCount;
-          finalSource = defaultMatch.ratingSource || 'Google Verified Reviews';
-        } else {
-          finalRating = 0;
-          finalCount = 0;
-          finalSource = 'No reviews yet';
-        }
-      }
-
-      return {
-        ...v,
-        rating: finalRating,
-        ratingsCount: finalCount,
-        ratingSource: finalSource,
-        liveTotalEvents: liveTotal,
-        liveUpcomingEvents: liveUpcoming
-      };
-    });
-
-    const responsePayload = {
-      success: true,
-      count: enrichedVenues.length,
-      data: enrichedVenues
-    };
-
-    venuesCache = {
-      data: responsePayload,
-      timestamp: Date.now(),
-      ttl: 15 * 60 * 1000
-    };
-
-    // Run background venue discovery if count is low without blocking request
-    if (venues.length < 5) {
-      syncDiscoveredVenuesFromEvents().catch(() => {});
-    }
-
+    const responsePayload = await venuesInFlight;
     return res.status(200).json(responsePayload);
   } catch (err) {
     console.error('[Venues] Error in getAllVenues:', err);

@@ -10,6 +10,7 @@ import connectDB from './config/db.js';
 import CalendarService from './services/CalendarService.js';
 import WordPressDirectorySyncService from './services/WordPressDirectorySyncService.js';
 import { sendExhibitorEnquiryReminders } from './services/exhibitorEnquiryReminderService.js';
+import { warmVenuesCache } from './controllers/venueController.js';
 
 const PORT = process.env.PORT || 5000;
 
@@ -45,10 +46,13 @@ const runExhibitorEnquiryReminders = async () => {
 // Start Server
 const server = app.listen(PORT, () => {
   console.log(`VisitExpo API Server running in ${process.env.NODE_ENV || 'development'} mode on port ${PORT}`);
-  // Pre-warm directory cache immediately after boot so homepage requests respond in milliseconds
+  // Pre-warm directory and venues caches immediately after boot so pages load in milliseconds
   setTimeout(() => {
     WordPressDirectorySyncService.warmCache().catch((err) => {
       console.warn('[WarmCache] Boot warm error:', err.message);
+    });
+    warmVenuesCache().catch((err) => {
+      console.warn('[WarmCache] Venues warm error:', err.message);
     });
   }, 500);
   // Run background sync every 30 minutes
