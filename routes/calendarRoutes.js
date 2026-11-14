@@ -5,10 +5,13 @@
  */
 
 import express from 'express';
+import mongoose from 'mongoose';
 import CalendarService from '../services/CalendarService.js';
 import User from '../models/User.js';
 import Event from '../models/Event.js';
+import CalendarReminder from '../models/CalendarReminder.js';
 import { protect } from '../middlewares/auth.js';
+import { verifyAccessToken } from '../utils/jwt.js';
 
 const router = express.Router();
 
@@ -137,10 +140,25 @@ router.post('/sync', async (req, res, next) => {
       });
     }
 
+    let authUserId = null;
+    try {
+      let token = null;
+      if (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')) {
+        token = req.headers.authorization.split(' ')[1];
+      } else if (req.cookies?.token) {
+        token = req.cookies.token;
+      }
+      if (token) {
+        const decoded = verifyAccessToken(token);
+        if (decoded?.id) authUserId = decoded.id;
+      }
+    } catch (_) {}
+
     const syncResult = await CalendarService.syncEvent({
       eventId,
       eventSlug,
       provider: provider || 'google',
+      userId: authUserId,
       userEmail,
       userName,
       reminderTimes,
@@ -155,6 +173,57 @@ router.post('/sync', async (req, res, next) => {
       success: false,
       error: error.message || 'Calendar sync failed. Please try again or download the .ics file.'
     });
+  }
+});
+
+/**
+ * 3b. GET /api/calendar/reminders
+ * Fetch persisted calendar reminder history for the authenticated user
+ */
+router.get('/reminders', protect, async (req, res, next) => {
+  try {
+    const reminders = await CalendarReminder.find({ user: req.user.id })
+      .sort({ savedAt: -1 })
+      .limit(200)
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      reminders
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * 3c. DELETE /api/calendar/reminders/:identifier
+ * Remove a saved calendar reminder from history for the authenticated user
+ */
+router.delete('/reminders/:identifier', protect, async (req, res, next) => {
+  try {
+    const raw = String(req.params.identifier || '').trim();
+    if (!raw) {
+      return res.status(400).json({ success: false, error: 'Reminder identifier is required.' });
+    }
+
+    const conditions = [
+      { eventKey: raw.toLowerCase() },
+      { eventSlug: raw },
+      { eventId: raw }
+    ];
+    if (mongoose.Types.ObjectId.isValid(raw)) {
+      conditions.push({ _id: raw });
+    }
+
+    await CalendarReminder.deleteMany({
+      user: req.user.id,
+      $or: conditions
+    });
+
+    res.status(200).json({ success: true, message: 'Calendar reminder removed from history.' });
+  } catch (error) {
+    next(error);
   }
 });
 

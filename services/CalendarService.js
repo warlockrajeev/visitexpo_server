@@ -8,6 +8,7 @@ import Visitor from '../models/Visitor.js';
 import Event from '../models/Event.js';
 import User from '../models/User.js';
 import Notification from '../models/Notification.js';
+import CalendarReminder from '../models/CalendarReminder.js';
 import { createVisitorQrCode, ensureVisitorQrCode } from './visitorBadgeService.js';
 
 class CalendarService {
@@ -210,7 +211,7 @@ class CalendarService {
   /**
    * Execute or record a calendar sync request
    */
-  static async syncEvent({ eventId, eventSlug, provider = 'google', userEmail, userName, reminderTimes, timezone, eventData }) {
+  static async syncEvent({ eventId, eventSlug, provider = 'google', userId, userEmail, userName, reminderTimes, timezone, eventData }) {
     let event = null;
     if (eventId && typeof eventId === 'string' && eventId.match(/^[0-9a-fA-F]{24}$/)) {
       try {
@@ -280,21 +281,52 @@ class CalendarService {
       }
     }
 
-    // If user exists, create an in-app reminder notification
-    if (userEmail) {
-      try {
-        const userDoc = await User.findOne({ email: userEmail.toLowerCase().trim() });
-        if (userDoc) {
-          await Notification.create({
-            user: userDoc._id,
-            title: `Calendar Reminder Set: ${event.title}`,
-            message: `You've set a ${provider === 'google' ? 'Google Calendar' : provider === 'outlook' ? 'Outlook' : 'calendar'} reminder for ${event.title}. We'll notify you before the event starts.`,
-            type: 'in_app',
-            metadata: { eventId: event._id, slug: event.slug, provider, reminderTimes: effectiveReminders }
-          });
-        }
-      } catch (err) {}
-    }
+    // Resolve owning user and persist calendar reminder history + notification
+    let resolvedUserDoc = null;
+    try {
+      if (userId) {
+        resolvedUserDoc = await User.findById(userId).select('_id email');
+      } else if (userEmail) {
+        resolvedUserDoc = await User.findOne({ email: userEmail.toLowerCase().trim() }).select('_id email');
+      }
+
+      if (resolvedUserDoc) {
+        const rawSlug = String(event.slug || eventSlug || '').trim();
+        const rawId = String(event._id || event.id || eventId || '').trim();
+        const eventKey = (rawSlug || rawId || String(event.title || 'expo')).toLowerCase();
+
+        await CalendarReminder.findOneAndUpdate(
+          { user: resolvedUserDoc._id, eventKey },
+          {
+            $set: {
+              user: resolvedUserDoc._id,
+              eventKey,
+              eventId: rawId,
+              eventSlug: rawSlug,
+              title: String(event.title || 'VisitExpo Exhibition').trim(),
+              dates: String(event.dates || event.date || '').trim(),
+              venue: String(event.location?.venueName || event.venue || '').trim(),
+              city: String(event.city || '').trim(),
+              country: String(event.country || '').trim(),
+              provider: ['google', 'outlook', 'ics', 'apple'].includes(provider) ? provider : 'google',
+              reminderTimes: effectiveReminders,
+              userEmail: String(userEmail || resolvedUserDoc.email || '').trim(),
+              googleCalendarUrl: googleUrl,
+              savedAt: new Date()
+            }
+          },
+          { upsert: true, new: true }
+        );
+
+        await Notification.create({
+          user: resolvedUserDoc._id,
+          title: `Calendar Reminder Set: ${event.title}`,
+          message: `You've set a ${provider === 'google' ? 'Google Calendar' : provider === 'outlook' ? 'Outlook' : 'calendar'} reminder for ${event.title}. We'll notify you before the event starts.`,
+          type: 'in_app',
+          metadata: { eventId: event._id, slug: event.slug, provider, reminderTimes: effectiveReminders }
+        });
+      }
+    } catch (err) {}
 
     let targetDirectUrl = googleUrl;
     if (provider === 'outlook') targetDirectUrl = outlookUrl;
