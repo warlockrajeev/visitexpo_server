@@ -8,6 +8,24 @@ const WP_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
 const WP_KEY = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
 
 async function fetchOgImage(slug, timeoutMs = 9000) {
+  // 1. Prefer WordPress oEmbed endpoint (fast, lightweight JSON returning uploads + Cloudinary featured images)
+  try {
+    const oembedUrl = `${WP_URL}/wp-json/oembed/1.0/embed?url=${encodeURIComponent(`${WP_URL}/event/${slug}/`)}`;
+    const oRes = await fetch(oembedUrl, { signal: AbortSignal.timeout(Math.min(timeoutMs, 7000)) });
+    if (oRes.ok) {
+      const oData = await oRes.json();
+      if (
+        oData.thumbnail_url &&
+        typeof oData.thumbnail_url === 'string' &&
+        !oData.thumbnail_url.includes('cropped-Untitled') &&
+        !oData.thumbnail_url.includes('unsplash')
+      ) {
+        return oData.thumbnail_url.replace(/^http:\/\/visitexpo\.in/i, 'https://visitexpo.in').replace(/^http:/, 'https:');
+      }
+    }
+  } catch (_) {}
+
+  // 2. Fallback: fetch page HTML head and match og:image
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -47,24 +65,12 @@ async function fetchOgImage(slug, timeoutMs = 9000) {
     }
 
     clearTimeout(timeout);
-    if (foundUrl && !foundUrl.includes('cropped-Untitled')) {
-      return foundUrl.replace(/^http:/, 'https:');
+    if (foundUrl && !foundUrl.includes('cropped-Untitled') && !foundUrl.includes('unsplash')) {
+      return foundUrl.replace(/^http:\/\/visitexpo\.in/i, 'https://visitexpo.in').replace(/^http:/, 'https:');
     }
   } catch (err) {
     clearTimeout(timeout);
   }
-
-  // Fallback to oEmbed if page stream did not return og:image
-  try {
-    const oembedUrl = `${WP_URL}/wp-json/oembed/1.0/embed?url=${encodeURIComponent(`${WP_URL}/event/${slug}/`)}`;
-    const oRes = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
-    if (oRes.ok) {
-      const oData = await oRes.json();
-      if (oData.thumbnail_url && !oData.thumbnail_url.includes('cropped-Untitled')) {
-        return oData.thumbnail_url.replace(/^http:/, 'https:');
-      }
-    }
-  } catch (_) {}
 
   return null;
 }

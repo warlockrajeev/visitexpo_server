@@ -54,9 +54,7 @@ function loadWpImageMap() {
     const imgPath = path.join(__wpDirname, '../data/wordpress-event-images.json');
     if (fs.existsSync(imgPath)) {
       wpImageMapCache = JSON.parse(fs.readFileSync(imgPath, 'utf8')) || {};
-      wpImageEntriesCache = Object.entries(wpImageMapCache)
-        .filter(([k]) => k.length > 5 && isNaN(Number(k)))
-        .map(([k, url]) => ({ rk: k.replace(/-/g, ' '), url }));
+      wpImageEntriesCache = [];
       return wpImageMapCache;
     }
   } catch {}
@@ -69,17 +67,15 @@ function getWpImage(slug, id, wpPostId, title) {
   try {
     const data = loadWpImageMap();
     if (slug && data[slug]) return data[slug];
+    if (slug) {
+      const cleanSlug = String(slug).toLowerCase().trim();
+      if (data[cleanSlug]) return data[cleanSlug];
+    }
     if (id && data[String(id)]) return data[String(id)];
     if (wpPostId && data[String(wpPostId)]) return data[String(wpPostId)];
     if (title) {
       const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
       if (data[titleSlug]) return data[titleSlug];
-      const lowerTitle = title.toLowerCase();
-      for (const entry of wpImageEntriesCache || []) {
-        if (lowerTitle.includes(entry.rk) || (entry.rk.length > 10 && entry.rk.includes(lowerTitle))) {
-          return entry.url;
-        }
-      }
     }
   } catch {}
   return null;

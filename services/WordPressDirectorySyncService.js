@@ -7,6 +7,10 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __wpSyncFilename = fileURLToPath(import.meta.url);
+const __wpSyncDirname = path.dirname(__wpSyncFilename);
 import Event from '../models/Event.js';
 import DeletedEvent from '../models/DeletedEvent.js';
 import EventEngagement from '../models/EventEngagement.js';
@@ -112,6 +116,24 @@ function inferCategory(title = '', desc = '') {
   return 'Trade & Industry';
 }
 
+const CATEGORY_POOL_URL_SET = new Set(Object.values(CATEGORY_IMAGE_POOLS).flat());
+
+function isValidEventImageUrl(url) {
+  if (!url || typeof url !== 'string') return false;
+  const trimmed = url.trim();
+  if (!trimmed || trimmed.includes('unsplash') || trimmed.includes('cropped-Untitled')) return false;
+  return (
+    trimmed.includes('wp-content/uploads') ||
+    trimmed.includes('res.cloudinary.com') ||
+    /^https?:\/\//i.test(trimmed)
+  );
+}
+
+function normalizeEventImageUrl(url) {
+  if (!url || typeof url !== 'string') return '';
+  return url.trim().replace(/^http:\/\/visitexpo\.in/i, 'https://visitexpo.in');
+}
+
 function getCategoryFallback(category, title = '') {
   const pool = CATEGORY_IMAGE_POOLS[category] || CATEGORY_IMAGE_POOLS['Trade & Industry'];
   const hash = (title || '').split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
@@ -168,15 +190,16 @@ class WordPressDirectorySyncService {
 
   loadImageMap() {
     try {
-      const jsonPath = path.resolve(process.cwd(), 'data/wordpress-event-images.json');
+      const jsonPath = path.join(__wpSyncDirname, '../data/wordpress-event-images.json');
       if (fs.existsSync(jsonPath)) {
         const raw = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
         for (const [k, url] of Object.entries(raw)) {
-          if (url && typeof url === 'string' && url.includes('uploads')) {
-            this.imageLookupMap.set(k, url);
-            this.imageLookupMap.set(k.toLowerCase(), url);
+          if (isValidEventImageUrl(url)) {
+            const cleanUrl = normalizeEventImageUrl(url);
+            this.imageLookupMap.set(k, cleanUrl);
+            this.imageLookupMap.set(k.toLowerCase(), cleanUrl);
             const norm = k.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-            if (norm) this.imageLookupMap.set(norm, url);
+            if (norm) this.imageLookupMap.set(norm, cleanUrl);
           }
         }
         console.log(`[WP-Sync] Loaded ${this.imageLookupMap.size} precomputed image mappings.`);
@@ -186,19 +209,36 @@ class WordPressDirectorySyncService {
     }
   }
 
-  findImage(slug, id, wpPostId, title, category) {
+  findImage(slug, id, wpPostId, title) {
     if (slug && this.imageLookupMap.has(slug)) return this.imageLookupMap.get(slug);
+    if (slug) {
+      const cleanSlug = String(slug).toLowerCase().trim();
+      if (this.imageLookupMap.has(cleanSlug)) return this.imageLookupMap.get(cleanSlug);
+      const norm = cleanSlug.replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      if (norm && this.imageLookupMap.has(norm)) return this.imageLookupMap.get(norm);
+    }
     if (id && this.imageLookupMap.has(String(id))) return this.imageLookupMap.get(String(id));
     if (wpPostId && this.imageLookupMap.has(String(wpPostId))) return this.imageLookupMap.get(String(wpPostId));
-    if (slug) {
-      const norm = slug.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-      if (this.imageLookupMap.has(norm)) return this.imageLookupMap.get(norm);
-    }
     if (title) {
       const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-      if (this.imageLookupMap.has(titleSlug)) return this.imageLookupMap.get(titleSlug);
+      if (titleSlug && this.imageLookupMap.has(titleSlug)) return this.imageLookupMap.get(titleSlug);
     }
-    return getCategoryFallback(category, title);
+    return '';
+  }
+
+  async fetchWpOembedImage(slug) {
+    if (!slug) return '';
+    try {
+      const oembedUrl = `${WORDPRESS_URL}/wp-json/oembed/1.0/embed?url=${encodeURIComponent(`${WORDPRESS_URL}/event/${slug}/`)}`;
+      const res = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
+      if (res.ok) {
+        const data = await res.json();
+        if (isValidEventImageUrl(data.thumbnail_url)) {
+          return normalizeEventImageUrl(data.thumbnail_url);
+        }
+      }
+    } catch {}
+    return '';
   }
 
   parsePhpSerializedArray(str) {
@@ -365,7 +405,10 @@ class WordPressDirectorySyncService {
 
         const category = inferCategory(rawTitle, cleanDesc);
         const slug = rawSlug || (rawTitle ? rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') : `event-${postId}`);
-        const banner = this.findImage(slug, d.id, postId, rawTitle, category);
+        let banner = this.findImage(slug, d.id, postId, rawTitle);
+        if (!banner && d._embedded?.['wp:featuredmedia']?.[0]?.source_url && isValidEventImageUrl(d._embedded['wp:featuredmedia'][0].source_url)) {
+          banner = normalizeEventImageUrl(d._embedded['wp:featuredmedia'][0].source_url);
+        }
 
         // Parse FAQs
         const rawFaqTitles = m.ovaem_faq_title?.[0];
@@ -416,40 +459,44 @@ class WordPressDirectorySyncService {
             }
           });
         } else {
-          // Unclaimed or new event: complete upsert
+          // Unclaimed or new event: complete upsert (never overwrite an existing valid banner with empty string)
+          const setFields = {
+            title: rawTitle || 'Exhibition Event',
+            slug,
+            description: cleanDesc,
+            venue: loc.venue,
+            city: loc.city,
+            country: loc.country || 'India',
+            startDate,
+            endDate,
+            categories: [category],
+            wpPostId: postId,
+            wpUrl: `${WORDPRESS_URL}/event/${slug}/`,
+            isClaimed: false,
+            orgName: orgName || 'VisitExpo Verified Organizer',
+            orgEmail: orgEmail || '',
+            orgPhone: orgPhone || '',
+            orgWebsite: orgWebsite || '',
+            orgDesc: orgDesc || '',
+            orgLogo: orgLogo || '',
+            faqsList,
+            schedules,
+            sponsorsList,
+            status: 'published'
+          };
+          if (banner) {
+            setFields.banner = banner;
+          }
           bulkOps.push({
             updateOne: {
               filter: { slug },
               update: {
-                $set: {
-                  title: rawTitle || 'Exhibition Event',
-                  slug,
-                  description: cleanDesc,
-                  banner,
-                  venue: loc.venue,
-                  city: loc.city,
-                  country: loc.country || 'India',
-                  startDate,
-                  endDate,
-                  categories: [category],
-                  wpPostId: postId,
-                  wpUrl: `${WORDPRESS_URL}/event/${slug}/`,
-                  isClaimed: false,
-                  orgName: orgName || 'VisitExpo Verified Organizer',
-                  orgEmail: orgEmail || '',
-                  orgPhone: orgPhone || '',
-                  orgWebsite: orgWebsite || '',
-                  orgDesc: orgDesc || '',
-                  orgLogo: orgLogo || '',
-                  faqsList,
-                  schedules,
-                  sponsorsList,
-                  status: 'published'
-                },
+                $set: setFields,
                 $setOnInsert: {
                   isFreeEvent: true,
                   paidTicketPrice: 0,
-                  currency: 'INR'
+                  currency: 'INR',
+                  ...(banner ? {} : { banner: '' })
                 }
               },
               upsert: true
@@ -673,9 +720,16 @@ class WordPressDirectorySyncService {
           0;
 
         const dynamicInterestedCount = engCount + visCount;
+        const mappedImg = this.findImage(slugKey, idKey, wpKey, doc.title);
+        const dbBanner = isValidEventImageUrl(doc.banner) ? normalizeEventImageUrl(doc.banner) : '';
+        const resolvedBanner =
+          mappedImg ||
+          (dbBanner && !CATEGORY_POOL_URL_SET.has(dbBanner) ? dbBanner : '') ||
+          dbBanner;
 
         return {
           ...doc,
+          banner: resolvedBanner,
           organizer: cleanOrganizer,
           organizerName: cleanOrganizer,
           orgName: cleanOrganizer,

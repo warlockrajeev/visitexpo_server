@@ -49,26 +49,34 @@ import { fileURLToPath } from 'url';
 const __adminFilename = fileURLToPath(import.meta.url);
 const __adminDirname = path.dirname(__adminFilename);
 
-// Helper to look up real WordPress event image from local dataset
-function getWpImage(slug, id, wpPostId, title) {
+// Helper to look up real WordPress event image from local dataset (exact key/slug match only — never fuzzy substring match across shows)
+let adminWpImageCache = null;
+function loadAdminWpImageMap() {
+  if (adminWpImageCache) return adminWpImageCache;
   try {
     const imgPath = path.join(__adminDirname, '../data/wordpress-event-images.json');
     if (fs.existsSync(imgPath)) {
-      const data = JSON.parse(fs.readFileSync(imgPath, 'utf8'));
-      if (slug && data[slug]) return data[slug];
-      if (id && data[String(id)]) return data[String(id)];
-      if (wpPostId && data[String(wpPostId)]) return data[String(wpPostId)];
-      if (title) {
-        const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-        if (data[titleSlug]) return data[titleSlug];
-        const lowerTitle = title.toLowerCase();
-        for (const [k, url] of Object.entries(data)) {
-          if (k.length > 5 && isNaN(Number(k))) {
-            const rk = k.replace(/-/g, ' ');
-            if (lowerTitle.includes(rk) || (rk.length > 10 && rk.includes(lowerTitle))) return url;
-          }
-        }
-      }
+      adminWpImageCache = JSON.parse(fs.readFileSync(imgPath, 'utf8')) || {};
+      return adminWpImageCache;
+    }
+  } catch {}
+  adminWpImageCache = {};
+  return adminWpImageCache;
+}
+
+function getWpImage(slug, id, wpPostId, title) {
+  try {
+    const data = loadAdminWpImageMap();
+    if (slug && data[slug]) return data[slug];
+    if (slug) {
+      const cleanSlug = String(slug).toLowerCase().trim();
+      if (data[cleanSlug]) return data[cleanSlug];
+    }
+    if (id && data[String(id)]) return data[String(id)];
+    if (wpPostId && data[String(wpPostId)]) return data[String(wpPostId)];
+    if (title) {
+      const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      if (data[titleSlug]) return data[titleSlug];
     }
   } catch {}
   return null;
@@ -3058,30 +3066,48 @@ router.get('/events', async (req, res, next) => {
     const limitNum = parseInt(limit, 10) || 50;
     const skip = (pageNum - 1) * limitNum;
 
-    // Base query
-    const query = {};
+    const conditions = [];
 
     // Status filter
     if (status && status !== 'all') {
-      query.status = status;
+      conditions.push({ status });
     }
 
-    // Category filter
+    // Category filter (supports exact match or keyword overlap between admin labels and stored categories)
     if (category && category !== 'all') {
-      query.categories = category;
+      const catClean = category.trim();
+      const catTerms = catClean
+        .split(/[\s,&/]+/)
+        .map(w => w.trim())
+        .filter(w => w.length >= 3 && !['and', 'the', 'for', 'esg'].includes(w.toLowerCase()));
+      const escapedTerms = catTerms.map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+      const catRegex = escapedTerms.length > 0
+        ? new RegExp(escapedTerms.join('|'), 'i')
+        : new RegExp(catClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      conditions.push({
+        $or: [
+          { categories: catClean },
+          { category: catClean },
+          { categories: catRegex },
+          { category: catRegex }
+        ]
+      });
     }
 
-    // Search query across title, venue, city, orgName, slug
+    // Search query across title, venue, city, orgName, slug, wpPostId
     if (search && search.trim()) {
       const searchClean = search.trim();
       const searchRegex = new RegExp(searchClean.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-      query.$or = [
-        { title: searchRegex },
-        { venue: searchRegex },
-        { city: searchRegex },
-        { orgName: searchRegex },
-        { slug: searchRegex }
-      ];
+      conditions.push({
+        $or: [
+          { title: searchRegex },
+          { venue: searchRegex },
+          { city: searchRegex },
+          { orgName: searchRegex },
+          { slug: searchRegex },
+          { wpPostId: searchRegex }
+        ]
+      });
     }
 
     // Exclude permanently deleted events if any
@@ -3089,13 +3115,17 @@ router.get('/events', async (req, res, next) => {
       const deletedDocs = await DeletedEvent.find().select('slug title eventId').lean();
       if (deletedDocs && deletedDocs.length > 0) {
         const delSlugs = deletedDocs.map(d => d.slug).filter(Boolean);
-        const delIds = deletedDocs.map(d => d.eventId).filter(Boolean);
-        if (delSlugs.length > 0 || delIds.length > 0) {
-          query._id = { $nin: delIds.filter(id => mongoose.isValidObjectId(id)) };
-          query.slug = { $nin: delSlugs };
+        const delIds = deletedDocs.map(d => d.eventId).filter(id => mongoose.isValidObjectId(id));
+        if (delIds.length > 0) {
+          conditions.push({ _id: { $nin: delIds } });
+        }
+        if (delSlugs.length > 0) {
+          conditions.push({ slug: { $nin: delSlugs } });
         }
       }
     } catch {}
+
+    const query = conditions.length > 0 ? { $and: conditions } : {};
 
     const [events, totalEvents, publishedCount, draftCount, cancelledCount, wpSyncedCount, filteredTotal] = await Promise.all([
       Event.find(query)
