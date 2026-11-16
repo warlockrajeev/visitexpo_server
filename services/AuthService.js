@@ -70,9 +70,11 @@ class AuthService {
       err.statusCode = 400;
       throw err;
     }
-    if (assignedRole !== 'visitor' && (!orgName || orgName.trim().length < 2)) {
+    if (!orgName || orgName.trim().length < 2) {
       const err = new Error(
-        assignedRole === 'exhibitor'
+        assignedRole === 'visitor'
+          ? 'Company / Organization Name is required (minimum 2 characters).'
+          : assignedRole === 'exhibitor'
           ? 'Company / Exhibitor Name is required (minimum 2 characters).'
           : 'Organization Name is required (minimum 2 characters).'
       );
@@ -149,6 +151,7 @@ class AuthService {
       password,
       role: assignedRole,
       phone: cleanPhone,
+      company: orgName ? orgName.trim() : '',
       city: city.trim(),
       interests: assignedRole === 'visitor' ? visitorInterests : [],
       workEmail: hasCorporateWorkEmail ? normalizedWorkEmail : '',
@@ -166,8 +169,8 @@ class AuthService {
       hasCustomPassword: true
     });
 
-    // 5. Create default Organization & Subscription if organizer or name specified
-    if (orgName || assignedRole === 'organizer') {
+    // 5. Create default Organization & Subscription for organizer or exhibitor
+    if (assignedRole === 'organizer' || assignedRole === 'exhibitor') {
       const organization = await Organization.create({
         name: (orgName || `${name.trim()}'s Organization`).trim(),
         contact: { email: normalizedEmail, phone: cleanPhone },
@@ -504,9 +507,16 @@ class AuthService {
         throw err;
       }
 
-      // Mandatory Organization Name check for Organizer/Exhibitor
-      if (assignedRole !== 'visitor' && (!organizationName || !organizationName.trim())) {
-        const err = new Error(assignedRole === 'exhibitor' ? 'Company / Brand Name is required.' : 'Organization Name is required.');
+      // Mandatory Organization / Company Name check for all roles
+      const resolvedGoogleOrg = (organizationName || company || '').trim();
+      if (!resolvedGoogleOrg || resolvedGoogleOrg.length < 2) {
+        const err = new Error(
+          assignedRole === 'visitor'
+            ? 'Company / Organization Name is required (minimum 2 characters).'
+            : assignedRole === 'exhibitor'
+            ? 'Company / Brand Name is required.'
+            : 'Organization Name is required.'
+        );
         err.statusCode = 400;
         throw err;
       }

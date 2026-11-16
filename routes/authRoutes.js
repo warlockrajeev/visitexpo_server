@@ -112,17 +112,23 @@ router.post('/signup', authLimiter, async (req, res, next) => {
     if (!city || !city.trim()) {
       return res.status(400).json({ success: false, error: 'City / Location is required' });
     }
-    if (role !== 'visitor' && (!organizationName || !organizationName.trim())) {
+    const resolvedOrgName = (organizationName || req.body?.company || '').trim();
+    if (!resolvedOrgName || resolvedOrgName.length < 2) {
       return res.status(400).json({
         success: false,
-        error: role === 'exhibitor' ? 'Company / Exhibitor Name is required' : 'Organization Name is required'
+        error:
+          role === 'visitor'
+            ? 'Company / Organization Name is required (minimum 2 characters).'
+            : role === 'exhibitor'
+            ? 'Company / Exhibitor Name is required'
+            : 'Organization Name is required'
       });
     }
     if (role === 'visitor' && (!Array.isArray(interests) || !interests.some((interest) => typeof interest === 'string' && interest.trim()))) {
       return res.status(400).json({ success: false, error: 'Please select a visitor category.' });
     }
 
-    const data = await AuthService.signup(name, email, password, organizationName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail);
+    const data = await AuthService.signup(name, email, password, resolvedOrgName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail);
     
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);
@@ -208,7 +214,7 @@ router.post('/google/check', authLimiter, async (req, res, next) => {
     // - For exhibitor: has verified phone and company/organization set
     const hasOrg = !!(user.organization && user.organization.name && !user.organization.name.includes("'s Organization"));
     const hasPhone = !!user.phone && user.isPhoneVerified !== false;
-    const hasDetails = user.role === 'visitor' ? hasPhone : (hasPhone && (hasOrg || !!user.company));
+    const hasDetails = hasPhone && (hasOrg || !!user.company);
 
     return res.status(200).json({
       success: true,

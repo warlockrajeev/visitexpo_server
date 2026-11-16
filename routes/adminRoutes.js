@@ -1879,17 +1879,20 @@ router.get('/users', async (req, res, next) => {
 
     if (search) {
       const searchRegex = { $regex: search, $options: 'i' };
+      const searchOr = [
+        { name: searchRegex },
+        { email: searchRegex },
+        { phone: searchRegex },
+        { company: searchRegex }
+      ];
       if (query.$or) {
         query.$and = [
           { $or: query.$or },
-          { $or: [{ name: searchRegex }, { email: searchRegex }] }
+          { $or: searchOr }
         ];
         delete query.$or;
       } else {
-        query.$or = [
-          { name: searchRegex },
-          { email: searchRegex }
-        ];
+        query.$or = searchOr;
       }
     }
 
