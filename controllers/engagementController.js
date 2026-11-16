@@ -435,7 +435,7 @@ export const getEventEngagements = async (req, res) => {
         { type: { $in: ['interested', 'follower', 'both'] } }
       ]
     };
-    const [rawAttendees, interestedCount, followersCount] = await Promise.all([
+    const [rawAttendees, interestedCount, followersCount, dbEvent, passEngagementCount] = await Promise.all([
       EventEngagement.find(networkQuery).sort({ createdAt: -1 }).lean(),
       EventEngagement.countDocuments({
         eventSlug: cleanSlug,
@@ -452,8 +452,26 @@ export const getEventEngagements = async (req, res) => {
           { isFollowed: true },
           { type: { $in: ['follower', 'both'] } }
         ]
-      })
+      }),
+      Event.findOne({ slug: cleanSlug }).select('_id freePassClaimedCount').lean().catch(() => null),
+      EventEngagement.countDocuments({
+        eventSlug: cleanSlug,
+        status: { $ne: 'cancelled' },
+        passType: { $exists: true, $nin: [null, ''] }
+      }).catch(() => 0)
     ]);
+
+    const visitorDocsCount = dbEvent?._id
+      ? await Visitor.countDocuments({
+          event: dbEvent._id,
+          registrationStatus: { $ne: 'cancelled' }
+        }).catch(() => 0)
+      : 0;
+    const passRequestsCount = Math.max(
+      visitorDocsCount || 0,
+      passEngagementCount || 0,
+      Number(dbEvent?.freePassClaimedCount || 0)
+    );
 
     // Check user's current engagement
     let userEngagement = null;
@@ -539,9 +557,11 @@ export const getEventEngagements = async (req, res) => {
         slug: cleanSlug,
         attendees,
         total: attendees.length,
+        passRequestsCount,
         counts: {
           interested: interestedCount,
-          followers: followersCount
+          followers: followersCount,
+          passRequests: passRequestsCount
         },
         userStatus: {
           isInterested,

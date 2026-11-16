@@ -2130,6 +2130,72 @@ router.put('/users/:id/suspend', async (req, res, next) => {
   }
 });
 
+// @desc    Bulk delete multiple users permanently and cascade all associated platform data
+// @route   POST /api/admin/users/bulk-delete
+router.post('/users/bulk-delete', async (req, res, next) => {
+  try {
+    const { userIds } = req.body || {};
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please select at least one user account to delete.'
+      });
+    }
+
+    const callerId = req.user?.id || getCallerId(req);
+    const uniqueIds = Array.from(
+      new Set(
+        userIds
+          .map(id => String(id || '').trim())
+          .filter(id => id && mongoose.isValidObjectId(id))
+      )
+    );
+
+    if (uniqueIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'No valid user IDs provided for bulk deletion.'
+      });
+    }
+
+    const deletedIds = [];
+    const skipped = [];
+
+    for (const targetUserId of uniqueIds) {
+      try {
+        await deleteUserAndAllPlatformData(targetUserId, callerId);
+        deletedIds.push(targetUserId);
+      } catch (err) {
+        skipped.push({
+          userId: targetUserId,
+          reason: err.message || 'Could not delete user'
+        });
+      }
+    }
+
+    if (deletedIds.length === 0 && skipped.length > 0) {
+      return res.status(400).json({
+        success: false,
+        error: skipped[0].reason || 'None of the selected users could be deleted.',
+        skipped
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message:
+        skipped.length > 0
+          ? `Permanently deleted ${deletedIds.length} user account(s). (${skipped.length} protected/skipped)`
+          : `Permanently deleted ${deletedIds.length} user account(s) and all associated platform data.`,
+      deletedIds,
+      deletedCount: deletedIds.length,
+      skipped
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // @desc    Delete user permanently and cascade all associated platform data
 // @route   DELETE /api/admin/users/:id
 router.delete('/users/:id', async (req, res, next) => {

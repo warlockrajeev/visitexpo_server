@@ -750,7 +750,9 @@ class WordPressDirectorySyncService {
           category: resolvedCategory,
           categories: [resolvedCategory],
           interestedCount: dynamicInterestedCount,
-          attendeesCount: dynamicInterestedCount
+          attendeesCount: dynamicInterestedCount,
+          passRequestsCount: visCount,
+          passRequestedCount: visCount
         };
       });
 
@@ -825,6 +827,26 @@ class WordPressDirectorySyncService {
         event.interestedCount = Math.max(0, (event.interestedCount || 0) + delta);
         event.attendeesCount = event.interestedCount;
       }
+    }
+  }
+
+  /**
+   * Immediately update specific event's requested pass count in warm memory cache
+   */
+  updateEventPassRequestCount(slugOrId, delta = 1) {
+    if (!memoryCache.events || !Array.isArray(memoryCache.events)) return;
+    const cleanKey = String(slugOrId || '').toLowerCase().trim();
+    if (!cleanKey) return;
+    const event = memoryCache.events.find(
+      (e) =>
+        (e.slug || '').toLowerCase().trim() === cleanKey ||
+        String(e._id || '').toLowerCase().trim() === cleanKey ||
+        String(e.wpPostId || '').toLowerCase().trim() === cleanKey
+    );
+    if (event) {
+      const nextCount = Math.max(0, Number(event.passRequestsCount ?? event.passRequestedCount ?? 0) + delta);
+      event.passRequestsCount = nextCount;
+      event.passRequestedCount = nextCount;
     }
   }
 

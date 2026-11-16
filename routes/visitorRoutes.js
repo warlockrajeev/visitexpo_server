@@ -597,8 +597,11 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       if (cleanSlug) {
         WordPressDirectorySyncService.updateEventInterestedCount(cleanSlug, 1);
         WordPressDirectorySyncService.updateEventInterestedCount(String(resolvedEventId), 1);
+        WordPressDirectorySyncService.updateEventPassRequestCount(cleanSlug, 1);
       }
+      WordPressDirectorySyncService.updateEventPassRequestCount(String(resolvedEventId), 1);
       WordPressDirectorySyncService.clearCache();
+      WordPressDirectorySyncService.notifyFrontendCacheRefresh();
     } catch (_) {}
 
     // 4. Automatically create a Lead in Lead CRM
@@ -810,15 +813,110 @@ router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manag
       query.event = { $in: myEventIds };
     }
 
-    const [total, checkedIn, notCheckedIn, virtual, confirmed, pending, expired] = await Promise.all([
+    const [total, checkedIn, notCheckedIn, virtual, confirmed, pending, expired, groupedByEvent] = await Promise.all([
       Visitor.countDocuments(query),
       Visitor.countDocuments({ ...query, checkInStatus: 'checked_in' }),
       Visitor.countDocuments({ ...query, checkInStatus: 'not_checked_in' }),
       Visitor.countDocuments({ ...query, attendanceType: 'virtual' }),
       Visitor.countDocuments({ ...query, registrationStatus: 'confirmed' }),
       Visitor.countDocuments({ ...query, registrationStatus: 'pending' }),
-      Visitor.countDocuments({ ...query, registrationStatus: 'expired' })
+      Visitor.countDocuments({ ...query, registrationStatus: 'expired' }),
+      Visitor.aggregate([
+        { $match: query },
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: '$event',
+            totalRequests: { $sum: 1 },
+            allRecordsCount: { $sum: 1 },
+            pendingCount: {
+              $sum: {
+                $cond: [{ $eq: ['$registrationStatus', 'pending'] }, 1, 0]
+              }
+            },
+            confirmedCount: {
+              $sum: {
+                $cond: [{ $in: ['$registrationStatus', ['confirmed', 'expired']] }, 1, 0]
+              }
+            },
+            checkedInCount: {
+              $sum: {
+                $cond: [{ $eq: ['$checkInStatus', 'checked_in'] }, 1, 0]
+              }
+            },
+            cancelledCount: {
+              $sum: {
+                $cond: [{ $eq: ['$registrationStatus', 'cancelled'] }, 1, 0]
+              }
+            },
+            latestRequestAt: { $max: '$createdAt' },
+            visitors: {
+              $push: {
+                _id: '$_id',
+                name: '$name',
+                email: '$email',
+                phone: '$phone',
+                company: '$company',
+                designation: '$designation',
+                country: '$country',
+                attendanceType: '$attendanceType',
+                registrationStatus: '$registrationStatus',
+                checkInStatus: '$checkInStatus',
+                checkInTime: '$checkInTime',
+                qrCode: '$qrCode',
+                createdAt: '$createdAt'
+              }
+            }
+          }
+        },
+        { $sort: { totalRequests: -1, latestRequestAt: -1 } }
+      ])
     ]);
+
+    const eventIds = groupedByEvent
+      .map((g) => g._id)
+      .filter((id) => id && mongoose.Types.ObjectId.isValid(id));
+    const eventDocs = eventIds.length > 0
+      ? await Event.find({ _id: { $in: eventIds } })
+          .select('title slug city venue startDate endDate status orgName orgEmail organizer')
+          .populate('organizer', 'name email contact')
+          .lean()
+      : [];
+    const eventMap = new Map(eventDocs.map((ev) => [String(ev._id), ev]));
+
+    const eventBreakdown = groupedByEvent
+      .map((group) => {
+        const ev = group._id ? eventMap.get(String(group._id)) : null;
+        const organizerName =
+          ev?.organizer?.name ||
+          ev?.orgName ||
+          'VisitExpo Verified Organizer';
+        const organizerEmail =
+          ev?.organizer?.email ||
+          ev?.organizer?.contact?.email ||
+          ev?.orgEmail ||
+          '';
+        return {
+          eventId: group._id ? String(group._id) : 'unassigned',
+          eventTitle: ev?.title || 'Unassigned / External Exhibition',
+          eventSlug: ev?.slug || '',
+          city: ev?.city || 'India',
+          venue: ev?.venue || '',
+          startDate: ev?.startDate || null,
+          endDate: ev?.endDate || null,
+          organizerName,
+          organizerEmail,
+          totalRequests: group.totalRequests || 0,
+          allRecordsCount: group.allRecordsCount || 0,
+          pendingCount: group.pendingCount || 0,
+          confirmedCount: group.confirmedCount || 0,
+          checkedInCount: group.checkedInCount || 0,
+          cancelledCount: group.cancelledCount || 0,
+          latestRequestAt: group.latestRequestAt || null,
+          visitors: group.visitors || []
+        };
+      })
+      .filter((item) => item.allRecordsCount > 0);
 
     res.status(200).json({
       success: true,
@@ -829,7 +927,8 @@ router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manag
         virtual,
         confirmed,
         pending,
-        expired
+        expired,
+        eventBreakdown
       }
     });
   } catch (error) {
@@ -914,7 +1013,11 @@ router.get('/', protect, authorize('super_admin', 'organizer', 'event_manager', 
 
     const [docs, total] = await Promise.all([
       Visitor.find(query)
-        .populate('event', 'title city startDate endDate status venue slug banner logo')
+        .populate({
+          path: 'event',
+          select: 'title city startDate endDate status venue slug banner logo orgName orgEmail organizer',
+          populate: { path: 'organizer', select: 'name email contact' }
+        })
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pgLimit),
