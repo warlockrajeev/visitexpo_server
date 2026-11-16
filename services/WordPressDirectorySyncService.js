@@ -21,7 +21,17 @@ import { parseWpLocation } from '../routes/adminRoutes.js';
 const WORDPRESS_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
 const WORDPRESS_API_KEY = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
 
-// Precomputed category pools for high-quality fallback images
+const BROKEN_WP_URLS = new Set([
+  'https://visitexpo.in/wp-content/uploads/2026/09/India-International-EV-Show-2026_new.jpg',
+  'https://visitexpo.in/wp-content/uploads/2026/08/Medicall-Expo-2026.jpg',
+  'https://visitexpo.in/wp-content/uploads/2026/08/ET-TECH-X-2026_new.jpg',
+  'https://visitexpo.in/wp-content/uploads/2026/09/FINETECH-JAPAN_new.jpg',
+  'https://visitexpo.in/wp-content/uploads/2026/09/Cosmobeaute-Indonesia_new.jpg',
+  'https://visitexpo.in/wp-content/uploads/2026/09/Watch-Jewellery-Middle-East-Show_new.jpg',
+  'https://visitexpo.in/wp-content/uploads/2026/09/Feria-Habitat-Valencia_new.jpg'
+]);
+
+// Precomputed category pools for high-quality fallback images (verified 200-OK)
 const CATEGORY_IMAGE_POOLS = {
   'Travel & Tourism': [
     'https://visitexpo.in/wp-content/uploads/2026/08/Hotel-Data-Conference-2.jpg',
@@ -30,8 +40,7 @@ const CATEGORY_IMAGE_POOLS = {
   ],
   'Automotive & EV': [
     'https://visitexpo.in/wp-content/uploads/2026/08/Rush-Administrative-Services-Inc.-Annual-Trucks-Centers-and-Skills-Rodeo-1.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/07/Bharat-Mobility-Global-Expo_new.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/09/India-International-EV-Show-2026_new.jpg'
+    'https://visitexpo.in/wp-content/uploads/2026/07/Bharat-Mobility-Global-Expo_new.jpg'
   ],
   'Aerospace & Aviation': [
     'https://visitexpo.in/wp-content/uploads/2026/08/Refining-India-2026.jpg',
@@ -43,8 +52,7 @@ const CATEGORY_IMAGE_POOLS = {
   ],
   'Healthcare & Pharma': [
     'https://visitexpo.in/wp-content/uploads/2026/08/48th-edition-Medicall-Expo-New-Delhi-2026_new.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/06/India-Med-Expo-Hyderabad-1.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/08/Medicall-Expo-2026.jpg'
+    'https://visitexpo.in/wp-content/uploads/2026/06/India-Med-Expo-Hyderabad-1.jpg'
   ],
   'Construction & Infra': [
     'https://visitexpo.in/wp-content/uploads/2026/07/Build-Bangladesh-Expo-31st-Edition.jpg',
@@ -52,9 +60,7 @@ const CATEGORY_IMAGE_POOLS = {
     'https://visitexpo.in/wp-content/uploads/2026/07/Water-Environment-Expo.jpg'
   ],
   'Technology & AI': [
-    'https://visitexpo.in/wp-content/uploads/2026/08/ET-TECH-X-2026_new.jpg',
     'https://visitexpo.in/wp-content/uploads/2026/07/led.png',
-    'https://visitexpo.in/wp-content/uploads/2026/09/FINETECH-JAPAN_new.jpg',
     'https://visitexpo.in/wp-content/uploads/2026/09/ITEX-IRAQ_new.jpg'
   ],
   'Textile & Fashion': [
@@ -70,9 +76,7 @@ const CATEGORY_IMAGE_POOLS = {
   ],
   'Art & Lifestyle': [
     'https://visitexpo.in/wp-content/uploads/2026/08/Couture-India-Show-2026-New-Delhi.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/08/The-Wedding-Collective-Expo.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/09/Cosmobeaute-Indonesia_new.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/09/Watch-Jewellery-Middle-East-Show_new.jpg'
+    'https://visitexpo.in/wp-content/uploads/2026/08/The-Wedding-Collective-Expo.jpg'
   ],
   'Energy & Environment': [
     'https://visitexpo.in/wp-content/uploads/2026/07/Water-Environment-Expo.jpg',
@@ -82,8 +86,7 @@ const CATEGORY_IMAGE_POOLS = {
   ],
   'Trade & Industry': [
     'https://visitexpo.in/wp-content/uploads/2026/08/Refining-India-2026.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/09/Scotland-Manufacturing-and-Supply-Chain-Conference-Exhibition-2026_new.jpg',
-    'https://visitexpo.in/wp-content/uploads/2026/09/Feria-Habitat-Valencia_new.jpg'
+    'https://visitexpo.in/wp-content/uploads/2026/09/Scotland-Manufacturing-and-Supply-Chain-Conference-Exhibition-2026_new.jpg'
   ]
 };
 
@@ -116,12 +119,16 @@ function inferCategory(title = '', desc = '') {
   return 'Trade & Industry';
 }
 
-const CATEGORY_POOL_URL_SET = new Set(Object.values(CATEGORY_IMAGE_POOLS).flat());
+const CATEGORY_POOL_URL_SET = new Set([
+  ...Object.values(CATEGORY_IMAGE_POOLS).flat(),
+  ...BROKEN_WP_URLS
+]);
 
 function isValidEventImageUrl(url) {
   if (!url || typeof url !== 'string') return false;
-  const trimmed = url.trim();
+  const trimmed = normalizeEventImageUrl(url);
   if (!trimmed || trimmed.includes('unsplash') || trimmed.includes('cropped-Untitled')) return false;
+  if (BROKEN_WP_URLS.has(trimmed)) return false;
   return (
     trimmed.includes('wp-content/uploads') ||
     trimmed.includes('res.cloudinary.com') ||
@@ -192,6 +199,8 @@ class WordPressDirectorySyncService {
     try {
       const jsonPath = path.join(__wpSyncDirname, '../data/wordpress-event-images.json');
       if (fs.existsSync(jsonPath)) {
+        const stat = fs.statSync(jsonPath);
+        this.lastImageMapMtimeMs = stat.mtimeMs;
         const raw = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
         for (const [k, url] of Object.entries(raw)) {
           if (isValidEventImageUrl(url)) {
@@ -202,14 +211,25 @@ class WordPressDirectorySyncService {
             if (norm) this.imageLookupMap.set(norm, cleanUrl);
           }
         }
-        console.log(`[WP-Sync] Loaded ${this.imageLookupMap.size} precomputed image mappings.`);
       }
     } catch (err) {
       console.warn('[WP-Sync] Could not load image map:', err.message);
     }
   }
 
+  refreshImageMapIfNeeded() {
+    try {
+      const jsonPath = path.join(__wpSyncDirname, '../data/wordpress-event-images.json');
+      if (!fs.existsSync(jsonPath)) return;
+      const stat = fs.statSync(jsonPath);
+      if (!this.lastImageMapMtimeMs || stat.mtimeMs > this.lastImageMapMtimeMs) {
+        this.loadImageMap();
+      }
+    } catch {}
+  }
+
   findImage(slug, id, wpPostId, title) {
+    this.refreshImageMapIfNeeded();
     if (slug && this.imageLookupMap.has(slug)) return this.imageLookupMap.get(slug);
     if (slug) {
       const cleanSlug = String(slug).toLowerCase().trim();
