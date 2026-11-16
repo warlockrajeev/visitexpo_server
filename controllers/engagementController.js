@@ -650,9 +650,10 @@ export const getUserEngagements = async (req, res) => {
       const rawOrgName = (dbEvt.orgName || e.organizerName || '').trim();
       const isBadOrg =
         /^[0-9a-fA-F]{24}$/.test(rawOrgName) ||
-        /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName);
+        /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName) ||
+        /^(verified organizer|visitexpo verified organizer|visitexpo organizer)$/i.test(rawOrgName);
       const cleanOrganizer =
-        populatedOrgName || (!isBadOrg && rawOrgName ? rawOrgName : '') || 'VisitExpo Verified Organizer';
+        populatedOrgName || (!isBadOrg && rawOrgName ? rawOrgName : '') || 'Organizer';
 
       const formattedDates = dbEvt.startDate
         ? `${new Date(dbEvt.startDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}${

@@ -4637,7 +4637,12 @@ async function buildExpoDetailedReports(eventsList = [], { granularOnly = false 
         wpPostId: ev.wpPostId || '',
         wpUrl: ev.wpUrl || (ev.slug ? `https://visitexpo.in/event/${ev.slug}/` : ''),
         website: ev.website || ev.orgWebsite || ev.organizer?.website || '',
-        orgName: ev.orgName || ev.organizer?.name || 'VisitExpo Verified Organizer',
+        orgName:
+          (ev.orgName && !/^(verified organizer|visitexpo verified organizer|visitexpo organizer)$/i.test(String(ev.orgName).trim())
+            ? ev.orgName
+            : '') ||
+          ev.organizer?.name ||
+          'Organizer',
         orgEmail: ev.orgEmail || ev.organizer?.email || ev.createdBy?.email || '',
         orgPhone: ev.orgPhone || ev.organizer?.contact?.phone || ev.createdBy?.phone || '',
         orgWebsite: ev.orgWebsite || ev.organizer?.website || '',
@@ -5047,7 +5052,13 @@ async function _computeExpoReports(query = {}, { isUnfiltered = false, deletedSl
       wpPostId: ev.wpPostId || '',
       wpUrl: ev.wpUrl || (ev.slug ? `https://visitexpo.in/event/${ev.slug}/` : ''),
       website: ev.website || ev.orgWebsite || orgDoc?.website || '',
-      orgName: ev.orgName || orgDoc?.name || (typeof ev.organizer === 'string' && !mongoose.isValidObjectId(ev.organizer) ? ev.organizer : '') || 'VisitExpo Verified Organizer',
+      orgName:
+        (ev.orgName && !/^(verified organizer|visitexpo verified organizer|visitexpo organizer)$/i.test(String(ev.orgName).trim())
+          ? ev.orgName
+          : '') ||
+        orgDoc?.name ||
+        (typeof ev.organizer === 'string' && !mongoose.isValidObjectId(ev.organizer) ? ev.organizer : '') ||
+        'Organizer',
       orgEmail: ev.orgEmail || orgDoc?.email || creatorDoc?.email || '',
       orgPhone: ev.orgPhone || orgDoc?.contact?.phone || creatorDoc?.phone || '',
       orgWebsite: ev.orgWebsite || orgDoc?.website || '',

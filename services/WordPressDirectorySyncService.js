@@ -473,7 +473,10 @@ class WordPressDirectorySyncService {
             wpPostId: postId,
             wpUrl: `${WORDPRESS_URL}/event/${slug}/`,
             isClaimed: false,
-            orgName: orgName || 'VisitExpo Verified Organizer',
+            orgName:
+              (orgName && !/^(verified organizer|visitexpo verified organizer|visitexpo organizer)$/i.test(orgName.trim())
+                ? orgName
+                : '') || 'Organizer',
             orgEmail: orgEmail || '',
             orgPhone: orgPhone || '',
             orgWebsite: orgWebsite || '',
@@ -711,11 +714,12 @@ class WordPressDirectorySyncService {
         const rawOrgName = (doc.orgName || '').trim();
         const isHostnameOrId =
           /^[0-9a-fA-F]{24}$/.test(rawOrgName) ||
-          /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName);
+          /\b(onrender\.com|vercel\.app|localhost|http:\/\/|https:\/\/)\b/i.test(rawOrgName) ||
+          /^(verified organizer|visitexpo verified organizer|visitexpo organizer)$/i.test(rawOrgName);
         const cleanOrganizer =
           populatedOrgName ||
           (!isHostnameOrId && rawOrgName ? rawOrgName : '') ||
-          'VisitExpo Verified Organizer';
+          'Organizer';
 
         const resolvedCategory = inferCategory(doc.title, doc.description);
 

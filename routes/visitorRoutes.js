@@ -889,8 +889,10 @@ router.get('/stats', protect, authorize('super_admin', 'organizer', 'event_manag
         const ev = group._id ? eventMap.get(String(group._id)) : null;
         const organizerName =
           ev?.organizer?.name ||
-          ev?.orgName ||
-          'VisitExpo Verified Organizer';
+          (ev?.orgName && !/^(verified organizer|visitexpo verified organizer|visitexpo organizer)$/i.test(String(ev.orgName).trim())
+            ? ev.orgName
+            : '') ||
+          'Organizer';
         const organizerEmail =
           ev?.organizer?.email ||
           ev?.organizer?.contact?.email ||
