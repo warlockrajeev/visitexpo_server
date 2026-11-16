@@ -5329,7 +5329,7 @@ router.get('/expo-reports/:id', async (req, res, next) => {
 // PLATFORM USER ACTIVITY MONITOR
 // ============================================================================
 
-// @desc    Get live & historical user activity timeline, per-user summaries, top events & pages
+// @desc    Get live & historical user activity timeline, paginated per-user summaries, top events & pages
 // @route   GET /api/admin/activity-monitor
 router.get('/activity-monitor', async (req, res, next) => {
   try {
@@ -5338,22 +5338,35 @@ router.get('/activity-monitor', async (req, res, next) => {
       activityType = 'all',
       userRole = 'all',
       userKey = '',
+      userId = '',
+      userEmail = '',
       dateRange = 'all',
       sync = 'false',
       page = 1,
-      limit = 25
+      limit = 25,
+      usersPage = 1,
+      usersLimit = 10
     } = req.query;
 
     await syncHistoricalActivitiesToMonitor(sync === 'true');
 
     const query = {};
+    const directoryMatch = {};
+
     const trimmedSearch = String(search || '').trim();
+    const hasSelectedUser = Boolean(
+      String(userKey || '').trim() ||
+      String(userId || '').trim() ||
+      String(userEmail || '').trim()
+    );
+
     if (trimmedSearch) {
       const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(escaped, 'i');
-      query.$or = [
+      const searchOr = [
         { userName: regex },
         { userEmail: regex },
+        { userPhone: regex },
         { userCompany: regex },
         { actionLabel: regex },
         { description: regex },
@@ -5363,38 +5376,80 @@ router.get('/activity-monitor', async (req, res, next) => {
         { 'formInfo.formName': regex },
         { sessionId: regex }
       ];
+      query.$or = searchOr;
+      if (!hasSelectedUser) {
+        directoryMatch.$or = [
+          { userName: regex },
+          { userEmail: regex },
+          { userPhone: regex },
+          { userCompany: regex },
+          { userRole: regex },
+          { sessionId: regex },
+          { actionLabel: regex },
+          { 'targetEvent.title': regex }
+        ];
+      }
     }
 
     if (activityType && activityType !== 'all') {
+      let typeFilter = activityType;
       if (activityType === 'engagement_all') {
-        query.activityType = { $in: ['event_interest', 'event_follow', 'event_bookmark'] };
+        typeFilter = { $in: ['event_interest', 'event_follow', 'event_bookmark'] };
       } else if (activityType === 'forms_all') {
-        query.activityType = { $in: ['form_submit', 'form_interaction', 'pass_request'] };
+        typeFilter = { $in: ['form_submit', 'form_interaction', 'pass_request'] };
       } else if (activityType === 'events_all') {
-        query.activityType = {
+        typeFilter = {
           $in: ['event_click', 'event_view', 'event_interest', 'event_follow', 'event_bookmark', 'pass_request']
         };
-      } else {
-        query.activityType = activityType;
+      }
+      query.activityType = typeFilter;
+      if (!hasSelectedUser) {
+        directoryMatch.activityType = typeFilter;
       }
     }
 
     if (userRole && userRole !== 'all') {
-      query.userRole = String(userRole).toLowerCase().trim();
+      const normalizedRole = String(userRole).toLowerCase().trim();
+      const roleCondition = normalizedRole === 'registered' ? { $ne: 'guest' } : normalizedRole;
+      query.userRole = roleCondition;
+      if (!hasSelectedUser) {
+        directoryMatch.userRole = roleCondition;
+      }
     }
 
-    const trimmedUserKey = String(userKey || '').trim();
-    if (trimmedUserKey) {
-      const escapedUser = trimmedUserKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      query.$and = query.$and || [];
-      query.$and.push({
-        $or: [
-          { userEmail: trimmedUserKey.toLowerCase() },
-          { sessionId: trimmedUserKey },
-          ...(mongoose.isValidObjectId(trimmedUserKey) ? [{ user: new mongoose.Types.ObjectId(trimmedUserKey) }] : []),
-          { userName: new RegExp(`^${escapedUser}$`, 'i') }
-        ]
-      });
+    if (hasSelectedUser) {
+      const userConditions = [];
+      const trimmedUserKey = String(userKey || '').trim();
+      const trimmedUserId = String(userId || '').trim();
+      const trimmedUserEmail = String(userEmail || '').toLowerCase().trim();
+
+      if (trimmedUserEmail) {
+        userConditions.push({ userEmail: trimmedUserEmail });
+      }
+      if (trimmedUserId && mongoose.isValidObjectId(trimmedUserId)) {
+        userConditions.push({ user: new mongoose.Types.ObjectId(trimmedUserId) });
+      }
+      if (trimmedUserKey) {
+        if (trimmedUserKey.startsWith('uid:')) {
+          const rawId = trimmedUserKey.slice(4);
+          if (mongoose.isValidObjectId(rawId)) {
+            userConditions.push({ user: new mongoose.Types.ObjectId(rawId) });
+          }
+        } else {
+          const escapedUser = trimmedUserKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          userConditions.push({ userEmail: trimmedUserKey.toLowerCase() });
+          userConditions.push({ sessionId: trimmedUserKey });
+          if (mongoose.isValidObjectId(trimmedUserKey)) {
+            userConditions.push({ user: new mongoose.Types.ObjectId(trimmedUserKey) });
+          }
+          userConditions.push({ userName: new RegExp(`^${escapedUser}$`, 'i') });
+        }
+      }
+
+      if (userConditions.length > 0) {
+        query.$and = query.$and || [];
+        query.$and.push({ $or: userConditions });
+      }
     }
 
     if (dateRange && dateRange !== 'all') {
@@ -5409,12 +5464,39 @@ router.get('/activity-monitor', async (req, res, next) => {
       }
       if (startDate) {
         query.createdAt = { $gte: startDate };
+        if (!hasSelectedUser) {
+          directoryMatch.createdAt = { $gte: startDate };
+        }
       }
     }
 
     const pgNum = Math.max(1, parseInt(page, 10) || 1);
     const pgLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
     const skip = (pgNum - 1) * pgLimit;
+
+    const uPgNum = Math.max(1, parseInt(usersPage, 10) || 1);
+    const uPgLimit = Math.min(100, Math.max(1, parseInt(usersLimit, 10) || 10));
+    const uSkip = (uPgNum - 1) * uPgLimit;
+
+    const userGroupingKey = {
+      $cond: [
+        { $gt: [{ $strLenCP: { $ifNull: ['$userEmail', ''] } }, 0] },
+        { $toLower: '$userEmail' },
+        {
+          $cond: [
+            { $ne: [{ $ifNull: ['$user', null] }, null] },
+            { $concat: ['uid:', { $toString: '$user' }] },
+            {
+              $cond: [
+                { $gt: [{ $strLenCP: { $ifNull: ['$sessionId', ''] } }, 0] },
+                '$sessionId',
+                '$userName'
+              ]
+            }
+          ]
+        }
+      ]
+    };
 
     const [
       docs,
@@ -5425,7 +5507,8 @@ router.get('/activity-monitor', async (req, res, next) => {
       engagementsCount,
       formSubmissionsCount,
       typeAgg,
-      userSummaryAgg,
+      allUniqueUsersCountAgg,
+      userSummaryFacetAgg,
       topEventsAgg,
       topPagesAgg
     ] = await Promise.all([
@@ -5441,32 +5524,28 @@ router.get('/activity-monitor', async (req, res, next) => {
         { $sort: { count: -1 } }
       ]),
       UserActivity.aggregate([
+        { $group: { _id: userGroupingKey } },
+        { $count: 'total' }
+      ]),
+      UserActivity.aggregate([
+        ...(Object.keys(directoryMatch).length > 0 ? [{ $match: directoryMatch }] : []),
         { $sort: { createdAt: -1 } },
         {
           $group: {
-            _id: {
-              $cond: [
-                { $gt: [{ $strLenCP: { $ifNull: ['$userEmail', ''] } }, 0] },
-                '$userEmail',
-                {
-                  $cond: [
-                    { $gt: [{ $strLenCP: { $ifNull: ['$sessionId', ''] } }, 0] },
-                    '$sessionId',
-                    '$userName'
-                  ]
-                }
-              ]
-            },
-            userId: { $first: '$user' },
+            _id: userGroupingKey,
+            userId: { $max: '$user' },
             userName: { $first: '$userName' },
-            userEmail: { $first: '$userEmail' },
-            userPhone: { $first: '$userPhone' },
+            userEmail: { $max: '$userEmail' },
+            userPhone: { $max: '$userPhone' },
             userRole: { $first: '$userRole' },
-            userCompany: { $first: '$userCompany' },
+            userCompany: { $max: '$userCompany' },
+            sessionId: { $max: '$sessionId' },
             totalActions: { $sum: 1 },
             lastActionAt: { $max: '$createdAt' },
+            firstActionAt: { $min: '$createdAt' },
             lastActionLabel: { $first: '$actionLabel' },
             lastPagePath: { $first: '$pagePath' },
+            lastEventTitle: { $first: '$targetEvent.title' },
             pageVisitsCount: {
               $sum: { $cond: [{ $in: ['$activityType', ['page_visit', 'event_view']] }, 1, 0] }
             },
@@ -5478,11 +5557,19 @@ router.get('/activity-monitor', async (req, res, next) => {
             },
             formsCount: {
               $sum: { $cond: [{ $in: ['$activityType', ['form_submit', 'form_interaction', 'pass_request']] }, 1, 0] }
+            },
+            passRequestsCount: {
+              $sum: { $cond: [{ $eq: ['$activityType', 'pass_request'] }, 1, 0] }
             }
           }
         },
-        { $sort: { lastActionAt: -1 } },
-        { $limit: 50 }
+        { $sort: { lastActionAt: -1, totalActions: -1 } },
+        {
+          $facet: {
+            metadata: [{ $count: 'total' }],
+            docs: [{ $skip: uSkip }, { $limit: uPgLimit }]
+          }
+        }
       ]),
       UserActivity.aggregate([
         { $match: { 'targetEvent.title': { $exists: true, $ne: '' } } },
@@ -5535,6 +5622,11 @@ router.get('/activity-monitor', async (req, res, next) => {
       if (t?._id) typeBreakdown[t._id] = t.count;
     });
 
+    const userFacet = userSummaryFacetAgg?.[0] || {};
+    const usersTotal = userFacet.metadata?.[0]?.total || 0;
+    const userSummaryDocs = Array.isArray(userFacet.docs) ? userFacet.docs : [];
+    const uniqueUsersTotal = allUniqueUsersCountAgg?.[0]?.total || usersTotal;
+
     res.status(200).json({
       success: true,
       data: {
@@ -5542,16 +5634,19 @@ router.get('/activity-monitor', async (req, res, next) => {
         total,
         page: pgNum,
         pages: Math.ceil(total / pgLimit) || 1,
+        usersTotal,
+        usersPage: uPgNum,
+        usersPages: Math.ceil(usersTotal / uPgLimit) || 1,
         stats: {
           totalActivities,
           pageVisitsCount,
           eventClicksCount,
           engagementsCount,
           formSubmissionsCount,
-          uniqueUsersCount: userSummaryAgg.length
+          uniqueUsersCount: uniqueUsersTotal
         },
         typeBreakdown,
-        userSummaries: userSummaryAgg.map((u) => ({
+        userSummaries: userSummaryDocs.map((u) => ({
           userKey: u._id,
           userId: u.userId || null,
           userName: u.userName || 'Guest Visitor',
@@ -5559,14 +5654,18 @@ router.get('/activity-monitor', async (req, res, next) => {
           userPhone: u.userPhone || '',
           userRole: u.userRole || 'guest',
           userCompany: u.userCompany || '',
+          sessionId: u.sessionId || '',
           totalActions: u.totalActions || 0,
           lastActionAt: u.lastActionAt,
+          firstActionAt: u.firstActionAt,
           lastActionLabel: u.lastActionLabel || '',
           lastPagePath: u.lastPagePath || '/',
+          lastEventTitle: u.lastEventTitle || '',
           pageVisitsCount: u.pageVisitsCount || 0,
           eventClicksCount: u.eventClicksCount || 0,
           interestedCount: u.interestedCount || 0,
-          formsCount: u.formsCount || 0
+          formsCount: u.formsCount || 0,
+          passRequestsCount: u.passRequestsCount || 0
         })),
         topEvents: topEventsAgg,
         topPages: topPagesAgg
