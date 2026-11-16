@@ -12,6 +12,7 @@ import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { syncUserCompanyName } from '../services/companyProfileHelper.js';
 import { notifyFollowersOnActivity } from '../services/followNotificationService.js';
+import { logUserActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 
@@ -375,6 +376,46 @@ router.post('/', protect, async (req, res) => {
         url: `/expo/${resolvedSlug}`
       });
     } catch (_) {}
+
+    void logUserActivity({
+      req,
+      user: {
+        id: req.user?.id || null,
+        name: requesterName,
+        email: requesterEmail,
+        phone: requesterPhone,
+        role: req.user?.role || 'visitor',
+        company: updatedCompany
+      },
+      activityType: 'form_submit',
+      category: 'form',
+      actionLabel: `Submitted ${requestType.replace('_', ' ')} Request Form for ${matchedEvent?.title || cleanTitle}`,
+      description: cleanTopic || cleanDelegationInterests || cleanTravelPref || cleanMessage,
+      pagePath: `/expo/${resolvedSlug}`,
+      targetEvent: {
+        eventId: matchedEvent?._id ? String(matchedEvent._id) : '',
+        title: matchedEvent?.title || cleanTitle,
+        slug: resolvedSlug,
+        city: created.eventCity || ''
+      },
+      formInfo: {
+        formName:
+          requestType === 'speaker'
+            ? 'Speaker Application Form'
+            : requestType === 'delegation'
+            ? 'Corporate Delegation Form'
+            : 'Travel & Hotel Discount Form',
+        status: 'submitted',
+        fieldsSummary: {
+          requestType,
+          company: updatedCompany,
+          sessionTopic: cleanTopic,
+          teamSize: cleanTeamSize,
+          travelPreference: cleanTravelPref
+        }
+      },
+      source: 'server_hook'
+    });
 
     res.status(201).json({
       success: true,

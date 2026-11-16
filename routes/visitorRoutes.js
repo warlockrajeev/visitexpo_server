@@ -18,6 +18,7 @@ import WordPressDirectorySyncService from '../services/WordPressDirectorySyncSer
 import { protect, authorize } from '../middlewares/auth.js';
 import { notifyOrganizerOnVisitor } from '../services/oneSignalService.js';
 import { createVisitorQrCode, ensureVisitorQrCode } from '../services/visitorBadgeService.js';
+import { logUserActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 const FREE_VISITOR_REGISTRATION_LIMIT = 3;
@@ -633,6 +634,43 @@ const registerVisitor = async (req, res, next, { enforceFreePlanLimit = false } 
       visitor,
       type: 'registered'
     }).catch(pushErr => console.warn('[VisitorRoutes] Push notification warning:', pushErr.message));
+
+    // Record Visitor Pass Request activity for Admin Activity Monitor
+    void logUserActivity({
+      req,
+      user: {
+        name: visitor.name,
+        email: visitor.email,
+        phone: visitor.phone,
+        role: 'visitor',
+        company: visitor.company
+      },
+      activityType: 'pass_request',
+      category: 'pass',
+      actionLabel: enforceFreePlanLimit
+        ? `Obtained Visitor Pass for ${event.title}`
+        : `Requested Visitor Pass for ${event.title}`,
+      description: `${visitor.name} (${visitor.email}) ${enforceFreePlanLimit ? 'registered for a visitor pass' : 'requested an admin-approved pass'} at "${event.title}".`,
+      pagePath: event.slug ? `/expo/${event.slug}` : '/events',
+      targetEvent: {
+        eventId: String(event._id),
+        title: event.title,
+        slug: event.slug || '',
+        city: event.city || ''
+      },
+      formInfo: {
+        formName: 'Visitor Pass Request Form',
+        status: enforceFreePlanLimit ? 'confirmed' : 'pending',
+        fieldsSummary: {
+          name: visitor.name,
+          email: visitor.email,
+          company: visitor.company,
+          designation: visitor.designation,
+          attendanceType: visitor.attendanceType
+        }
+      },
+      source: 'server_hook'
+    });
 
     res.status(201).json({
       success: true,

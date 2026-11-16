@@ -12,6 +12,7 @@ import { protect, authorize } from '../middlewares/auth.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { syncUserCompanyName } from '../services/companyProfileHelper.js';
 import { notifyFollowersOnActivity } from '../services/followNotificationService.js';
+import { logUserActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 
@@ -267,6 +268,40 @@ router.post('/', protect, async (req, res) => {
         url: `/expo/${resolvedSlug}`
       });
     } catch (_) {}
+
+    void logUserActivity({
+      req,
+      user: {
+        id: req.user?.id || null,
+        name: requesterName,
+        email: requesterEmail,
+        phone: requesterPhone,
+        role: req.user?.role || 'exhibitor',
+        company: updatedCompany
+      },
+      activityType: 'form_submit',
+      category: 'form',
+      actionLabel: `Submitted Booth Request Form for ${matchedEvent?.title || cleanTitle}`,
+      description: `${createdRequest.inquiryType}${updatedCompany ? ` • ${updatedCompany}` : ''}`,
+      pagePath: `/expo/${resolvedSlug}`,
+      targetEvent: {
+        eventId: matchedEvent?._id ? String(matchedEvent._id) : '',
+        title: matchedEvent?.title || cleanTitle,
+        slug: resolvedSlug,
+        city: createdRequest.eventCity || ''
+      },
+      formInfo: {
+        formName: 'Booth & Stall Request Form',
+        status: 'submitted',
+        fieldsSummary: {
+          inquiryType: createdRequest.inquiryType,
+          company: updatedCompany,
+          designation: requesterDesignation,
+          message: requesterMessage
+        }
+      },
+      source: 'server_hook'
+    });
 
     res.status(201).json({
       success: true,

@@ -6,6 +6,7 @@
 import express from 'express';
 import ContactMessage from '../models/ContactMessage.js';
 import { protect, requirePermission } from '../middlewares/auth.js';
+import { logUserActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 
@@ -44,6 +45,33 @@ router.post('/', async (req, res, next) => {
       phone: (phone || '').trim(),
       message: message.trim(),
       status: 'new'
+    });
+
+    void logUserActivity({
+      req,
+      user: {
+        name: contact.name,
+        email: contact.email,
+        phone: contact.phone,
+        role: (contact.role || 'visitor').toLowerCase(),
+        company: meta?.company || ''
+      },
+      activityType: 'form_submit',
+      category: 'form',
+      actionLabel: `Submitted Contact / Inquiry Form (${finalSource})`,
+      description: contact.message,
+      pagePath: '/',
+      formInfo: {
+        formName: `Contact Inquiry (${finalSource})`,
+        status: 'submitted',
+        fieldsSummary: {
+          role: contact.role,
+          source: finalSource,
+          company: meta?.company || '',
+          message: contact.message
+        }
+      },
+      source: 'server_hook'
     });
 
     res.status(201).json({

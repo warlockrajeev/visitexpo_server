@@ -18,6 +18,7 @@ import { generateAccessToken, generateRefreshToken } from '../utils/jwt.js';
 import { isUserCorporateEmail } from '../utils/emailValidator.js';
 import { sendWorkEmailVerificationCode, verifyWorkEmailCode } from '../services/workEmailVerificationService.js';
 import { resolveUserCompany, syncUserCompanyName } from '../services/companyProfileHelper.js';
+import { logUserActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 
@@ -133,6 +134,28 @@ router.post('/signup', authLimiter, async (req, res, next) => {
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);
 
+    void logUserActivity({
+      req,
+      user: data.user,
+      activityType: 'auth',
+      category: 'auth',
+      actionLabel: `Registered ${String(data.user?.role || role || 'visitor').replace('_', ' ')} Account`,
+      description: `${data.user?.name || name} (${data.user?.email || email}) completed account registration.`,
+      pagePath: '/login',
+      formInfo: {
+        formName: 'Registration Signup Form',
+        status: 'submitted',
+        fieldsSummary: {
+          name: data.user?.name || name,
+          email: data.user?.email || email,
+          role: data.user?.role || role,
+          company: resolvedOrgName,
+          city
+        }
+      },
+      source: 'server_hook'
+    });
+
     res.status(201).json({
       success: true,
       message: 'Registration successful',
@@ -157,6 +180,25 @@ router.post('/login', authLimiter, async (req, res, next) => {
 
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);
+
+    void logUserActivity({
+      req,
+      user: data.user,
+      activityType: 'auth',
+      category: 'auth',
+      actionLabel: `Logged In (${String(data.user?.role || role || 'user').replace('_', ' ')})`,
+      description: `${data.user?.name || email} logged into the platform.`,
+      pagePath: '/login',
+      formInfo: {
+        formName: 'User Login Form',
+        status: 'submitted',
+        fieldsSummary: {
+          email: data.user?.email || email,
+          role: data.user?.role || role
+        }
+      },
+      source: 'server_hook'
+    });
 
     res.status(200).json({
       success: true,
@@ -285,6 +327,25 @@ router.post('/google', authLimiter, async (req, res, next) => {
 
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);
+
+    void logUserActivity({
+      req,
+      user: data.user,
+      activityType: 'auth',
+      category: 'auth',
+      actionLabel: `Logged In (${String(data.user?.role || role || 'user').replace('_', ' ')})`,
+      description: `${data.user?.name || email} logged into the platform.`,
+      pagePath: '/login',
+      formInfo: {
+        formName: 'User Login Form',
+        status: 'submitted',
+        fieldsSummary: {
+          email: data.user?.email || email,
+          role: data.user?.role || role
+        }
+      },
+      source: 'server_hook'
+    });
 
     res.status(200).json({
       success: true,

@@ -29,6 +29,8 @@ import Lead from '../models/Lead.js';
 import Review from '../models/Review.js';
 import BoothRequest from '../models/BoothRequest.js';
 import EventRequest from '../models/EventRequest.js';
+import UserActivity from '../models/UserActivity.js';
+import { syncHistoricalActivitiesToMonitor } from '../utils/activityLogger.js';
 import { verifyPromotionSMTP } from '../services/promotionEmailService.js';
 import mongoose from 'mongoose';
 import { protect, authorize } from '../middlewares/auth.js';
@@ -3770,6 +3772,7 @@ export const ADMIN_PERMISSION_MODULES = [
       { id: 'attendees.view', label: 'View Followers & Attendees', description: 'Browse event bookmarks and followers' },
       { id: 'users.view', label: 'View Platform Users', description: 'Search and inspect user dossiers across all roles' },
       { id: 'users.manage', label: 'Manage Platform Users', description: 'Edit user metadata, suspend/reactivate, and delete users' },
+      { id: 'activity.view', label: 'Activity Monitor', description: 'Inspect live user page visits, event clicks, interests, and form submissions' },
       { id: 'rapid_creation.access', label: 'Rapid Creation Tools', description: 'Use 1-click test user generator and impersonation tools' },
     ]
   },
@@ -3877,6 +3880,7 @@ export const ADMIN_ROLE_PRESETS = [
       'reviews.manage',
       'users.view',
       'users.manage',
+      'activity.view',
       'rapid_creation.access',
       'subscriptions.view',
       'subscriptions.manage',
@@ -5316,6 +5320,287 @@ router.get('/expo-reports/:id', async (req, res, next) => {
       success: true,
       data: report
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============================================================================
+// PLATFORM USER ACTIVITY MONITOR
+// ============================================================================
+
+// @desc    Get live & historical user activity timeline, per-user summaries, top events & pages
+// @route   GET /api/admin/activity-monitor
+router.get('/activity-monitor', async (req, res, next) => {
+  try {
+    const {
+      search = '',
+      activityType = 'all',
+      userRole = 'all',
+      userKey = '',
+      dateRange = 'all',
+      sync = 'false',
+      page = 1,
+      limit = 25
+    } = req.query;
+
+    await syncHistoricalActivitiesToMonitor(sync === 'true');
+
+    const query = {};
+    const trimmedSearch = String(search || '').trim();
+    if (trimmedSearch) {
+      const escaped = trimmedSearch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      query.$or = [
+        { userName: regex },
+        { userEmail: regex },
+        { userCompany: regex },
+        { actionLabel: regex },
+        { description: regex },
+        { pagePath: regex },
+        { 'targetEvent.title': regex },
+        { 'targetEvent.slug': regex },
+        { 'formInfo.formName': regex },
+        { sessionId: regex }
+      ];
+    }
+
+    if (activityType && activityType !== 'all') {
+      if (activityType === 'engagement_all') {
+        query.activityType = { $in: ['event_interest', 'event_follow', 'event_bookmark'] };
+      } else if (activityType === 'forms_all') {
+        query.activityType = { $in: ['form_submit', 'form_interaction', 'pass_request'] };
+      } else if (activityType === 'events_all') {
+        query.activityType = {
+          $in: ['event_click', 'event_view', 'event_interest', 'event_follow', 'event_bookmark', 'pass_request']
+        };
+      } else {
+        query.activityType = activityType;
+      }
+    }
+
+    if (userRole && userRole !== 'all') {
+      query.userRole = String(userRole).toLowerCase().trim();
+    }
+
+    const trimmedUserKey = String(userKey || '').trim();
+    if (trimmedUserKey) {
+      const escapedUser = trimmedUserKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { userEmail: trimmedUserKey.toLowerCase() },
+          { sessionId: trimmedUserKey },
+          ...(mongoose.isValidObjectId(trimmedUserKey) ? [{ user: new mongoose.Types.ObjectId(trimmedUserKey) }] : []),
+          { userName: new RegExp(`^${escapedUser}$`, 'i') }
+        ]
+      });
+    }
+
+    if (dateRange && dateRange !== 'all') {
+      const now = new Date();
+      let startDate = null;
+      if (dateRange === 'today') {
+        startDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      } else if (dateRange === '7d') {
+        startDate = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+      } else if (dateRange === '30d') {
+        startDate = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+      }
+      if (startDate) {
+        query.createdAt = { $gte: startDate };
+      }
+    }
+
+    const pgNum = Math.max(1, parseInt(page, 10) || 1);
+    const pgLimit = Math.min(100, Math.max(1, parseInt(limit, 10) || 25));
+    const skip = (pgNum - 1) * pgLimit;
+
+    const [
+      docs,
+      total,
+      totalActivities,
+      pageVisitsCount,
+      eventClicksCount,
+      engagementsCount,
+      formSubmissionsCount,
+      typeAgg,
+      userSummaryAgg,
+      topEventsAgg,
+      topPagesAgg
+    ] = await Promise.all([
+      UserActivity.find(query).sort({ createdAt: -1 }).skip(skip).limit(pgLimit).lean(),
+      UserActivity.countDocuments(query),
+      UserActivity.countDocuments({}),
+      UserActivity.countDocuments({ activityType: { $in: ['page_visit', 'event_view'] } }),
+      UserActivity.countDocuments({ activityType: { $in: ['event_click', 'button_click'] } }),
+      UserActivity.countDocuments({ activityType: { $in: ['event_interest', 'event_follow', 'event_bookmark'] } }),
+      UserActivity.countDocuments({ activityType: { $in: ['form_submit', 'pass_request'] } }),
+      UserActivity.aggregate([
+        { $group: { _id: '$activityType', count: { $sum: 1 } } },
+        { $sort: { count: -1 } }
+      ]),
+      UserActivity.aggregate([
+        { $sort: { createdAt: -1 } },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $gt: [{ $strLenCP: { $ifNull: ['$userEmail', ''] } }, 0] },
+                '$userEmail',
+                {
+                  $cond: [
+                    { $gt: [{ $strLenCP: { $ifNull: ['$sessionId', ''] } }, 0] },
+                    '$sessionId',
+                    '$userName'
+                  ]
+                }
+              ]
+            },
+            userId: { $first: '$user' },
+            userName: { $first: '$userName' },
+            userEmail: { $first: '$userEmail' },
+            userPhone: { $first: '$userPhone' },
+            userRole: { $first: '$userRole' },
+            userCompany: { $first: '$userCompany' },
+            totalActions: { $sum: 1 },
+            lastActionAt: { $max: '$createdAt' },
+            lastActionLabel: { $first: '$actionLabel' },
+            lastPagePath: { $first: '$pagePath' },
+            pageVisitsCount: {
+              $sum: { $cond: [{ $in: ['$activityType', ['page_visit', 'event_view']] }, 1, 0] }
+            },
+            eventClicksCount: {
+              $sum: { $cond: [{ $in: ['$activityType', ['event_click', 'button_click']] }, 1, 0] }
+            },
+            interestedCount: {
+              $sum: { $cond: [{ $in: ['$activityType', ['event_interest', 'event_follow', 'event_bookmark']] }, 1, 0] }
+            },
+            formsCount: {
+              $sum: { $cond: [{ $in: ['$activityType', ['form_submit', 'form_interaction', 'pass_request']] }, 1, 0] }
+            }
+          }
+        },
+        { $sort: { lastActionAt: -1 } },
+        { $limit: 50 }
+      ]),
+      UserActivity.aggregate([
+        { $match: { 'targetEvent.title': { $exists: true, $ne: '' } } },
+        {
+          $group: {
+            _id: {
+              $cond: [
+                { $gt: [{ $strLenCP: { $ifNull: ['$targetEvent.slug', ''] } }, 0] },
+                '$targetEvent.slug',
+                '$targetEvent.title'
+              ]
+            },
+            title: { $first: '$targetEvent.title' },
+            slug: { $first: '$targetEvent.slug' },
+            city: { $first: '$targetEvent.city' },
+            totalInteractions: { $sum: 1 },
+            clicksCount: {
+              $sum: { $cond: [{ $in: ['$activityType', ['event_click', 'event_view']] }, 1, 0] }
+            },
+            interestedCount: {
+              $sum: { $cond: [{ $eq: ['$activityType', 'event_interest'] }, 1, 0] }
+            },
+            passRequestsCount: {
+              $sum: { $cond: [{ $eq: ['$activityType', 'pass_request'] }, 1, 0] }
+            },
+            latestAt: { $max: '$createdAt' }
+          }
+        },
+        { $sort: { totalInteractions: -1, latestAt: -1 } },
+        { $limit: 20 }
+      ]),
+      UserActivity.aggregate([
+        { $match: { pagePath: { $exists: true, $ne: '' }, activityType: { $in: ['page_visit', 'event_view'] } } },
+        {
+          $group: {
+            _id: '$pagePath',
+            pagePath: { $first: '$pagePath' },
+            pageTitle: { $first: '$pageTitle' },
+            visitsCount: { $sum: 1 },
+            lastVisitedAt: { $max: '$createdAt' }
+          }
+        },
+        { $sort: { visitsCount: -1, lastVisitedAt: -1 } },
+        { $limit: 15 }
+      ])
+    ]);
+
+    const typeBreakdown = {};
+    (typeAgg || []).forEach((t) => {
+      if (t?._id) typeBreakdown[t._id] = t.count;
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        docs,
+        total,
+        page: pgNum,
+        pages: Math.ceil(total / pgLimit) || 1,
+        stats: {
+          totalActivities,
+          pageVisitsCount,
+          eventClicksCount,
+          engagementsCount,
+          formSubmissionsCount,
+          uniqueUsersCount: userSummaryAgg.length
+        },
+        typeBreakdown,
+        userSummaries: userSummaryAgg.map((u) => ({
+          userKey: u._id,
+          userId: u.userId || null,
+          userName: u.userName || 'Guest Visitor',
+          userEmail: u.userEmail || '',
+          userPhone: u.userPhone || '',
+          userRole: u.userRole || 'guest',
+          userCompany: u.userCompany || '',
+          totalActions: u.totalActions || 0,
+          lastActionAt: u.lastActionAt,
+          lastActionLabel: u.lastActionLabel || '',
+          lastPagePath: u.lastPagePath || '/',
+          pageVisitsCount: u.pageVisitsCount || 0,
+          eventClicksCount: u.eventClicksCount || 0,
+          interestedCount: u.interestedCount || 0,
+          formsCount: u.formsCount || 0
+        })),
+        topEvents: topEventsAgg,
+        topPages: topPagesAgg
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Trigger historical activity backfill sync
+// @route   POST /api/admin/activity-monitor/sync
+router.post('/activity-monitor/sync', async (req, res, next) => {
+  try {
+    const result = await syncHistoricalActivitiesToMonitor(true);
+    res.status(200).json({
+      success: true,
+      message: `Synchronized ${result.synced || 0} platform activity records.`,
+      synced: result.synced || 0
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Delete a single activity log entry
+// @route   DELETE /api/admin/activity-monitor/:id
+router.delete('/activity-monitor/:id', async (req, res, next) => {
+  try {
+    const deleted = await UserActivity.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'Activity record not found.' });
+    }
+    res.status(200).json({ success: true, message: 'Activity record deleted.' });
   } catch (error) {
     next(error);
   }

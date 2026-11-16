@@ -40,6 +40,7 @@ import bannerRoutes from './routes/bannerRoutes.js';
 import boothRequestRoutes from './routes/boothRequestRoutes.js';
 import eventRequestRoutes from './routes/eventRequestRoutes.js';
 import followRoutes from './routes/followRoutes.js';
+import activityRoutes from './routes/activityRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -147,6 +148,7 @@ app.use('/api/banners', bannerRoutes);
 app.use('/api/booth-requests', boothRequestRoutes);
 app.use('/api/event-requests', eventRequestRoutes);
 app.use('/api/follows', followRoutes);
+app.use('/api/activity', activityRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
