@@ -39,6 +39,7 @@ import {
   sendExhibitorApprovalNotification
 } from '../services/emailService.js';
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
+import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import jwt from 'jsonwebtoken';
 
@@ -3542,9 +3543,16 @@ router.delete('/events/:id', async (req, res, next) => {
       }
     }
 
-    // 4. Invalidate in-memory caches immediately
+    // 4. Invalidate in-memory & directory caches immediately (backend + frontend)
     categoriesCache = { data: null, timestamp: 0, ttl: 0 };
     organizersCache = { data: null, timestamp: 0, ttl: 0 };
+    WordPressDirectorySyncService.removeDeletedEventFromCache({
+      eventId: deletedDoc?._id || targetId,
+      slug: eventSlug,
+      wpPostId: eventWpId,
+      title: eventTitle
+    });
+    WordPressDirectorySyncService.notifyFrontendCacheRefresh();
 
     res.status(200).json({
       success: true,

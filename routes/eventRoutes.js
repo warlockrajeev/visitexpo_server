@@ -1184,6 +1184,8 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
     await syncEventToWordPress(event._id);
 
     try { invalidateVenuesCache(); } catch (_) {}
+    WordPressDirectorySyncService.clearCache();
+    WordPressDirectorySyncService.notifyFrontendCacheRefresh();
 
     // Notify followers of the creator when a new event is created
     try {
@@ -1246,6 +1248,8 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
     await syncEventToWordPress(event._id);
 
     try { invalidateVenuesCache(); } catch (_) {}
+    WordPressDirectorySyncService.clearCache();
+    WordPressDirectorySyncService.notifyFrontendCacheRefresh();
 
     // Notify followers of the actor or event when event details are updated
     try {
@@ -1353,6 +1357,13 @@ router.delete('/:id', protect, authorize('super_admin', 'organizer', 'event_mana
     );
 
     try { invalidateVenuesCache(); } catch (_) {}
+    WordPressDirectorySyncService.removeDeletedEventFromCache({
+      eventId: event?._id || targetId,
+      slug: req.body?.slug || event?.slug || targetId,
+      wpPostId: req.body?.wpPostId || event?.wpPostId || targetId,
+      title: req.body?.title || event?.title
+    });
+    WordPressDirectorySyncService.notifyFrontendCacheRefresh();
 
     res.status(200).json({ success: true, message: 'Event deleted successfully' });
   } catch (error) {

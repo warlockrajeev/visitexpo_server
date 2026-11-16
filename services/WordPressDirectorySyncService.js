@@ -581,7 +581,7 @@ class WordPressDirectorySyncService {
 
     inFlightEventsPromise = (async () => {
       // Query directly from indexed MongoDB with truncated descriptions (~3x faster & smaller payload)
-      const [rawEvents, engagementAgg, visitorAgg] = await Promise.all([
+      const [rawEvents, engagementAgg, visitorAgg, deletedDocs] = await Promise.all([
         Event.aggregate([
           { $match: { status: { $ne: 'cancelled' } } },
           { $sort: { startDate: 1 } },
@@ -646,8 +646,22 @@ class WordPressDirectorySyncService {
               count: { $sum: 1 }
             }
           }
-        ]).catch(() => [])
+        ]).catch(() => []),
+        DeletedEvent.find().select('eventId slug wpPostId').lean().catch(() => [])
       ]);
+
+      const delIds = new Set((deletedDocs || []).map((d) => String(d.eventId || '').trim().toLowerCase()).filter(Boolean));
+      const delSlugs = new Set((deletedDocs || []).map((d) => String(d.slug || '').trim().toLowerCase()).filter(Boolean));
+      const delWpIds = new Set((deletedDocs || []).map((d) => String(d.wpPostId || '').trim().toLowerCase()).filter(Boolean));
+      const activeRawEvents = (rawEvents || []).filter((doc) => {
+        const dId = String(doc._id || '').trim().toLowerCase();
+        const dSlug = String(doc.slug || '').trim().toLowerCase();
+        const dWpId = String(doc.wpPostId || '').trim().toLowerCase();
+        if (dId && (delIds.has(dId) || delSlugs.has(dId) || delWpIds.has(dId))) return false;
+        if (dSlug && (delSlugs.has(dSlug) || delIds.has(dSlug))) return false;
+        if (dWpId && (delWpIds.has(dWpId) || delIds.has(dWpId))) return false;
+        return true;
+      });
 
       // Resolve distinct linked Organization names in one tiny batch query
       const orgIds = [...new Set(
@@ -689,7 +703,7 @@ class WordPressDirectorySyncService {
         }
       });
 
-      const events = (rawEvents || []).map((doc) => {
+      const events = activeRawEvents.map((doc) => {
         const populatedOrgName =
           (doc.organizer && typeof doc.organizer === 'object' ? doc.organizer.name : '') ||
           (doc.organizer ? orgNameMap.get(String(doc.organizer)) : '') ||
@@ -815,9 +829,65 @@ class WordPressDirectorySyncService {
   }
 
   /**
-   * Immediately clear memory cache so new user engagements are reflected dynamically
+   * Immediately remove a deleted event from memory and disk directory caches
+   */
+  removeDeletedEventFromCache({ eventId, slug, wpPostId, title } = {}) {
+    const idKey = String(eventId || '').trim().toLowerCase();
+    const slugKey = String(slug || '').trim().toLowerCase();
+    const wpKey = String(wpPostId || '').trim().toLowerCase();
+    const titleNorm = String(title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    if (Array.isArray(memoryCache.events)) {
+      memoryCache.events = memoryCache.events.filter((ev) => {
+        if (!ev) return false;
+        const evId = String(ev._id || ev.id || '').trim().toLowerCase();
+        const evSlug = String(ev.slug || '').trim().toLowerCase();
+        const evWp = String(ev.wpPostId || '').trim().toLowerCase();
+        const evTitle = String(ev.title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (idKey && (evId === idKey || evSlug === idKey || evWp === idKey)) return false;
+        if (slugKey && (evSlug === slugKey || evId === slugKey)) return false;
+        if (wpKey && (evWp === wpKey || evId === wpKey)) return false;
+        if (titleNorm && titleNorm.length > 6 && evTitle === titleNorm) return false;
+        return true;
+      });
+      memoryCache.timestamp = 0; // Also refresh cleanly on next cycle
+      void this.saveDiskCache(memoryCache.events);
+    } else {
+      try {
+        if (fs.existsSync(DISK_CACHE_PATH)) fs.unlinkSync(DISK_CACHE_PATH);
+      } catch {}
+    }
+  }
+
+  /**
+   * Best-effort non-blocking invalidation of Next.js client directory cache after delete/update
+   */
+  notifyFrontendCacheRefresh() {
+    const targets = new Set(
+      [
+        process.env.CLIENT_URL,
+        process.env.FRONTEND_URL,
+        process.env.NEXT_PUBLIC_CLIENT_URL,
+        process.env.NODE_ENV === 'production' ? 'https://client.visitexpo.in' : null,
+        'http://localhost:3000'
+      ]
+        .filter(Boolean)
+        .map((u) => String(u).replace(/\/+$/, ''))
+    );
+    for (const base of targets) {
+      fetch(`${base}/api/wordpress-events?refresh=true`, {
+        signal: AbortSignal.timeout(4000)
+      }).catch(() => {});
+    }
+  }
+
+  /**
+   * Immediately clear memory cache and disk snapshot so changes are reflected immediately
    */
   clearCache() {
+    try {
+      if (fs.existsSync(DISK_CACHE_PATH)) fs.unlinkSync(DISK_CACHE_PATH);
+    } catch {}
     if (memoryCache.events) {
       memoryCache.timestamp = 0; // Mark stale for background refresh
     } else {
