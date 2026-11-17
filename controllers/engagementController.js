@@ -604,58 +604,6 @@ export const getEventEngagements = async (req, res) => {
       userEngagement.isFollowed || userEngagement.type === 'follower' || userEngagement.type === 'both'
     ));
 
-    // Record user activity for Admin Activity Monitor (non-blocking)
-    const activityType =
-      action === 'follower'
-        ? 'event_follow'
-        : action === 'bookmark'
-        ? 'event_bookmark'
-        : 'event_interest';
-    const isNowActive =
-      action === 'follower'
-        ? isFollower
-        : action === 'bookmark'
-        ? isBookmarked
-        : isInterested;
-    const verb =
-      action === 'follower'
-        ? isNowActive
-          ? 'Followed Event'
-          : 'Unfollowed Event'
-        : action === 'bookmark'
-        ? isNowActive
-          ? 'Bookmarked Event'
-          : 'Removed Bookmark from'
-        : isNowActive
-        ? 'Marked Interested on'
-        : 'Removed Interest from';
-
-    void logUserActivity({
-      req,
-      user: {
-        id: userId,
-        name: userName,
-        email: userEmail,
-        phone: userPhone,
-        role: userRole,
-        company: userCompany
-      },
-      activityType,
-      category: 'engagement',
-      actionLabel: `${verb} ${resolvedTitle}`,
-      description: `${userName} (${userEmail}) ${verb.toLowerCase()} "${resolvedTitle}"${resolvedCity ? ` in ${resolvedCity}` : ''}.`,
-      pagePath: `/expo/${cleanSlug}`,
-      targetEvent: {
-        eventId: eventId || (dbEvent?._id ? String(dbEvent._id) : ''),
-        title: resolvedTitle,
-        slug: cleanSlug,
-        category: resolvedCategory,
-        city: resolvedCity
-      },
-      metadata: { action, active: isNowActive },
-      source: 'server_hook'
-    });
-
     return res.status(200).json({
       success: true,
       data: {
@@ -816,58 +764,6 @@ export const getUserEngagements = async (req, res) => {
       (e) => e.isBookmarked || e.type === 'bookmark'
     );
 
-    // Record user activity for Admin Activity Monitor (non-blocking)
-    const activityType =
-      action === 'follower'
-        ? 'event_follow'
-        : action === 'bookmark'
-        ? 'event_bookmark'
-        : 'event_interest';
-    const isNowActive =
-      action === 'follower'
-        ? isFollower
-        : action === 'bookmark'
-        ? isBookmarked
-        : isInterested;
-    const verb =
-      action === 'follower'
-        ? isNowActive
-          ? 'Followed Event'
-          : 'Unfollowed Event'
-        : action === 'bookmark'
-        ? isNowActive
-          ? 'Bookmarked Event'
-          : 'Removed Bookmark from'
-        : isNowActive
-        ? 'Marked Interested on'
-        : 'Removed Interest from';
-
-    void logUserActivity({
-      req,
-      user: {
-        id: userId,
-        name: userName,
-        email: userEmail,
-        phone: userPhone,
-        role: userRole,
-        company: userCompany
-      },
-      activityType,
-      category: 'engagement',
-      actionLabel: `${verb} ${resolvedTitle}`,
-      description: `${userName} (${userEmail}) ${verb.toLowerCase()} "${resolvedTitle}"${resolvedCity ? ` in ${resolvedCity}` : ''}.`,
-      pagePath: `/expo/${cleanSlug}`,
-      targetEvent: {
-        eventId: eventId || (dbEvent?._id ? String(dbEvent._id) : ''),
-        title: resolvedTitle,
-        slug: cleanSlug,
-        category: resolvedCategory,
-        city: resolvedCity
-      },
-      metadata: { action, active: isNowActive },
-      source: 'server_hook'
-    });
-
     return res.status(200).json({
       success: true,
       data: {
@@ -929,58 +825,6 @@ export const getOrganizerEngagements = async (req, res) => {
     const followersCount = attendees.filter(
       (a) => a.type === 'follower' || a.type === 'both'
     ).length;
-
-    // Record user activity for Admin Activity Monitor (non-blocking)
-    const activityType =
-      action === 'follower'
-        ? 'event_follow'
-        : action === 'bookmark'
-        ? 'event_bookmark'
-        : 'event_interest';
-    const isNowActive =
-      action === 'follower'
-        ? isFollower
-        : action === 'bookmark'
-        ? isBookmarked
-        : isInterested;
-    const verb =
-      action === 'follower'
-        ? isNowActive
-          ? 'Followed Event'
-          : 'Unfollowed Event'
-        : action === 'bookmark'
-        ? isNowActive
-          ? 'Bookmarked Event'
-          : 'Removed Bookmark from'
-        : isNowActive
-        ? 'Marked Interested on'
-        : 'Removed Interest from';
-
-    void logUserActivity({
-      req,
-      user: {
-        id: userId,
-        name: userName,
-        email: userEmail,
-        phone: userPhone,
-        role: userRole,
-        company: userCompany
-      },
-      activityType,
-      category: 'engagement',
-      actionLabel: `${verb} ${resolvedTitle}`,
-      description: `${userName} (${userEmail}) ${verb.toLowerCase()} "${resolvedTitle}"${resolvedCity ? ` in ${resolvedCity}` : ''}.`,
-      pagePath: `/expo/${cleanSlug}`,
-      targetEvent: {
-        eventId: eventId || (dbEvent?._id ? String(dbEvent._id) : ''),
-        title: resolvedTitle,
-        slug: cleanSlug,
-        category: resolvedCategory,
-        city: resolvedCity
-      },
-      metadata: { action, active: isNowActive },
-      source: 'server_hook'
-    });
 
     return res.status(200).json({
       success: true,
@@ -1065,58 +909,6 @@ export const getAllEngagements = async (req, res) => {
       })
     ]);
 
-    // Record user activity for Admin Activity Monitor (non-blocking)
-    const activityType =
-      action === 'follower'
-        ? 'event_follow'
-        : action === 'bookmark'
-        ? 'event_bookmark'
-        : 'event_interest';
-    const isNowActive =
-      action === 'follower'
-        ? isFollower
-        : action === 'bookmark'
-        ? isBookmarked
-        : isInterested;
-    const verb =
-      action === 'follower'
-        ? isNowActive
-          ? 'Followed Event'
-          : 'Unfollowed Event'
-        : action === 'bookmark'
-        ? isNowActive
-          ? 'Bookmarked Event'
-          : 'Removed Bookmark from'
-        : isNowActive
-        ? 'Marked Interested on'
-        : 'Removed Interest from';
-
-    void logUserActivity({
-      req,
-      user: {
-        id: userId,
-        name: userName,
-        email: userEmail,
-        phone: userPhone,
-        role: userRole,
-        company: userCompany
-      },
-      activityType,
-      category: 'engagement',
-      actionLabel: `${verb} ${resolvedTitle}`,
-      description: `${userName} (${userEmail}) ${verb.toLowerCase()} "${resolvedTitle}"${resolvedCity ? ` in ${resolvedCity}` : ''}.`,
-      pagePath: `/expo/${cleanSlug}`,
-      targetEvent: {
-        eventId: eventId || (dbEvent?._id ? String(dbEvent._id) : ''),
-        title: resolvedTitle,
-        slug: cleanSlug,
-        category: resolvedCategory,
-        city: resolvedCity
-      },
-      metadata: { action, active: isNowActive },
-      source: 'server_hook'
-    });
-
     return res.status(200).json({
       success: true,
       data: {
@@ -1194,58 +986,6 @@ export const deleteEngagement = async (req, res) => {
         }
       }
     }
-
-    // Record user activity for Admin Activity Monitor (non-blocking)
-    const activityType =
-      action === 'follower'
-        ? 'event_follow'
-        : action === 'bookmark'
-        ? 'event_bookmark'
-        : 'event_interest';
-    const isNowActive =
-      action === 'follower'
-        ? isFollower
-        : action === 'bookmark'
-        ? isBookmarked
-        : isInterested;
-    const verb =
-      action === 'follower'
-        ? isNowActive
-          ? 'Followed Event'
-          : 'Unfollowed Event'
-        : action === 'bookmark'
-        ? isNowActive
-          ? 'Bookmarked Event'
-          : 'Removed Bookmark from'
-        : isNowActive
-        ? 'Marked Interested on'
-        : 'Removed Interest from';
-
-    void logUserActivity({
-      req,
-      user: {
-        id: userId,
-        name: userName,
-        email: userEmail,
-        phone: userPhone,
-        role: userRole,
-        company: userCompany
-      },
-      activityType,
-      category: 'engagement',
-      actionLabel: `${verb} ${resolvedTitle}`,
-      description: `${userName} (${userEmail}) ${verb.toLowerCase()} "${resolvedTitle}"${resolvedCity ? ` in ${resolvedCity}` : ''}.`,
-      pagePath: `/expo/${cleanSlug}`,
-      targetEvent: {
-        eventId: eventId || (dbEvent?._id ? String(dbEvent._id) : ''),
-        title: resolvedTitle,
-        slug: cleanSlug,
-        category: resolvedCategory,
-        city: resolvedCity
-      },
-      metadata: { action, active: isNowActive },
-      source: 'server_hook'
-    });
 
     return res.status(200).json({
       success: true,

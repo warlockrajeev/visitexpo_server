@@ -16,7 +16,7 @@ class EventRepository extends BaseRepository {
     const isId = mongoose.isValidObjectId(slug);
     const query = isId
       ? { $or: [{ slug }, { _id: slug }] }
-      : { slug };
+      : { $or: [{ slug }, { wpPostId: String(slug) }] };
     return await this.model
       .findOne(query)
       .populate('organizer', 'name logo website description email phone isChatEnabled chatWelcomeMessage chatStatus')

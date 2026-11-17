@@ -4,6 +4,7 @@
  */
 
 import express from 'express';
+import crypto from 'crypto';
 import mongoose from 'mongoose';
 import Event from '../models/Event.js';
 import Exhibitor from '../models/Exhibitor.js';
@@ -16,8 +17,58 @@ import EventService from '../services/EventService.js';
 import UserRepository from '../repositories/UserRepository.js';
 import { verifyAccessToken } from '../utils/jwt.js';
 import { wordpressLimiter } from '../middlewares/rateLimiter.js';
+import {
+  canonicalizeCategoryName,
+  canonicalizeCountryName,
+  getSeededTaxonomiesPayload
+} from '../utils/wpTaxonomies.js';
 
 const router = express.Router();
+
+function isValidWpSyncKey(req) {
+  const configuredKey = process.env.WORDPRESS_API_KEY || '';
+  if (!configuredKey) return true;
+  const incomingKey = String(req.headers['x-visitexpo-key'] || '');
+  if (!incomingKey || incomingKey.length !== configuredKey.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(configuredKey, 'utf8'), Buffer.from(incomingKey, 'utf8'));
+}
+
+function parseFlexibleEventDate(rawVal, fallbackDate) {
+  if (rawVal === undefined || rawVal === null || rawVal === '') return fallbackDate;
+  if (typeof rawVal === 'number' || /^\d{9,12}$/.test(String(rawVal).trim())) {
+    const secs = Number(rawVal);
+    if (!Number.isNaN(secs) && secs > 0) return new Date(secs * 1000);
+  }
+  const d = new Date(rawVal);
+  return Number.isNaN(d.getTime()) ? fallbackDate : d;
+}
+
+function mergeDraftSeoSafely(existingSeo, incomingSeo, isDraft) {
+  const base = {
+    metaTitle: existingSeo?.metaTitle || '',
+    metaDescription: existingSeo?.metaDescription || '',
+    focusKeyword: existingSeo?.focusKeyword || '',
+    canonicalUrl: existingSeo?.canonicalUrl || '',
+    ogTitle: existingSeo?.ogTitle || '',
+    ogDescription: existingSeo?.ogDescription || '',
+    ogImage: existingSeo?.ogImage || '',
+    keywords: Array.isArray(existingSeo?.keywords) ? existingSeo.keywords : []
+  };
+  if (!incomingSeo || typeof incomingSeo !== 'object') return base;
+
+  const fields = ['metaTitle', 'metaDescription', 'focusKeyword', 'canonicalUrl', 'ogTitle', 'ogDescription', 'ogImage'];
+  for (const field of fields) {
+    const incomingVal = String(incomingSeo[field] || '').trim();
+    if (!incomingVal) continue;
+    // Never overwrite non-empty draft SEO edited in the VisitExpo wizard
+    if (isDraft && String(base[field] || '').trim() !== '') continue;
+    base[field] = incomingVal;
+  }
+  return base;
+}
+
+let cachedWpTaxonomies = null;
+let cachedWpTaxonomiesAt = 0;
 
 function isEventConcluded(event, now = new Date()) {
   const rawEndDate = event?.endDate || event?.startDate;
@@ -85,13 +136,58 @@ function getWpImage(slug, id, wpPostId, title) {
 // 1. BULK / SINGLE WORDPRESS EVENT SYNC
 // ==========================================
 /**
+ * GET /api/wordpress/taxonomies
+ * Returns live hierarchical WordPress categories, locations, and tags merged with seeded fallbacks.
+ */
+router.get('/taxonomies', wordpressLimiter, async (req, res) => {
+  const seeded = getSeededTaxonomiesPayload();
+  const now = Date.now();
+  if (cachedWpTaxonomies && now - cachedWpTaxonomiesAt < 10 * 60 * 1000) {
+    return res.status(200).json({ success: true, ...cachedWpTaxonomies });
+  }
+
+  const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
+  const wpKey = process.env.WORDPRESS_API_KEY || '';
+  try {
+    const headers = wpKey ? { 'X-VisitExpo-Key': wpKey } : {};
+    const wpRes = await fetch(`${wpUrl}/wp-json/visitexpo/v1/taxonomies`, {
+      headers,
+      signal: AbortSignal.timeout(5000)
+    });
+    if (wpRes.ok) {
+      const wpJson = await wpRes.json();
+      if (wpJson && (Array.isArray(wpJson.categories) || Array.isArray(wpJson.location))) {
+        const mergedPayload = {
+          source: wpJson.source || 'wordpress-live',
+          categories: wpJson.categories?.length ? wpJson.categories : seeded.categories,
+          location: wpJson.location?.length ? wpJson.location : seeded.location,
+          event_tags: wpJson.event_tags?.length ? wpJson.event_tags : seeded.event_tags
+        };
+        cachedWpTaxonomies = mergedPayload;
+        cachedWpTaxonomiesAt = now;
+        return res.status(200).json({ success: true, ...mergedPayload });
+      }
+    }
+  } catch (_) {}
+
+  return res.status(200).json({ success: true, ...seeded });
+});
+
+/**
  * POST /api/wordpress/sync
- * Sync events from WordPress pages/posts.
+ * Idempotent two-way sync receiver from WordPress (keyed on wpPostId).
  */
 router.post('/sync', wordpressLimiter, async (req, res, next) => {
   try {
+    if (!isValidWpSyncKey(req)) {
+      return res.status(401).json({
+        success: false,
+        error: 'Unauthorized: invalid or missing X-VisitExpo-Key'
+      });
+    }
+
     const { events } = req.body;
-    
+
     if (!events || !Array.isArray(events)) {
       return res.status(400).json({
         success: false,
@@ -101,49 +197,120 @@ router.post('/sync', wordpressLimiter, async (req, res, next) => {
 
     const synced = [];
     for (const item of events) {
-      if (!item.title) continue;
+      if (!item || !item.title) continue;
 
-      const slug = item.slug || EventService._slugify(item.title);
-      const wpPostId = item.wpPostId ? String(item.wpPostId) : '';
+      const rawSlug = item.slug ? EventService._slugify(item.slug) : EventService._slugify(item.title);
+      const wpPostId = item.wpPostId ? String(item.wpPostId).trim() : '';
 
-      // Check if event already exists by wpPostId or slug
+      // Lookup strictly by wpPostId first for idempotency
       let event = null;
       if (wpPostId) {
         event = await Event.findOne({ wpPostId });
       }
-      if (!event && slug) {
-        event = await Event.findOne({ slug });
+
+      let resolvedSlug = rawSlug;
+      if (!event && rawSlug) {
+        const bySlug = await Event.findOne({ slug: rawSlug });
+        if (bySlug) {
+          // Only adopt slug match when wpPostId is absent or the Mongo record is unlinked & unclaimed
+          if (!wpPostId || (!bySlug.wpPostId && !bySlug.isClaimed)) {
+            event = bySlug;
+          } else {
+            // Slug collision with a different record: insert new record with disambiguated slug
+            resolvedSlug = `${rawSlug}-wp-${wpPostId}`;
+            const conflictSecond = await Event.findOne({ slug: resolvedSlug }).select('_id').lean();
+            if (conflictSecond) {
+              resolvedSlug = `${rawSlug}-wp-${wpPostId}-${Date.now().toString().slice(-4)}`;
+            }
+          }
+        }
       }
 
+      const rawContent = item.content || item.description || '';
+      const plainDescription = rawContent
+        ? String(rawContent)
+        : (event?.description || `Official expo listing for ${item.title}.`);
+
+      const locObj = item.location && typeof item.location === 'object' ? item.location : {};
+      const city = String(locObj.city || item.city || event?.city || 'New Delhi').trim();
+      const state = String(locObj.state || item.state || event?.state || '').trim();
+      const country = canonicalizeCountryName(locObj.country || item.country || event?.country || 'INDIA');
+
+      const rawCategories = Array.isArray(item.categories)
+        ? item.categories
+        : (item.categories ? [item.categories] : (event?.categories || ['Trade Shows']));
+      const categories = rawCategories.map(canonicalizeCategoryName).filter(Boolean);
+      const industry = canonicalizeCategoryName(item.industry || categories[0] || event?.industry || '');
+
+      const startDate = parseFlexibleEventDate(item.startDate, event?.startDate || new Date());
+      let endDate = parseFlexibleEventDate(item.endDate, event?.endDate || new Date(startDate.getTime() + 86400000 * 2));
+      if (endDate.getTime() < startDate.getTime()) {
+        endDate = startDate;
+      }
+
+      const normalizedStatus = ['published', 'publish'].includes(String(item.status || '').toLowerCase())
+        ? 'published'
+        : (String(item.status || '').toLowerCase() === 'cancelled' ? 'cancelled' : 'draft');
+
+      const faqsSource = Array.isArray(item.faqsList)
+        ? item.faqsList
+        : (Array.isArray(item.faqs) ? item.faqs : null);
+
+      const isDraft = (event?.status || normalizedStatus) === 'draft';
+      const mergedSeo = mergeDraftSeoSafely(event?.seo, item.seo, isDraft);
+
       const eventData = {
-        title: item.title,
-        slug: slug,
-        description: item.description || `Official expo listing for ${item.title}.`,
-        venue: item.venue || item.location || 'Exhibition Center',
-        city: item.city || 'India',
-        country: item.country || 'India',
-        startDate: item.startDate ? new Date(item.startDate) : new Date(),
-        endDate: item.endDate ? new Date(item.endDate) : new Date(Date.now() + 86400000 * 2),
-        timings: item.timings || '10:00 AM - 6:00 PM',
-        categories: Array.isArray(item.categories) ? item.categories : [item.categories || 'Exhibition'],
-        wpPostId: wpPostId,
-        wpUrl: item.wpUrl || '',
-        status: item.status || 'published'
+        title: String(item.title).trim(),
+        slug: event ? event.slug : resolvedSlug,
+        description: plainDescription,
+        excerpt: item.excerpt !== undefined ? String(item.excerpt || '') : (event?.excerpt || ''),
+        venue: String(item.venue || item.address || event?.venue || 'Exhibition Center').trim(),
+        address: String(item.address || item.streetAddress || event?.address || '').trim(),
+        city,
+        state,
+        country,
+        lat: typeof item.lat === 'number' && !Number.isNaN(item.lat) ? item.lat : (event?.lat ?? null),
+        lng: typeof item.lng === 'number' && !Number.isNaN(item.lng) ? item.lng : (event?.lng ?? null),
+        startDate,
+        endDate,
+        timings: item.timings || event?.timings || '09:00 AM - 06:00 PM',
+        industry,
+        categories: categories.length > 0 ? categories : ['Trade Shows'],
+        tags: Array.isArray(item.tags) ? item.tags.map(String).filter(Boolean) : (event?.tags || []),
+        wpPostId: wpPostId || event?.wpPostId || '',
+        wpUrl: item.wpUrl || event?.wpUrl || '',
+        wpSyncedAt: new Date(),
+        syncError: '',
+        status: normalizedStatus,
+        seo: mergedSeo
       };
 
+      if (item.banner) eventData.banner = item.banner;
+      if (item.bannerAlt !== undefined) eventData.bannerAlt = String(item.bannerAlt || '');
+      if (Array.isArray(item.gallery) && item.gallery.length > 0) eventData.gallery = item.gallery;
+      if (item.brochurePdf) eventData.brochurePdf = item.brochurePdf;
+      if (item.promoVideoUrl) eventData.promoVideoUrl = item.promoVideoUrl;
+      if (item.orgName !== undefined) eventData.orgName = item.orgName;
+      if (item.orgEmail !== undefined) eventData.orgEmail = item.orgEmail;
+      if (item.orgPhone !== undefined) eventData.orgPhone = item.orgPhone;
+      if (item.orgWebsite !== undefined) eventData.orgWebsite = item.orgWebsite;
+      if (item.orgDesc !== undefined) eventData.orgDesc = item.orgDesc;
+      if (item.orgLogo) eventData.orgLogo = item.orgLogo;
+      if (Array.isArray(item.schedules)) eventData.schedules = item.schedules;
+      if (faqsSource) eventData.faqsList = faqsSource;
+      if (Array.isArray(item.sponsorsList)) eventData.sponsorsList = item.sponsorsList;
+      if (item.contactShortcode !== undefined) eventData.contactShortcode = item.contactShortcode;
+
       if (event) {
-        // Update existing event without overwriting claimed organizer status
         Object.assign(event, eventData);
         await event.save();
         synced.push(event);
       } else {
-        // Create new unclaimed event
         event = await Event.create({
           ...eventData,
           isClaimed: false
         });
 
-        // Auto-create a default ticket tier for the new event
         const ticketPrice = item.ticketPrice ? parseInt(item.ticketPrice, 10) : 0;
         const existingTicket = await Ticket.findOne({ event: event._id });
         if (!existingTicket) {

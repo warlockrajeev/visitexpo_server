@@ -1180,8 +1180,9 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
     // Auto-create default ticket tier if ticketing data is provided
     await syncDefaultTicketTier(event._id, normalizedPayload);
 
-    // Automatically sync event to WordPress
+    // Automatically sync event to WordPress and reload updated WP metadata
     await syncEventToWordPress(event._id);
+    const createdEvent = await Event.findById(event._id);
 
     try { invalidateVenuesCache(); } catch (_) {}
     WordPressDirectorySyncService.clearCache();
@@ -1196,16 +1197,16 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
         actorEmail: actor?.email || req.user.email,
         actorName,
         eventId: event._id,
-        eventSlug: event.slug,
+        eventSlug: (createdEvent || event).slug,
         eventTitle: event.title,
         activityType: 'event_created',
         title: `New Event by ${actorName}`,
         message: `${actorName} created a new event: "${event.title}"${event.city ? ` in ${event.city}` : ''}.`,
-        url: `/expo/${event.slug}`
+        url: `/expo/${(createdEvent || event).slug}`
       });
     } catch (_) {}
 
-    res.status(201).json({ success: true, message: 'Event created successfully', event });
+    res.status(201).json({ success: true, message: 'Event created successfully', event: createdEvent || event });
   } catch (error) {
     if (error.statusCode === 409) {
       return res.status(409).json({
@@ -1244,8 +1245,9 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
     // Sync default ticket tier if ticketing data changed
     await syncDefaultTicketTier(event._id, normalizedPayload);
 
-    // Automatically sync event to WordPress
+    // Automatically sync event to WordPress and reload updated WP metadata
     await syncEventToWordPress(event._id);
+    const updatedEvent = await Event.findById(event._id);
 
     try { invalidateVenuesCache(); } catch (_) {}
     WordPressDirectorySyncService.clearCache();
@@ -1260,16 +1262,16 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
         actorEmail: actor?.email || req.user.email,
         actorName,
         eventId: event._id,
-        eventSlug: event.slug,
+        eventSlug: (updatedEvent || event).slug,
         eventTitle: event.title,
         activityType: 'event_updated',
         title: `Event Update: ${event.title}`,
         message: `${actorName} posted updates for "${event.title}"${event.city ? ` (${event.city})` : ''}.`,
-        url: `/expo/${event.slug}`
+        url: `/expo/${(updatedEvent || event).slug}`
       });
     } catch (_) {}
 
-    res.status(200).json({ success: true, message: 'Event updated successfully', event });
+    res.status(200).json({ success: true, message: 'Event updated successfully', event: updatedEvent || event });
   } catch (error) {
     next(error);
   }

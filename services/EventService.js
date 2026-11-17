@@ -7,6 +7,7 @@ import EventRepository from '../repositories/EventRepository.js';
 import Category from '../models/Category.js';
 import Organization from '../models/Organization.js';
 import { fetchLiveWpDirectoryEvents, normalizeTitle } from '../utils/directoryEventsHelper.js';
+import { canonicalizeCategoryName, canonicalizeCountryName } from '../utils/wpTaxonomies.js';
 
 function getId(value) {
   if (!value) return null;
@@ -67,6 +68,19 @@ class EventService {
 
     if (new Date(eventData.endDate) < new Date(eventData.startDate)) {
       const err = new Error('Event end date cannot be earlier than start date');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const parsedLat = eventData.lat !== undefined && eventData.lat !== null && eventData.lat !== '' ? Number(eventData.lat) : null;
+    const parsedLng = eventData.lng !== undefined && eventData.lng !== null && eventData.lng !== '' ? Number(eventData.lng) : null;
+    if (parsedLat !== null && (Number.isNaN(parsedLat) || parsedLat < -90 || parsedLat > 90)) {
+      const err = new Error('Latitude must be a valid number between -90 and 90');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (parsedLng !== null && (Number.isNaN(parsedLng) || parsedLng < -180 || parsedLng > 180)) {
+      const err = new Error('Longitude must be a valid number between -180 and 180');
       err.statusCode = 400;
       throw err;
     }
@@ -172,22 +186,46 @@ class EventService {
       if (e.statusCode === 409) throw e;
     }
 
-    // Generate unique slug if not present
-    let slug = eventData.slug || this._slugify(trimmedTitle);
-    
-    // Check if slug is unique
+    // Generate unique slug checking BOTH MongoDB and live WordPress directory slugs
+    const baseSlug = this._slugify(eventData.slug || trimmedTitle);
+    let slug = baseSlug;
+    let wpDocsSnapshot = [];
+    try {
+      const liveDocs = await fetchLiveWpDirectoryEvents();
+      if (Array.isArray(liveDocs)) wpDocsSnapshot = liveDocs;
+    } catch (_) {}
+
+    const wpSlugSet = new Set(
+      wpDocsSnapshot
+        .map(d => (d.slug || '').toLowerCase().trim())
+        .filter(Boolean)
+    );
+
     let existing = await EventRepository.findOne({ slug });
     let counter = 1;
-    while (existing) {
-      slug = `${this._slugify(trimmedTitle)}-${counter}`;
+    while (existing || wpSlugSet.has(slug.toLowerCase())) {
+      slug = `${baseSlug}-${counter}`;
       existing = await EventRepository.findOne({ slug });
       counter++;
     }
+
+    const normalizedCategories = Array.isArray(eventData.categories)
+      ? eventData.categories.map(canonicalizeCategoryName).filter(Boolean)
+      : (eventData.category ? [canonicalizeCategoryName(eventData.category)].filter(Boolean) : []);
+    const normalizedIndustry = canonicalizeCategoryName(
+      eventData.industry || normalizedCategories[0] || eventData.category || ''
+    );
+    const normalizedCountry = canonicalizeCountryName(eventData.country);
 
     const payload = {
       ...eventData,
       title: trimmedTitle,
       slug,
+      country: normalizedCountry,
+      industry: normalizedIndustry,
+      categories: normalizedCategories,
+      lat: parsedLat,
+      lng: parsedLng,
       organizer: organizerId
     };
     delete payload.createdBy;
@@ -284,13 +322,72 @@ class EventService {
       }
     }
 
-    // Slug checks if title changes and user didn't supply custom slug
-    if (updates.title && updates.title !== event.title && !updates.slug) {
-      let slug = this._slugify(updates.title);
+    const effectiveStart = updates.startDate !== undefined ? new Date(updates.startDate) : new Date(event.startDate);
+    const effectiveEnd = updates.endDate !== undefined ? new Date(updates.endDate) : new Date(event.endDate);
+    if (Number.isNaN(effectiveStart.getTime()) || Number.isNaN(effectiveEnd.getTime())) {
+      const err = new Error('Valid startDate and endDate are required');
+      err.statusCode = 400;
+      throw err;
+    }
+    if (effectiveEnd < effectiveStart) {
+      const err = new Error('Event end date cannot be earlier than start date');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    if (updates.lat !== undefined) {
+      updates.lat = updates.lat !== null && updates.lat !== '' ? Number(updates.lat) : null;
+      if (updates.lat !== null && (Number.isNaN(updates.lat) || updates.lat < -90 || updates.lat > 90)) {
+        const err = new Error('Latitude must be a valid number between -90 and 90');
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+    if (updates.lng !== undefined) {
+      updates.lng = updates.lng !== null && updates.lng !== '' ? Number(updates.lng) : null;
+      if (updates.lng !== null && (Number.isNaN(updates.lng) || updates.lng < -180 || updates.lng > 180)) {
+        const err = new Error('Longitude must be a valid number between -180 and 180');
+        err.statusCode = 400;
+        throw err;
+      }
+    }
+    if (updates.country !== undefined) {
+      updates.country = canonicalizeCountryName(updates.country);
+    }
+    if (Array.isArray(updates.categories)) {
+      updates.categories = updates.categories.map(canonicalizeCategoryName).filter(Boolean);
+    }
+    if (updates.industry !== undefined) {
+      updates.industry = canonicalizeCategoryName(updates.industry);
+    }
+
+    // Validate explicit custom slug against Mongo and WordPress slugs, or auto-disambiguate on title change
+    if (updates.slug) {
+      const requestedSlug = this._slugify(updates.slug);
+      const conflictMongo = await EventRepository.findOne({ slug: requestedSlug, _id: { $ne: eventId } });
+      let conflictWp = false;
+      try {
+        const wpDocs = await fetchLiveWpDirectoryEvents();
+        if (Array.isArray(wpDocs)) {
+          conflictWp = wpDocs.some(
+            d => (d.slug || '').toLowerCase() === requestedSlug.toLowerCase() &&
+                 (!event.wpPostId || String(d.id || d.wpPostId || '') !== String(event.wpPostId))
+          );
+        }
+      } catch (_) {}
+      if (conflictMongo || conflictWp) {
+        const err = new Error(`Slug "${requestedSlug}" is already in use`);
+        err.statusCode = 409;
+        throw err;
+      }
+      updates.slug = requestedSlug;
+    } else if (updates.title && updates.title !== event.title) {
+      const baseSlug = this._slugify(updates.title);
+      let slug = baseSlug;
       let existing = await EventRepository.findOne({ slug, _id: { $ne: eventId } });
       let counter = 1;
       while (existing) {
-        slug = `${this._slugify(updates.title)}-${counter}`;
+        slug = `${baseSlug}-${counter}`;
         existing = await EventRepository.findOne({ slug, _id: { $ne: eventId } });
         counter++;
       }

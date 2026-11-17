@@ -3328,12 +3328,14 @@ router.put('/events/:id', async (req, res, next) => {
 
     // Editable fields
     const allowedFields = [
-      'title', 'slug', 'description', 'banner', 'gallery',
-      'venue', 'city', 'state', 'country', 'startDate', 'endDate', 'timings',
-      'categories', 'status', 'orgName', 'orgEmail', 'orgPhone',
+      'title', 'slug', 'description', 'excerpt', 'banner', 'bannerAlt', 'bannerWidth', 'bannerHeight', 'gallery',
+      'brochurePdf', 'promoVideoUrl', 'socials',
+      'venue', 'address', 'city', 'state', 'country', 'lat', 'lng', 'startDate', 'endDate', 'timings',
+      'industry', 'categories', 'tags', 'status', 'orgName', 'orgEmail', 'orgPhone',
       'orgWebsite', 'orgDesc', 'orgLogo', 'ticketingMode', 'isFreeEvent',
       'freePassQuota', 'freePassUntil', 'paidTicketPrice', 'currency',
-      'schedules', 'faqsList', 'sponsorsList', 'contactShortcode', 'seo'
+      'schedules', 'faqsList', 'sponsorsList', 'contactShortcode', 'seo',
+      'eventType', 'livestream', 'virtualSettings'
     ];
 
     allowedFields.forEach(field => {
@@ -3508,8 +3510,10 @@ router.put('/events/:id/status', async (req, res, next) => {
       event.rejectionReason = '';
       await event.save();
 
-      // Real-time Sync to WordPress Pages via WordPressSyncService
+      // Real-time Sync to WordPress with status=published
       await syncEventToWordPress(event);
+      WordPressDirectorySyncService.clearCache();
+      WordPressDirectorySyncService.notifyFrontendCacheRefresh();
     } else if (action === 'reject') {
       event.status = 'cancelled';
       event.rejectionReason = rejectionReason.trim();

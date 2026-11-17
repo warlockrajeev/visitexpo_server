@@ -19,7 +19,7 @@ import Organization from '../models/Organization.js';
 import { parseWpLocation } from '../routes/adminRoutes.js';
 
 const WORDPRESS_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-const WORDPRESS_API_KEY = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
+const WORDPRESS_API_KEY = process.env.WORDPRESS_API_KEY || '';
 
 const BROKEN_WP_URLS = new Set([
   'https://visitexpo.in/wp-content/uploads/2026/09/India-International-EV-Show-2026_new.jpg',
@@ -350,19 +350,37 @@ class WordPressDirectorySyncService {
     const startTime = Date.now();
 
     try {
-      console.log(`[WP-Sync] Starting WordPress sync from ${WORDPRESS_URL}...`);
-
-      const wpRes = await fetch(`${WORDPRESS_URL}/wp-json/visitexpo/v1/inspect-event-meta`, {
-        headers: { 'X-VisitExpo-Key': WORDPRESS_API_KEY },
-        signal: AbortSignal.timeout(30000)
-      });
-
-      if (!wpRes.ok) {
-        throw new Error(`WordPress API returned status ${wpRes.status}`);
+      const apiKey = process.env.WORDPRESS_API_KEY || WORDPRESS_API_KEY;
+      if (!apiKey) {
+        console.warn('[WP-Sync] WORDPRESS_API_KEY is not configured; skipping inspect-event-meta sync.');
+        this.isSyncing = false;
+        return { success: false, message: 'WORDPRESS_API_KEY not configured' };
       }
 
-      const wpData = await wpRes.json();
-      const docs = wpData.data?.docs || [];
+      console.log(`[WP-Sync] Starting paginated WordPress sync from ${WORDPRESS_URL}...`);
+
+      const docs = [];
+      let page = 1;
+      let totalPages = 1;
+      const perPage = 200;
+
+      do {
+        const wpRes = await fetch(`${WORDPRESS_URL}/wp-json/visitexpo/v1/inspect-event-meta?page=${page}&per_page=${perPage}`, {
+          headers: { 'X-VisitExpo-Key': apiKey },
+          signal: AbortSignal.timeout(30000)
+        });
+
+        if (!wpRes.ok) {
+          throw new Error(`WordPress API returned status ${wpRes.status}`);
+        }
+
+        const wpData = await wpRes.json();
+        const pageDocs = wpData.data?.docs || [];
+        docs.push(...pageDocs);
+        totalPages = Number(wpData.data?.totalPages || 1);
+        if (pageDocs.length === 0) break;
+        page++;
+      } while (page <= totalPages);
 
       if (!Array.isArray(docs) || docs.length === 0) {
         console.warn('[WP-Sync] No docs returned from WordPress API.');
@@ -415,7 +433,7 @@ class WordPressDirectorySyncService {
         const startDate = startTs && parseInt(startTs) > 0 ? new Date(parseInt(startTs) * 1000) : new Date();
         const endDate = endTs && parseInt(endTs) > 0 ? new Date(parseInt(endTs) * 1000) : new Date(startDate.getTime() + 86400000 * 2);
 
-        const rawDesc = m.content?.[0] || m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || '';
+        const rawDesc = m.content?.[0] || m._yoast_wpseo_metadesc?.[0] || m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || '';
         const cleanDesc = this.decodeHtml(
           rawDesc
             .replace(/<[^>]*>/g, '')

@@ -52,22 +52,34 @@ export async function fetchLiveWpDirectoryEvents() {
   }
 
   const wpUrl = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-  const wpKey = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
+  const wpKey = process.env.WORDPRESS_API_KEY || '';
+  if (!wpKey) return [];
 
   try {
-    const res = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta`, {
-      headers: { 'X-VisitExpo-Key': wpKey },
-      signal: AbortSignal.timeout(8000)
-    });
-    if (res.ok) {
+    const rawDocs = [];
+    let page = 1;
+    let totalPages = 1;
+    do {
+      const res = await fetch(`${wpUrl}/wp-json/visitexpo/v1/inspect-event-meta?page=${page}&per_page=200`, {
+        headers: { 'X-VisitExpo-Key': wpKey },
+        signal: AbortSignal.timeout(8000)
+      });
+      if (!res.ok) break;
       const data = await res.json();
-      const rawDocs = data.data?.docs || [];
+      const pageDocs = data.data?.docs || [];
+      rawDocs.push(...pageDocs);
+      totalPages = Number(data.data?.totalPages || 1);
+      if (pageDocs.length === 0) break;
+      page++;
+    } while (page <= totalPages);
+
+    if (rawDocs.length > 0) {
       const docs = rawDocs.map((d, idx) => {
         const m = d.meta || {};
         const startTs = m.ovaem_date_start_time?.[0];
         const endTs = m.ovaem_date_end_time?.[0];
         const venue = m.ovaem_address_event?.[0] || m.ovaem_venue?.[0] || m.ovaem_address?.[0] || 'Exhibition Center';
-        const rawDesc = m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || (m.content?.[0] ? m.content[0].slice(0, 300) : '') || '';
+        const rawDesc = m._yoast_wpseo_metadesc?.[0] || m.yoast_wpseo_metadesc?.[0] || m.ovaem_desc_event?.[0] || m.ovaem_org_desc?.[0] || (m.content?.[0] ? m.content[0].slice(0, 300) : '') || '';
         return {
           _id: String(d.id || `wp-${idx}`),
           id: String(d.id || `wp-${idx}`),

@@ -39,24 +39,79 @@ const EventSchema = new mongoose.Schema(
       type: String,
       required: [true, 'Description is required']
     },
+    excerpt: {
+      type: String,
+      default: ''
+    },
     banner: {
       type: String, // Cloudinary URL
       default: ''
     },
+    bannerAlt: {
+      type: String,
+      default: ''
+    },
+    bannerWidth: {
+      type: Number,
+      default: 1200
+    },
+    bannerHeight: {
+      type: Number,
+      default: 630
+    },
     gallery: [String], // Array of Cloudinary URLs
+    brochurePdf: {
+      type: String,
+      default: ''
+    },
+    promoVideoUrl: {
+      type: String,
+      default: ''
+    },
+    socials: {
+      facebook: { type: String, default: '' },
+      linkedin: { type: String, default: '' },
+      instagram: { type: String, default: '' },
+      twitter: { type: String, default: '' },
+      youtube: { type: String, default: '' }
+    },
     venue: {
       type: String,
       required: [true, 'Venue is required']
+    },
+    address: {
+      type: String,
+      default: ''
     },
     city: {
       type: String,
       required: [true, 'City is required'],
       index: true
     },
+    state: {
+      type: String,
+      default: ''
+    },
     country: {
       type: String,
       required: [true, 'Country is required'],
-      default: 'India'
+      default: 'INDIA'
+    },
+    lat: {
+      type: Number,
+      default: null,
+      validate: {
+        validator: v => v === null || v === undefined || (typeof v === 'number' && !Number.isNaN(v) && v >= -90 && v <= 90),
+        message: 'Latitude must be between -90 and 90'
+      }
+    },
+    lng: {
+      type: Number,
+      default: null,
+      validate: {
+        validator: v => v === null || v === undefined || (typeof v === 'number' && !Number.isNaN(v) && v >= -180 && v <= 180),
+        message: 'Longitude must be between -180 and 180'
+      }
     },
     startDate: {
       type: Date,
@@ -64,13 +119,40 @@ const EventSchema = new mongoose.Schema(
     },
     endDate: {
       type: Date,
-      required: [true, 'End date is required']
+      required: [true, 'End date is required'],
+      validate: {
+        validator: function (value) {
+          if (!value) return false;
+          const end = new Date(value);
+          if (Number.isNaN(end.getTime())) return false;
+          let startRaw = this?.startDate;
+          if (!startRaw && typeof this?.getUpdate === 'function') {
+            const upd = this.getUpdate();
+            startRaw = upd?.startDate || upd?.$set?.startDate;
+          }
+          if (!startRaw) return true;
+          const start = new Date(startRaw);
+          if (Number.isNaN(start.getTime())) return true;
+          return end.getTime() >= start.getTime();
+        },
+        message: 'End date must be greater than or equal to start date'
+      }
     },
     timings: {
-      type: String, // E.g. "9:00 AM - 6:00 PM"
+      type: String, // E.g. "10:00 AM - 6:00 PM"
       default: ''
     },
+    industry: {
+      type: String,
+      default: '',
+      index: true
+    },
     categories: {
+      type: [String],
+      default: [],
+      index: true
+    },
+    tags: {
       type: [String],
       default: [],
       index: true
@@ -94,6 +176,19 @@ const EventSchema = new mongoose.Schema(
       index: true
     },
     wpUrl: {
+      type: String,
+      default: ''
+    },
+    wpTerms: {
+      categories: { type: [Number], default: [] },
+      location: { type: [Number], default: [] },
+      tags: { type: [Number], default: [] }
+    },
+    wpSyncedAt: {
+      type: Date,
+      default: null
+    },
+    syncError: {
       type: String,
       default: ''
     },
@@ -169,9 +264,14 @@ const EventSchema = new mongoose.Schema(
       }
     },
     seo: {
-      metaTitle: String,
-      metaDescription: String,
-      keywords: [String]
+      metaTitle: { type: String, default: '' },
+      metaDescription: { type: String, default: '' },
+      keywords: [String],
+      focusKeyword: { type: String, default: '' },
+      canonicalUrl: { type: String, default: '' },
+      ogTitle: { type: String, default: '' },
+      ogDescription: { type: String, default: '' },
+      ogImage: { type: String, default: '' }
     },
     speakers: [SpeakerSchema],
     sponsors: [
@@ -190,11 +290,11 @@ const EventSchema = new mongoose.Schema(
     eventType: {
       type: String,
       enum: ['physical', 'virtual', 'hybrid'],
-      default: 'hybrid',
+      default: 'physical',
       index: true
     },
     livestream: {
-      enabled: { type: Boolean, default: true },
+      enabled: { type: Boolean, default: false },
       provider: {
         type: String,
         enum: ['youtube', 'vimeo', 'zoom', 'agora', '100ms', 'custom'],
@@ -212,9 +312,9 @@ const EventSchema = new mongoose.Schema(
       liveViewerCount: { type: Number, default: 0 }
     },
     virtualSettings: {
-      enableVirtualBooths: { type: Boolean, default: true },
-      enableLiveChat: { type: Boolean, default: true },
-      allowVirtualRegistration: { type: Boolean, default: true },
+      enableVirtualBooths: { type: Boolean, default: false },
+      enableLiveChat: { type: Boolean, default: false },
+      allowVirtualRegistration: { type: Boolean, default: false },
       recordedSessionsUrl: { type: String, default: '' }
     },
     virtualAttendanceStats: {

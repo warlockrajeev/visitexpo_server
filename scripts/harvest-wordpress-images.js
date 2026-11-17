@@ -5,7 +5,7 @@ const clientPath = path.resolve(__dirname, '../../client-dashboard/src/data/word
 const serverPath = path.resolve(__dirname, '../data/wordpress-event-images.json');
 
 const WP_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
-const WP_KEY = process.env.WORDPRESS_API_KEY || 'visitexpo_custom_secret_key_12345';
+const WP_KEY = process.env.WORDPRESS_API_KEY || '';
 
 async function fetchOgImage(slug, timeoutMs = 9000) {
   // 1. Prefer WordPress oEmbed endpoint (fast, lightweight JSON returning uploads + Cloudinary featured images)
@@ -94,15 +94,26 @@ async function harvest() {
   console.log(`Loaded ${Object.keys(imageMap).length} initial image mappings.`);
 
   console.log('Fetching all WordPress events from inspect-event-meta...');
+  if (!WP_KEY) {
+    console.error('WORDPRESS_API_KEY env variable is required.');
+    return;
+  }
   let docs = [];
   try {
-    const metaRes = await fetch(`${WP_URL}/wp-json/visitexpo/v1/inspect-event-meta`, {
-      headers: { 'X-VisitExpo-Key': WP_KEY }
-    });
-    if (metaRes.ok) {
+    let page = 1;
+    let totalPages = 1;
+    do {
+      const metaRes = await fetch(`${WP_URL}/wp-json/visitexpo/v1/inspect-event-meta?page=${page}&per_page=200`, {
+        headers: { 'X-VisitExpo-Key': WP_KEY }
+      });
+      if (!metaRes.ok) break;
       const data = await metaRes.json();
-      docs = data.data?.docs || [];
-    }
+      const pageDocs = data.data?.docs || [];
+      docs.push(...pageDocs);
+      totalPages = Number(data.data?.totalPages || 1);
+      if (pageDocs.length === 0) break;
+      page++;
+    } while (page <= totalPages);
   } catch (err) {
     console.error('Failed to fetch inspect-event-meta:', err.message);
     return;
