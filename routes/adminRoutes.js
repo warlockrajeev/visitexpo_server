@@ -1849,12 +1849,28 @@ function getCallerId(req) {
   return null;
 }
 
-// @desc    Get all users (paginated + search + role, status & verification filters)
+// @desc    Get all users (paginated + search + role, status, verification & dateRange filters)
 // @route   GET /api/admin/users
 router.get('/users', async (req, res, next) => {
   try {
-    const { search, role, status, verification, page, limit } = req.query;
+    const { search, role, status, verification, dateRange, page, limit } = req.query;
     const query = {};
+
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const diffToMonday = (now.getDay() + 6) % 7;
+    const startOfWeek = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diffToMonday);
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    if (dateRange && dateRange !== 'all') {
+      if (dateRange === 'today') {
+        query.createdAt = { $gte: startOfToday };
+      } else if (dateRange === 'week') {
+        query.createdAt = { $gte: startOfWeek };
+      } else if (dateRange === 'month') {
+        query.createdAt = { $gte: startOfMonth };
+      }
+    }
 
     if (role && role !== 'all') {
       query.role = role;
@@ -1902,15 +1918,28 @@ router.get('/users', async (req, res, next) => {
     const pgLimit = parseInt(limit, 10) || 100;
     const skip = (pgNum - 1) * pgLimit;
 
-    const [docs, total, totalActive, totalSuspended] = await Promise.all([
+    const [
+      docs,
+      total,
+      totalUsers,
+      totalActive,
+      totalSuspended,
+      registeredToday,
+      registeredThisWeek,
+      registeredThisMonth
+    ] = await Promise.all([
       User.find(query)
         .populate('organization', 'name logo website address contact gst description')
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(pgLimit),
       User.countDocuments(query),
+      User.countDocuments({}),
       User.countDocuments({ isSuspended: { $ne: true }, status: { $ne: 'suspended' } }),
-      User.countDocuments({ $or: [{ isSuspended: true }, { status: 'suspended' }] })
+      User.countDocuments({ $or: [{ isSuspended: true }, { status: 'suspended' }] }),
+      User.countDocuments({ createdAt: { $gte: startOfToday } }),
+      User.countDocuments({ createdAt: { $gte: startOfWeek } }),
+      User.countDocuments({ createdAt: { $gte: startOfMonth } })
     ]);
 
     res.status(200).json({
@@ -1918,6 +1947,10 @@ router.get('/users', async (req, res, next) => {
       data: {
         docs,
         total,
+        totalUsers,
+        registeredToday,
+        registeredThisWeek,
+        registeredThisMonth,
         totalActive,
         totalSuspended,
         page: pgNum,
