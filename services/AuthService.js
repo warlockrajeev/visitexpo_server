@@ -15,7 +15,7 @@ import { isCorporateEmail, isUserCorporateEmail } from '../utils/emailValidator.
 export const getRoleLabel = (role) => {
   if (!role) return 'User';
   const r = role.toLowerCase();
-  if (r === 'organizer') return 'Organizer';
+  if (r === 'organizer') return 'Organiser';
   if (r === 'exhibitor') return 'Exhibitor';
   if (r === 'visitor') return 'Visitor';
   if (r === 'super_admin' || r === 'admin') return 'Administrator';
