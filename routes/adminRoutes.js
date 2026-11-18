@@ -5445,12 +5445,26 @@ router.get('/activity-monitor', async (req, res, next) => {
       }
     }
 
+    const registeredRoleCondition = { $nin: ['guest', null, ''] };
+    const guestRoleFilter = {
+      $or: [{ userRole: 'guest' }, { userRole: null }, { userRole: '' }, { userRole: { $exists: false } }]
+    };
+
     if (userRole && userRole !== 'all') {
       const normalizedRole = String(userRole).toLowerCase().trim();
-      const roleCondition = normalizedRole === 'registered' ? { $ne: 'guest' } : normalizedRole;
-      query.userRole = roleCondition;
-      if (!hasSelectedUser) {
-        directoryMatch.userRole = roleCondition;
+      if (normalizedRole === 'guest') {
+        query.$and = query.$and || [];
+        query.$and.push(guestRoleFilter);
+        if (!hasSelectedUser) {
+          directoryMatch.$and = directoryMatch.$and || [];
+          directoryMatch.$and.push(guestRoleFilter);
+        }
+      } else {
+        const roleCondition = normalizedRole === 'registered' ? registeredRoleCondition : normalizedRole;
+        query.userRole = roleCondition;
+        if (!hasSelectedUser) {
+          directoryMatch.userRole = roleCondition;
+        }
       }
     }
 
@@ -5545,6 +5559,8 @@ router.get('/activity-monitor', async (req, res, next) => {
       formSubmissionsCount,
       typeAgg,
       allUniqueUsersCountAgg,
+      registeredUsersCountAgg,
+      guestUsersCountAgg,
       userSummaryFacetAgg,
       topEventsAgg,
       topPagesAgg
@@ -5561,6 +5577,16 @@ router.get('/activity-monitor', async (req, res, next) => {
         { $sort: { count: -1 } }
       ]),
       UserActivity.aggregate([
+        { $group: { _id: userGroupingKey } },
+        { $count: 'total' }
+      ]),
+      UserActivity.aggregate([
+        { $match: { userRole: registeredRoleCondition } },
+        { $group: { _id: userGroupingKey } },
+        { $count: 'total' }
+      ]),
+      UserActivity.aggregate([
+        { $match: guestRoleFilter },
         { $group: { _id: userGroupingKey } },
         { $count: 'total' }
       ]),
@@ -5663,6 +5689,8 @@ router.get('/activity-monitor', async (req, res, next) => {
     const usersTotal = userFacet.metadata?.[0]?.total || 0;
     const userSummaryDocs = Array.isArray(userFacet.docs) ? userFacet.docs : [];
     const uniqueUsersTotal = allUniqueUsersCountAgg?.[0]?.total || usersTotal;
+    const registeredUsersTotal = registeredUsersCountAgg?.[0]?.total || 0;
+    const guestUsersTotal = guestUsersCountAgg?.[0]?.total || 0;
 
     res.status(200).json({
       success: true,
@@ -5680,7 +5708,9 @@ router.get('/activity-monitor', async (req, res, next) => {
           eventClicksCount,
           engagementsCount,
           formSubmissionsCount,
-          uniqueUsersCount: uniqueUsersTotal
+          uniqueUsersCount: uniqueUsersTotal,
+          registeredUsersCount: registeredUsersTotal,
+          guestUsersCount: guestUsersTotal
         },
         typeBreakdown,
         userSummaries: userSummaryDocs.map((u) => ({
