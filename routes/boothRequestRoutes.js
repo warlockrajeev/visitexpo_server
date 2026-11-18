@@ -66,7 +66,7 @@ router.get('/count', async (req, res) => {
     if (authHeader && authHeader.startsWith('Bearer ')) {
       const token = authHeader.split(' ')[1];
       const decoded = verifyAccessToken(token);
-      if (decoded) {
+      if (decoded && String(decoded.role || '').toLowerCase() !== 'visitor') {
         const userConditions = [];
         if (decoded.id && mongoose.isValidObjectId(decoded.id)) {
           userConditions.push({ userId: new mongoose.Types.ObjectId(decoded.id) });
@@ -190,6 +190,13 @@ router.post('/', protect, async (req, res) => {
     const allowedCategory = ['stall', 'visitor_pass', 'general'].includes(requestCategory)
       ? requestCategory
       : 'stall';
+
+    if (String(req.user?.role || '').toLowerCase() === 'visitor' && allowedCategory === 'stall') {
+      return res.status(403).json({
+        success: false,
+        error: 'Booth requests are only available for Exhibitor and Organiser accounts.'
+      });
+    }
 
     if (allowedCategory === 'stall' && !requesterCompany) {
       return res.status(400).json({ success: false, error: 'Company / Organization name is required for stall booking.' });
