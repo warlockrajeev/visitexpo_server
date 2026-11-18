@@ -43,6 +43,7 @@ import {
 import { syncEventToWordPress } from '../services/WordPressSyncService.js';
 import WordPressDirectorySyncService from '../services/WordPressDirectorySyncService.js';
 import { verifyAccessToken } from '../utils/jwt.js';
+import { isCorporateEmail } from '../utils/emailValidator.js';
 import jwt from 'jsonwebtoken';
 
 import fs from 'fs';
@@ -1021,7 +1022,7 @@ export function parseWpLocation(rawLocation = '', rawCity = '') {
 async function _computeAggregatedOrganizers(forceRefresh = false) {
   const { default: wpDirectorySync } = await import('../services/WordPressDirectorySyncService.js');
 
-  const [mongoEvents, mongoOrgs, deletedOrgs, deletedEvents] = await Promise.all([
+  const [mongoEvents, mongoOrgs, deletedOrgs, deletedEvents, organizerUsersWithWorkEmail] = await Promise.all([
     wpDirectorySync.getFastStoredEvents({ forceRefresh }).catch(async (err) => {
       console.warn('[Admin] getFastStoredEvents fallback for organizers:', err.message);
       return Event.find(
@@ -1033,8 +1034,18 @@ async function _computeAggregatedOrganizers(forceRefresh = false) {
     }),
     Organization.find().select('name logo website description contact').lean(),
     DeletedOrganizer.find().select('name slugId').lean(),
-    DeletedEvent.find().select('eventId slug wpPostId title').lean()
+    DeletedEvent.find().select('eventId slug wpPostId title').lean(),
+    User.find({ role: 'organizer', workEmail: { $exists: true, $ne: '' } })
+      .select('organization workEmail email')
+      .lean()
   ]);
+
+  const workEmailByOrgId = new Map();
+  (organizerUsersWithWorkEmail || []).forEach((u) => {
+    if (u.organization && u.workEmail) {
+      workEmailByOrgId.set(String(u.organization), u.workEmail);
+    }
+  });
 
   const deletedNames = new Set((deletedOrgs || []).map(d => (d.name || '').toLowerCase().trim()));
   const deletedSlugIds = new Set((deletedOrgs || []).map(d => (d.slugId || '').toLowerCase().trim()));
@@ -1090,10 +1101,12 @@ async function _computeAggregatedOrganizers(forceRefresh = false) {
       o.name.toLowerCase() === mo.name.toLowerCase() ||
       (mo.name.toLowerCase().includes('global tech') && o.name.toLowerCase().includes('global tech'))
     );
+    const tenantWorkEmail = workEmailByOrgId.get(String(mo._id)) || '';
     if (matchedKnown) {
       matchedKnown.logoUrl = mo.logo || matchedKnown.logoUrl;
       matchedKnown.website = mo.website || matchedKnown.website;
       matchedKnown.email = mo.contact?.email || matchedKnown.email;
+      if (tenantWorkEmail) matchedKnown.workEmail = tenantWorkEmail;
       matchedKnown.phone = mo.contact?.phone || matchedKnown.phone;
       matchedKnown.isRegisteredTenant = true;
       matchedKnown.tenantId = String(mo._id);
@@ -1111,6 +1124,7 @@ async function _computeAggregatedOrganizers(forceRefresh = false) {
         type: 'independent',
         scope: mo.description || 'Registered platform tenant organizer hosting enterprise expos.',
         email: mo.contact?.email || '',
+        workEmail: tenantWorkEmail,
         phone: mo.contact?.phone || '',
         isRegisteredTenant: true,
         tenantId: String(mo._id),
@@ -1346,7 +1360,7 @@ async function _computeDashboardAnalytics() {
     Event.countDocuments(),
     Subscription.countDocuments({ status: 'active' }),
     Order.find({ status: 'completed' }).select('totalAmount createdAt').sort({ createdAt: 1 }).lean(),
-    User.countDocuments({ role: 'organizer', isVerified: false }),
+    Promise.resolve(0),
     Exhibitor.countDocuments({ status: 'pending' }),
     Event.countDocuments({ isClaimed: true, status: 'draft' }),
     Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } }),
@@ -1885,9 +1899,9 @@ router.get('/users', async (req, res, next) => {
     }
 
     if (verification === 'email_verified') {
-      query.isVerified = true;
+      query.authProvider = 'google';
     } else if (verification === 'email_unverified') {
-      query.isVerified = { $ne: true };
+      query.authProvider = { $ne: 'google' };
     } else if (verification === 'phone_verified') {
       query.isPhoneVerified = true;
     } else if (verification === 'phone_unverified') {
@@ -1900,6 +1914,7 @@ router.get('/users', async (req, res, next) => {
       const searchOr = [
         { name: searchRegex },
         { email: searchRegex },
+        { workEmail: searchRegex },
         { phone: searchRegex },
         { company: searchRegex }
       ];
@@ -2044,6 +2059,8 @@ router.put('/users/:id', async (req, res, next) => {
     const {
       name,
       email,
+      workEmail,
+      workEmailVerified,
       role,
       isVerified,
       isPhoneVerified,
@@ -2062,7 +2079,32 @@ router.put('/users/:id', async (req, res, next) => {
     }
 
     if (name) user.name = name;
-    if (email) user.email = email.toLowerCase();
+    if (email) user.email = email.toLowerCase().trim();
+    if (workEmail !== undefined) {
+      const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
+      if (normalizedWorkEmail) {
+        if (normalizedWorkEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizedWorkEmail)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Please enter a valid work email address (e.g. name@company.com).'
+          });
+        }
+        user.workEmail = normalizedWorkEmail;
+        user.workEmailVerified =
+          workEmailVerified !== undefined ? Boolean(workEmailVerified) : isCorporateEmail(normalizedWorkEmail);
+        user.workEmailVerificationRequired = false;
+        if (isCorporateEmail(normalizedWorkEmail) || isCorporateEmail(user.email)) {
+          user.emailType = 'corporate';
+        }
+      } else {
+        user.workEmail = '';
+        user.workEmailVerified = false;
+        user.emailType = isCorporateEmail(user.email) ? 'corporate' : 'general';
+        user.workEmailVerificationRequired = user.role === 'organizer' && !isCorporateEmail(user.email);
+      }
+    } else if (workEmailVerified !== undefined) {
+      user.workEmailVerified = Boolean(workEmailVerified);
+    }
     if (role) user.role = role;
     if (isVerified !== undefined) user.isVerified = Boolean(isVerified);
     if (isPhoneVerified !== undefined) user.isPhoneVerified = Boolean(isPhoneVerified);
@@ -2096,11 +2138,16 @@ router.put('/users/:id', async (req, res, next) => {
     }
 
     await user.save();
+    organizersCache.data = null;
+
+    const updatedUser = await User.findById(user._id)
+      .select('-password')
+      .populate('organization', 'name logo website address contact gst description');
 
     res.status(200).json({
       success: true,
       message: 'User updated successfully',
-      user
+      user: updatedUser || user
     });
   } catch (error) {
     next(error);
@@ -2690,6 +2737,8 @@ router.get('/invoices', async (req, res, next) => {
 // @route   GET /api/admin/pending-summary
 router.get('/pending-summary', async (req, res, next) => {
   try {
+    await User.updateMany({ isVerified: false }, { $set: { isVerified: true } }).catch(() => {});
+
     const [
       pendingOrganizers,
       pendingExhibitorsCount,
@@ -2700,7 +2749,7 @@ router.get('/pending-summary', async (req, res, next) => {
       pendingEventRequests,
       pendingPassRequests
     ] = await Promise.all([
-      User.countDocuments({ role: 'organizer', isVerified: false }),
+      Promise.resolve(0),
       Exhibitor.countDocuments({ status: 'pending' }),
       Event.countDocuments({ isClaimed: true, status: 'draft' }),
       Event.countDocuments({ status: 'pending' }),
@@ -2810,17 +2859,15 @@ router.get('/moderation/:type/:id', async (req, res, next) => {
   }
 });
 
-// @desc    Get pending organizer account registrations
+// @desc    Get pending organizer account registrations (disabled: accounts auto-approve on signup)
 // @route   GET /api/admin/pending-organizers
 router.get('/pending-organizers', async (req, res, next) => {
   try {
-    const pendingUsers = await User.find({ role: 'organizer', isVerified: false })
-      .populate('organization')
-      .sort({ createdAt: -1 });
+    await User.updateMany({ isVerified: false }, { $set: { isVerified: true } });
 
     res.status(200).json({
       success: true,
-      data: pendingUsers
+      data: []
     });
   } catch (error) {
     next(error);

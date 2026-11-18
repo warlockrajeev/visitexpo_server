@@ -306,7 +306,7 @@ router.post('/register', async (req, res, next) => {
       status: 'pending'
     });
 
-    // 4. Create User record for login
+    // 4. Create User record for login (accounts never await admin approval)
     let user = existingUser;
     if (!user) {
       user = await User.create({
@@ -314,16 +314,21 @@ router.post('/register', async (req, res, next) => {
         email: normalizedEmail,
         password: password || 'defaultPassword123',
         role: 'exhibitor',
-        isVerified: false,
+        isVerified: true,
         status: 'active'
       });
     } else {
-      // Safe update: do not overwrite role/verification status of organizers/admins!
+      // Safe update: do not overwrite role of organizers/admins!
+      if (!user.isVerified) {
+        user.isVerified = true;
+      }
       if (user.role === 'exhibitor') {
         if (!user.isSuspended && user.status !== 'suspended') user.status = 'active';
         if (password) {
           user.password = password;
         }
+      }
+      if (user.isModified()) {
         await user.save();
       }
     }

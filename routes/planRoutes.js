@@ -526,6 +526,10 @@ router.get('/my-plan', protect, async (req, res, next) => {
     const hasGrowthPlan = Boolean(user.hasGrowthPlan || growthSub);
 
     let needsSave = false;
+    if (!user.isVerified) {
+      user.isVerified = true;
+      needsSave = true;
+    }
     if (user.hasGrowthPlan !== hasGrowthPlan) {
       user.hasGrowthPlan = hasGrowthPlan;
       needsSave = true;
@@ -597,7 +601,7 @@ router.get('/my-plan', protect, async (req, res, next) => {
 
     const isPaidOrganizer = ['enterprise', 'starter'].includes(resolvedBasePlan);
     const isPlanActive = isPaidOrganizer ? true : (sub ? sub.status === 'active' : !!user.isPlanActive);
-    const isVerified = isPaidOrganizer ? true : (user.isVerified ?? false);
+    const isVerified = true;
 
     const activePlanDoc = await Plan.findOne({ planId: resolvedBasePlan });
     const defaultFallbackName = resolvedBasePlan === 'enterprise' ? 'Organizer Enterprise' : resolvedBasePlan === 'starter' ? 'Organizer Starter' : 'Free Organizer';

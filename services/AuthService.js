@@ -114,14 +114,14 @@ class AuthService {
     const isCorporate = assignedRole === 'organizer' ? hasCorporateWorkEmail : isCorporateEmail(normalizedEmail);
     const emailType = isCorporate ? 'corporate' : 'general';
 
-    let isVerified = false;
+    // Accounts are activated immediately upon creation without waiting for admin approval
+    const isVerified = true;
     let planStatus = 'payment_pending';
     let isPlanActive = false;
     let planPaidAmount = 0;
     let generalEmailPrice = 1499;
 
     if (assignedRole === 'visitor') {
-      isVerified = true;
       planStatus = 'active';
       isPlanActive = true;
     } else if (assignedRole === 'organizer') {
@@ -131,17 +131,18 @@ class AuthService {
 
       if (isCorporate || isGeneralFree) {
         // Corporate business email or no charge for general email configured by admin: Free Organizer plan is automatically active!
-        isVerified = true;
         planStatus = 'active';
         isPlanActive = true;
         planPaidAmount = 0;
       } else {
-        // General personal email: requires ₹1,499 verification charge to activate
-        isVerified = false;
+        // General personal email: requires ₹1,499 plan activation charge (account itself still does not require admin approval)
         planStatus = 'payment_pending';
         isPlanActive = false;
         planPaidAmount = 0;
       }
+    } else if (assignedRole === 'exhibitor') {
+      planStatus = 'active';
+      isPlanActive = true;
     }
 
     // Create the User (password hashing handled by Mongoose pre-save hook)
@@ -278,7 +279,12 @@ class AuthService {
       throw err;
     }
 
-    // 4. Auto-sync organizer corporate email plan & verification
+    // 4. Auto-verify account & sync organizer corporate email plan
+    if (!user.isVerified) {
+      user.isVerified = true;
+      await user.save();
+    }
+
     if (user.role === 'organizer') {
       const isCorporate = isUserCorporateEmail(user);
       let needsSave = false;
@@ -323,7 +329,7 @@ class AuthService {
         needsSave = true;
       } else if (!isCorporate && !user.isPlanActive && user.plan === 'free') {
         user.plan = 'free';
-        user.planStatus = user.isVerified ? 'active' : 'payment_pending';
+        user.planStatus = user.isPlanActive ? 'active' : 'payment_pending';
         needsSave = true;
       }
       if (needsSave) {
@@ -355,11 +361,11 @@ class AuthService {
         workEmailVerificationRequired: !!user.workEmailVerificationRequired,
         adminRole: user.adminRole || '',
         permissions: user.permissions || [],
-        isVerified: isPaidOrganizer ? true : user.isVerified,
+        isVerified: true,
         emailType: user.emailType || (isUserCorporateEmail(user) ? 'corporate' : 'general'),
         plan: user.plan || 'free',
         basePlan: user.plan || 'free',
-        planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
+        planStatus: user.planStatus || (user.isPlanActive ? 'active' : 'payment_pending'),
         isPlanActive: isPaidOrganizer ? true : !!user.isPlanActive,
         hasGrowthPlan: Boolean(user.hasGrowthPlan || user.plan === 'growth'),
         planPaidAmount: user.planPaidAmount || 0,
@@ -560,13 +566,13 @@ class AuthService {
       const isCorporate = assignedRole === 'organizer' ? hasCorporateWorkEmail : isCorporateEmail(normalizedEmail);
       const emailType = isCorporate ? 'corporate' : 'general';
 
-      let isVerified = false;
+      // Accounts are activated immediately upon creation without waiting for admin approval
+      const isVerified = true;
       let planStatus = 'payment_pending';
       let isPlanActive = false;
       let generalEmailPrice = 1499;
 
       if (assignedRole === 'visitor') {
-        isVerified = true;
         planStatus = 'active';
         isPlanActive = true;
       } else if (assignedRole === 'organizer') {
@@ -575,16 +581,15 @@ class AuthService {
         const isGeneralFree = generalEmailPrice === 0;
 
         if (isCorporate || isGeneralFree) {
-          isVerified = true;
           planStatus = 'active';
           isPlanActive = true;
         } else {
-          isVerified = false;
           planStatus = 'payment_pending';
           isPlanActive = false;
         }
       } else if (assignedRole === 'exhibitor') {
-        isVerified = false;
+        planStatus = 'active';
+        isPlanActive = true;
       }
 
       user = await UserRepository.create({
@@ -643,6 +648,11 @@ class AuthService {
         await user.save();
       }
     } else {
+      // Auto-verify existing account if created under prior pending rule
+      if (!user.isVerified) {
+        user.isVerified = true;
+      }
+
       // If user exists, sync corporate email plan if organizer
       if (user.role === 'organizer' && workEmail) {
         if (workEmail != null && typeof workEmail !== 'string') {
@@ -699,11 +709,11 @@ class AuthService {
           );
         }
       }
-      if (!user.authProvider) {
-        user.authProvider = 'google';
-      }
       if (user.hasCustomPassword === undefined) {
-        user.hasCustomPassword = false;
+        user.hasCustomPassword = user.authProvider === 'local';
+      }
+      if (user.authProvider !== 'google') {
+        user.authProvider = 'google';
       }
 
       // If user provided a phone and it's verified, update it
@@ -785,11 +795,11 @@ class AuthService {
         workEmailVerified: !!user.workEmailVerified,
         workEmailVerificationRequired: !!user.workEmailVerificationRequired,
         role: user.role,
-        isVerified: isPaidOrganizerGoogle ? true : user.isVerified,
+        isVerified: true,
         emailType: user.emailType || (isUserCorporateEmail(user) ? 'corporate' : 'general'),
         plan: user.plan || 'free',
         basePlan: user.plan || 'free',
-        planStatus: user.planStatus || (user.isVerified ? 'active' : 'payment_pending'),
+        planStatus: user.planStatus || (user.isPlanActive ? 'active' : 'payment_pending'),
         isPlanActive: isPaidOrganizerGoogle ? true : !!user.isPlanActive,
         hasGrowthPlan: Boolean(user.hasGrowthPlan || user.plan === 'growth'),
         planPaidAmount: user.planPaidAmount || 0,

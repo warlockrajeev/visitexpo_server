@@ -15,7 +15,7 @@ import { authLimiter } from '../middlewares/rateLimiter.js';
 import jwt from 'jsonwebtoken';
 import UserRepository from '../repositories/UserRepository.js';
 import { generateAccessToken, generateRefreshToken } from '../utils/jwt.js';
-import { isUserCorporateEmail } from '../utils/emailValidator.js';
+import { isCorporateEmail, isUserCorporateEmail } from '../utils/emailValidator.js';
 import { sendWorkEmailVerificationCode, verifyWorkEmailCode } from '../services/workEmailVerificationService.js';
 import { resolveUserCompany, syncUserCompanyName } from '../services/companyProfileHelper.js';
 import { logUserActivity } from '../utils/activityLogger.js';
@@ -415,6 +415,11 @@ router.get('/me', protect, async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'User profile not found' });
     }
 
+    if (!userDoc.isVerified) {
+      userDoc.isVerified = true;
+      await userDoc.save();
+    }
+
     // Auto-sync corporate email plan activation & active subscription for organizers
     let activeSub = null;
     let hasGrowthPlan = false;
@@ -630,6 +635,10 @@ router.put('/organization', protect, async (req, res, next) => {
         id: updatedUser._id,
         name: updatedUser.name,
         email: updatedUser.email,
+        workEmail: updatedUser.workEmail || '',
+        workEmailVerified: !!updatedUser.workEmailVerified,
+        workEmailVerificationRequired: !!updatedUser.workEmailVerificationRequired,
+        emailType: updatedUser.emailType || (isUserCorporateEmail(updatedUser) ? 'corporate' : 'general'),
         phone: updatedUser.phone || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
@@ -644,10 +653,10 @@ router.put('/organization', protect, async (req, res, next) => {
   }
 });
 
-// Update Account Profile details (name, email, phone, company, designation, city, avatar)
+// Update Account Profile details (name, email, workEmail, phone, company, designation, city, avatar)
 router.put('/profile', protect, async (req, res, next) => {
   try {
-    const { name, email, phone, company, designation, city, avatar, photoURL, phoneVerificationToken } = req.body;
+    const { name, email, workEmail, phone, company, designation, city, avatar, photoURL, phoneVerificationToken } = req.body;
     const userDoc = await User.findById(req.user.id);
     if (!userDoc) {
       return res.status(404).json({ success: false, error: 'User account not found' });
@@ -698,6 +707,32 @@ router.put('/profile', protect, async (req, res, next) => {
       userDoc.email = email.toLowerCase();
     }
 
+    if (workEmail !== undefined) {
+      const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
+      if (normalizedWorkEmail) {
+        if (normalizedWorkEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizedWorkEmail)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Please enter a valid work email address.'
+          });
+        }
+        const changed = normalizedWorkEmail !== (userDoc.workEmail || '').toLowerCase().trim();
+        userDoc.workEmail = normalizedWorkEmail;
+        if (changed) {
+          userDoc.workEmailVerified = false;
+        }
+        userDoc.workEmailVerificationRequired = false;
+        if (isCorporateEmail(normalizedWorkEmail) || isCorporateEmail(userDoc.email)) {
+          userDoc.emailType = 'corporate';
+        }
+      } else {
+        userDoc.workEmail = '';
+        userDoc.workEmailVerified = false;
+        userDoc.emailType = isCorporateEmail(userDoc.email) ? 'corporate' : 'general';
+        userDoc.workEmailVerificationRequired = userDoc.role === 'organizer' && !isCorporateEmail(userDoc.email);
+      }
+    }
+
     await userDoc.save();
 
     if (company !== undefined && String(company).trim().length >= 2) {
@@ -714,6 +749,10 @@ router.put('/profile', protect, async (req, res, next) => {
         id: updatedUser._id,
         name: updatedUser.name,
         email: updatedUser.email,
+        workEmail: updatedUser.workEmail || '',
+        workEmailVerified: !!updatedUser.workEmailVerified,
+        workEmailVerificationRequired: !!updatedUser.workEmailVerificationRequired,
+        emailType: updatedUser.emailType || (isUserCorporateEmail(updatedUser) ? 'corporate' : 'general'),
         phone: updatedUser.phone || '',
         company: resolvedCompany || updatedUser.company || '',
         designation: updatedUser.designation || '',

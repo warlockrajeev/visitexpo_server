@@ -740,6 +740,10 @@ router.post('/onboard-organizer', async (req, res, next) => {
       if (decoded?.id) {
         const authUser = await User.findById(decoded.id);
         if (authUser) {
+          if (!authUser.isVerified) {
+            authUser.isVerified = true;
+            await authUser.save();
+          }
           userId = authUser._id;
           orgId = authUser.organization;
           userObj = authUser.toObject();
@@ -752,6 +756,10 @@ router.post('/onboard-organizer', async (req, res, next) => {
     if (!userId && effectiveEmail) {
       const existingUser = await User.findOne({ email: effectiveEmail });
       if (existingUser) {
+        if (!existingUser.isVerified) {
+          existingUser.isVerified = true;
+          await existingUser.save();
+        }
         userId = existingUser._id;
         orgId = existingUser.organization;
         userObj = existingUser.toObject();
@@ -776,7 +784,7 @@ router.post('/onboard-organizer', async (req, res, next) => {
         role: 'organizer',
         phone: cleanPhone,
         city: userCity,
-        isVerified: false,
+        isVerified: true,
         isPhoneVerified: false,
         authProvider: 'local',
         hasCustomPassword: !!password
