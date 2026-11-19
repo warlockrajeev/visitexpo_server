@@ -28,6 +28,27 @@ export class TwoFactorService {
     return digits;
   }
 
+  /**
+   * Normalize international / foreign WhatsApp number (7 to 15 digits, prefixed with +)
+   */
+  static cleanForeignPhoneNumber(phone) {
+    if (!phone) return '';
+    const digits = String(phone).replace(/\D/g, '');
+    if (!digits) return '';
+    return `+${digits}`;
+  }
+
+  /**
+   * Check if a phone string appears to be an Indian (+91) number
+   */
+  static isIndianPhoneInput(phone) {
+    const raw = String(phone || '').trim();
+    const digits = raw.replace(/\D/g, '');
+    if (raw.startsWith('+91') || raw.startsWith('0091')) return true;
+    if (digits.length === 12 && digits.startsWith('91')) return true;
+    return false;
+  }
+
   static getApiKey() {
     return process.env.TWO_FACTOR_API_KEY || 'e100befd-3ed7-11f1-9800-0200cd936042';
   }
@@ -151,6 +172,45 @@ export class TwoFactorService {
   }
 
   /**
+   * Generate signed verification token for foreign WhatsApp number verified via live non-India geolocation
+   */
+  static generateForeignLocationToken({ phone, countryCode, countryName, location }) {
+    const cleanForeign = this.cleanForeignPhoneNumber(phone);
+    const jwtSecret = process.env.JWT_SECRET || 'visitexpo_access_key_super_secret_change_me_in_production';
+    return jwt.sign(
+      {
+        phone: cleanForeign,
+        purpose: 'foreign_phone_location_verification',
+        isForeign: true,
+        countryCode: String(countryCode || '').toUpperCase(),
+        countryName: String(countryName || ''),
+        location: String(location || ''),
+        verifiedAt: Date.now()
+      },
+      jwtSecret,
+      { expiresIn: '30m' }
+    );
+  }
+
+  /**
+   * Check whether token is a valid foreign WhatsApp + non-India live location token
+   */
+  static isForeignVerificationToken(token, phone) {
+    if (!token || !phone) return false;
+    const cleanForeign = this.cleanForeignPhoneNumber(phone);
+    try {
+      const jwtSecret = process.env.JWT_SECRET || 'visitexpo_access_key_super_secret_change_me_in_production';
+      const decoded = jwt.verify(token, jwtSecret);
+      if (decoded.purpose !== 'foreign_phone_location_verification') return false;
+      if (decoded.phone !== cleanForeign) return false;
+      if (String(decoded.countryCode || '').toUpperCase() === 'IN') return false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Validate signed phone verification token on final registration
    * @param {string} token 
    * @param {string} phone 
@@ -158,6 +218,7 @@ export class TwoFactorService {
    */
   static validateVerificationToken(token, phone) {
     if (!token) return false;
+    if (this.isForeignVerificationToken(token, phone)) return true;
     const cleanPhone = this.cleanPhoneNumber(phone);
 
     try {

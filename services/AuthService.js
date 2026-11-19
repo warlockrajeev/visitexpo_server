@@ -95,18 +95,23 @@ class AuthService {
       throw err;
     }
 
-    // 3. Mandatory Mobile OTP Verification Check
-    const cleanPhone = TwoFactorService.cleanPhoneNumber(phone);
-    if (!cleanPhone || cleanPhone.length < 10) {
-      const err = new Error('A valid 10-digit mobile number is mandatory for registration.');
+    // 3. Mandatory Mobile OTP or Foreign Live-Location Verification Check
+    const isForeignPhoneVerified =
+      Boolean(phoneVerificationToken) && TwoFactorService.isForeignVerificationToken(phoneVerificationToken, phone);
+    const cleanPhone = isForeignPhoneVerified
+      ? TwoFactorService.cleanForeignPhoneNumber(phone)
+      : TwoFactorService.cleanPhoneNumber(phone);
+
+    if (!cleanPhone || (!isForeignPhoneVerified && cleanPhone.length < 10) || (isForeignPhoneVerified && cleanPhone.replace(/\D/g, '').length < 7)) {
+      const err = new Error('A valid mobile number is mandatory for registration.');
       err.statusCode = 400;
       throw err;
     }
 
-    let isPhoneValid = false;
-    if (phoneVerificationToken && TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
+    let isPhoneValid = isForeignPhoneVerified;
+    if (!isPhoneValid && phoneVerificationToken && TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
       isPhoneValid = true;
-    } else if (otpSessionId && otp) {
+    } else if (!isPhoneValid && otpSessionId && otp) {
       const verifyRes = await TwoFactorService.verifyOtp(otpSessionId, otp, cleanPhone);
       if (verifyRes.success) {
         isPhoneValid = true;
@@ -118,7 +123,7 @@ class AuthService {
     }
 
     if (!isPhoneValid) {
-      const err = new Error('Mandatory mobile number verification failed. Please verify your phone number via OTP.');
+      const err = new Error('Mandatory mobile number verification failed. Please verify your Indian mobile number via OTP or confirm your foreign live location.');
       err.statusCode = 400;
       throw err;
     }
@@ -498,18 +503,23 @@ class AuthService {
     }
 
     if (!user) {
-      // Mandatory Mobile OTP verification for new Google registration
-      const cleanPhone = TwoFactorService.cleanPhoneNumber(phone);
-      if (!cleanPhone || cleanPhone.length < 10) {
-        const err = new Error('A valid 10-digit mobile number is mandatory to complete Google registration.');
+      // Mandatory Mobile OTP or Foreign Live-Location verification for new Google registration
+      const isForeignPhoneVerified =
+        Boolean(phoneVerificationToken) && TwoFactorService.isForeignVerificationToken(phoneVerificationToken, phone);
+      const cleanPhone = isForeignPhoneVerified
+        ? TwoFactorService.cleanForeignPhoneNumber(phone)
+        : TwoFactorService.cleanPhoneNumber(phone);
+
+      if (!cleanPhone || (!isForeignPhoneVerified && cleanPhone.length < 10) || (isForeignPhoneVerified && cleanPhone.replace(/\D/g, '').length < 7)) {
+        const err = new Error('A valid mobile number is mandatory to complete Google registration.');
         err.statusCode = 400;
         throw err;
       }
 
-      let isPhoneValid = false;
-      if (phoneVerificationToken && TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
+      let isPhoneValid = isForeignPhoneVerified;
+      if (!isPhoneValid && phoneVerificationToken && TwoFactorService.validateVerificationToken(phoneVerificationToken, cleanPhone)) {
         isPhoneValid = true;
-      } else if (otpSessionId && otp) {
+      } else if (!isPhoneValid && otpSessionId && otp) {
         const verifyRes = await TwoFactorService.verifyOtp(otpSessionId, otp, cleanPhone);
         if (verifyRes.success) {
           isPhoneValid = true;
@@ -521,7 +531,7 @@ class AuthService {
       }
 
       if (!isPhoneValid) {
-        const err = new Error('Mobile number OTP verification is required to complete Google registration.');
+        const err = new Error('Mobile number verification is required to complete Google registration.');
         err.statusCode = 400;
         throw err;
       }

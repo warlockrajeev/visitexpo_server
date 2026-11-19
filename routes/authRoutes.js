@@ -77,6 +77,90 @@ router.post('/otp/verify', authLimiter, async (req, res, next) => {
   }
 });
 
+router.post('/foreign-phone/verify-location', async (req, res) => {
+  try {
+    const { phone, lat, lng, city, countryCode, countryName } = req.body;
+    const rawPhone = String(phone || '').trim();
+    const digits = rawPhone.replace(/\D/g, '');
+
+    if (!digits || digits.length < 7 || digits.length > 15) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter a valid international WhatsApp mobile number with country code (7 to 15 digits).'
+      });
+    }
+
+    if (TwoFactorService.isIndianPhoneInput(rawPhone)) {
+      return res.status(400).json({
+        success: false,
+        isIndia: true,
+        error: 'Indian (+91) mobile numbers must be verified using the Indian Mobile Number OTP field above.'
+      });
+    }
+
+    const numLat = Number(lat);
+    const numLng = Number(lng);
+    if (!Number.isFinite(numLat) || !Number.isFinite(numLng)) {
+      return res.status(400).json({
+        success: false,
+        error: 'Live GPS coordinates are required to verify foreign location.'
+      });
+    }
+
+    const normalizedCode = String(countryCode || '').trim().toUpperCase();
+    const normalizedCountry = String(countryName || '').trim();
+    const normalizedCity = String(city || '').trim();
+
+    const isInsideIndiaBounds =
+      numLat >= 6.5 && numLat <= 37.1 && numLng >= 68.1 && numLng <= 97.4;
+
+    const isIndiaCountry =
+      normalizedCode === 'IN' ||
+      normalizedCode === 'IND' ||
+      /\bindia\b|भारत/i.test(normalizedCountry) ||
+      /\bindia\b|भारत/i.test(normalizedCity) ||
+      (!normalizedCode && isInsideIndiaBounds);
+
+    if (isIndiaCountry) {
+      return res.status(400).json({
+        success: false,
+        isIndia: true,
+        location: normalizedCity || normalizedCountry || 'India',
+        error: `Live location detected in India (${normalizedCity || 'India'}). Foreign WhatsApp registration is only permitted for users outside India. Please use the Indian Mobile Number (+91) field with OTP verification.`
+      });
+    }
+
+    const cleanForeign = TwoFactorService.cleanForeignPhoneNumber(rawPhone);
+    const resolvedLocation =
+      normalizedCity ||
+      [normalizedCountry].filter(Boolean).join(', ') ||
+      `${numLat.toFixed(3)}, ${numLng.toFixed(3)}`;
+
+    const verificationToken = TwoFactorService.generateForeignLocationToken({
+      phone: cleanForeign,
+      countryCode: normalizedCode || 'FOREIGN',
+      countryName: normalizedCountry,
+      location: resolvedLocation
+    });
+
+    return res.status(200).json({
+      success: true,
+      isForeign: true,
+      phone: cleanForeign,
+      location: resolvedLocation,
+      countryCode: normalizedCode,
+      countryName: normalizedCountry,
+      verificationToken,
+      message: `Foreign location verified (${resolvedLocation})`
+    });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      error: 'Could not verify live location right now. Please try again.'
+    });
+  }
+});
+
 router.post('/work-email/validate', async (req, res) => {
   try {
     const { workEmail, excludeUserId } = req.body;
