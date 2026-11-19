@@ -15,7 +15,7 @@ import { authLimiter } from '../middlewares/rateLimiter.js';
 import jwt from 'jsonwebtoken';
 import UserRepository from '../repositories/UserRepository.js';
 import { generateAccessToken, generateRefreshToken } from '../utils/jwt.js';
-import { isCorporateEmail, isUserCorporateEmail } from '../utils/emailValidator.js';
+import { isCorporateEmail, isUserCorporateEmail, verifyGenuineCorporateWorkEmail } from '../utils/emailValidator.js';
 import { sendWorkEmailVerificationCode, verifyWorkEmailCode } from '../services/workEmailVerificationService.js';
 import { resolveUserCompany, syncUserCompanyName } from '../services/companyProfileHelper.js';
 import { logUserActivity } from '../utils/activityLogger.js';
@@ -77,6 +77,47 @@ router.post('/otp/verify', authLimiter, async (req, res, next) => {
   }
 });
 
+router.post('/work-email/validate', async (req, res) => {
+  try {
+    const { workEmail, excludeUserId } = req.body;
+    const check = await verifyGenuineCorporateWorkEmail(workEmail);
+    if (!check.valid) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        error: check.error
+      });
+    }
+
+    const dupFilter = { workEmail: check.normalizedEmail };
+    if (excludeUserId && /^[a-fA-F0-9]{24}$/.test(String(excludeUserId))) {
+      dupFilter._id = { $ne: excludeUserId };
+    }
+    const existingWorkUser = await User.findOne(dupFilter).select('_id').lean();
+    if (existingWorkUser) {
+      return res.status(409).json({
+        success: false,
+        valid: false,
+        error: 'This Work / Corporate Email is already registered with another Organiser account.'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      valid: true,
+      normalizedEmail: check.normalizedEmail,
+      domain: check.domain,
+      message: `Verified corporate domain (@${check.domain})`
+    });
+  } catch {
+    return res.status(500).json({
+      success: false,
+      valid: false,
+      error: 'Could not verify corporate email domain right now.'
+    });
+  }
+});
+
 router.post('/work-email/send', authLimiter, async (req, res, next) => {
   try {
     const { workEmail, accountEmail } = req.body;
@@ -127,6 +168,12 @@ router.post('/signup', authLimiter, async (req, res, next) => {
     }
     if (role === 'visitor' && (!Array.isArray(interests) || !interests.some((interest) => typeof interest === 'string' && interest.trim()))) {
       return res.status(400).json({ success: false, error: 'Please select a visitor category.' });
+    }
+    if ((!role || role === 'organizer') && (!workEmail || !String(workEmail).trim())) {
+      return res.status(400).json({
+        success: false,
+        error: 'Work / Corporate Email is mandatory for Organiser registration.'
+      });
     }
 
     const data = await AuthService.signup(name, email, password, resolvedOrgName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail);
@@ -642,6 +689,13 @@ router.put('/organization', protect, async (req, res, next) => {
         phone: updatedUser.phone || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
+        isPhoneVerified: updatedUser.isPhoneVerified !== false,
+        plan: updatedUser.plan || 'free',
+        basePlan: updatedUser.plan || 'free',
+        planStatus: updatedUser.planStatus || (updatedUser.isPlanActive ? 'active' : 'payment_pending'),
+        isPlanActive: !!updatedUser.isPlanActive,
+        hasGrowthPlan: Boolean(updatedUser.hasGrowthPlan || updatedUser.plan === 'growth'),
+        planPaidAmount: updatedUser.planPaidAmount || 0,
         credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
         organization: updatedUser.organization,
         authProvider: updatedUser.authProvider || 'local',
@@ -710,26 +764,53 @@ router.put('/profile', protect, async (req, res, next) => {
     if (workEmail !== undefined) {
       const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
       if (normalizedWorkEmail) {
-        if (normalizedWorkEmail.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalizedWorkEmail)) {
+        const workCheck = await verifyGenuineCorporateWorkEmail(normalizedWorkEmail);
+        if (!workCheck.valid) {
           return res.status(400).json({
             success: false,
-            error: 'Please enter a valid work email address.'
+            error: workCheck.error || 'Please enter a genuine corporate work email address.'
           });
         }
-        const changed = normalizedWorkEmail !== (userDoc.workEmail || '').toLowerCase().trim();
-        userDoc.workEmail = normalizedWorkEmail;
-        if (changed) {
-          userDoc.workEmailVerified = false;
+        const duplicateWork = await User.findOne({
+          _id: { $ne: userDoc._id },
+          workEmail: normalizedWorkEmail
+        }).select('_id').lean();
+        if (duplicateWork) {
+          return res.status(409).json({
+            success: false,
+            error: 'This Work / Corporate Email is already registered with another Organiser account.'
+          });
         }
+        userDoc.workEmail = normalizedWorkEmail;
+        userDoc.workEmailVerified = true;
         userDoc.workEmailVerificationRequired = false;
-        if (isCorporateEmail(normalizedWorkEmail) || isCorporateEmail(userDoc.email)) {
-          userDoc.emailType = 'corporate';
+        userDoc.emailType = 'corporate';
+        if (userDoc.role === 'organizer') {
+          userDoc.isVerified = true;
+          userDoc.isPlanActive = true;
+          if (!userDoc.planStatus || userDoc.planStatus === 'payment_pending') {
+            userDoc.planStatus = 'active';
+          }
+          const orgId = userDoc.organization?._id || userDoc.organization;
+          await Subscription.updateMany(
+            {
+              $or: [...(orgId ? [{ organization: orgId }] : []), { user: userDoc._id }],
+              status: 'payment_pending'
+            },
+            { $set: { status: 'active', price: 0, emailType: 'corporate' } }
+          );
         }
       } else {
+        if (userDoc.role === 'organizer' && userDoc.workEmail) {
+          return res.status(400).json({
+            success: false,
+            error: 'Work / Corporate Email is mandatory for Organiser accounts and cannot be cleared.'
+          });
+        }
         userDoc.workEmail = '';
         userDoc.workEmailVerified = false;
         userDoc.emailType = isCorporateEmail(userDoc.email) ? 'corporate' : 'general';
-        userDoc.workEmailVerificationRequired = userDoc.role === 'organizer' && !isCorporateEmail(userDoc.email);
+        userDoc.workEmailVerificationRequired = false;
       }
     }
 
@@ -761,6 +842,13 @@ router.put('/profile', protect, async (req, res, next) => {
         photoURL: updatedUser.avatar || updatedUser.photoURL || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
+        isPhoneVerified: updatedUser.isPhoneVerified !== false,
+        plan: updatedUser.plan || 'free',
+        basePlan: updatedUser.plan || 'free',
+        planStatus: updatedUser.planStatus || (updatedUser.isPlanActive ? 'active' : 'payment_pending'),
+        isPlanActive: !!updatedUser.isPlanActive,
+        hasGrowthPlan: Boolean(updatedUser.hasGrowthPlan || updatedUser.plan === 'growth'),
+        planPaidAmount: updatedUser.planPaidAmount || 0,
         credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
         organization: updatedUser.organization,
         authProvider: updatedUser.authProvider || 'local',
@@ -832,6 +920,13 @@ router.put('/change-password', protect, async (req, res, next) => {
         photoURL: updatedUser.avatar || updatedUser.photoURL || '',
         role: updatedUser.role,
         isVerified: updatedUser.isVerified,
+        isPhoneVerified: updatedUser.isPhoneVerified !== false,
+        plan: updatedUser.plan || 'free',
+        basePlan: updatedUser.plan || 'free',
+        planStatus: updatedUser.planStatus || (updatedUser.isPlanActive ? 'active' : 'payment_pending'),
+        isPlanActive: !!updatedUser.isPlanActive,
+        hasGrowthPlan: Boolean(updatedUser.hasGrowthPlan || updatedUser.plan === 'growth'),
+        planPaidAmount: updatedUser.planPaidAmount || 0,
         credits: updatedUser.credits !== undefined ? updatedUser.credits : 100,
         organization: updatedUser.organization,
         authProvider: updatedUser.authProvider || 'local',

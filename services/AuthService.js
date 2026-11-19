@@ -10,7 +10,7 @@ import Subscription from '../models/Subscription.js';
 import Plan from '../models/Plan.js';
 import TwoFactorService from './twoFactorService.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
-import { isCorporateEmail, isUserCorporateEmail } from '../utils/emailValidator.js';
+import { isCorporateEmail, isUserCorporateEmail, verifyGenuineCorporateWorkEmail } from '../utils/emailValidator.js';
 
 export const getRoleLabel = (role) => {
   if (!role) return 'User';
@@ -55,11 +55,24 @@ class AuthService {
       throw err;
     }
     const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
-    if (assignedRole === 'organizer' && normalizedWorkEmail &&
-      (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalizedWorkEmail) || !isCorporateEmail(normalizedWorkEmail))) {
-      const err = new Error('Enter a valid corporate work email address.');
-      err.statusCode = 400;
-      throw err;
+    if (assignedRole === 'organizer') {
+      if (!normalizedWorkEmail) {
+        const err = new Error('Work / Corporate Email is mandatory for Organiser registration.');
+        err.statusCode = 400;
+        throw err;
+      }
+      const workEmailCheck = await verifyGenuineCorporateWorkEmail(normalizedWorkEmail);
+      if (!workEmailCheck.valid) {
+        const err = new Error(workEmailCheck.error || 'Enter a genuine corporate work email address.');
+        err.statusCode = 400;
+        throw err;
+      }
+      const existingWorkUser = await UserRepository.findOne({ workEmail: normalizedWorkEmail });
+      if (existingWorkUser) {
+        const err = new Error('This Work / Corporate Email is already registered with another Organiser account.');
+        err.statusCode = 409;
+        throw err;
+      }
     }
     const hasCorporateWorkEmail = assignedRole === 'organizer' && !!normalizedWorkEmail;
     const visitorInterests = Array.isArray(interests)
@@ -156,8 +169,8 @@ class AuthService {
       city: city.trim(),
       interests: assignedRole === 'visitor' ? visitorInterests : [],
       workEmail: hasCorporateWorkEmail ? normalizedWorkEmail : '',
-      workEmailVerified: false,
-      workEmailVerificationRequired: assignedRole === 'organizer' && !hasCorporateWorkEmail,
+      workEmailVerified: hasCorporateWorkEmail,
+      workEmailVerificationRequired: false,
       emailType,
       plan: 'free',
       planStatus,
@@ -555,11 +568,24 @@ class AuthService {
         throw err;
       }
       const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
-      if (assignedRole === 'organizer' && normalizedWorkEmail &&
-        (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalizedWorkEmail) || !isCorporateEmail(normalizedWorkEmail))) {
-        const err = new Error('Enter a valid corporate work email address.');
-        err.statusCode = 400;
-        throw err;
+      if (assignedRole === 'organizer') {
+        if (!normalizedWorkEmail) {
+          const err = new Error('Work / Corporate Email is mandatory for Organiser registration.');
+          err.statusCode = 400;
+          throw err;
+        }
+        const workEmailCheck = await verifyGenuineCorporateWorkEmail(normalizedWorkEmail);
+        if (!workEmailCheck.valid) {
+          const err = new Error(workEmailCheck.error || 'Enter a genuine corporate work email address.');
+          err.statusCode = 400;
+          throw err;
+        }
+        const existingWorkUser = await UserRepository.findOne({ workEmail: normalizedWorkEmail });
+        if (existingWorkUser) {
+          const err = new Error('This Work / Corporate Email is already registered with another Organiser account.');
+          err.statusCode = 409;
+          throw err;
+        }
       }
       const hasCorporateWorkEmail = assignedRole === 'organizer' && !!normalizedWorkEmail;
 
@@ -603,8 +629,8 @@ class AuthService {
         city: city || '',
         interests: assignedRole === 'visitor' ? visitorInterests : [],
         workEmail: hasCorporateWorkEmail ? normalizedWorkEmail : '',
-        workEmailVerified: false,
-        workEmailVerificationRequired: assignedRole === 'organizer' && !hasCorporateWorkEmail,
+        workEmailVerified: hasCorporateWorkEmail,
+        workEmailVerificationRequired: false,
         emailType,
         plan: 'free',
         planStatus,
@@ -661,13 +687,14 @@ class AuthService {
           throw err;
         }
         const normalizedWorkEmail = typeof workEmail === 'string' ? workEmail.toLowerCase().trim() : '';
-        if (!/^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(normalizedWorkEmail) || !isCorporateEmail(normalizedWorkEmail)) {
-          const err = new Error('Enter a valid corporate work email address.');
+        const workEmailCheck = await verifyGenuineCorporateWorkEmail(normalizedWorkEmail);
+        if (!workEmailCheck.valid) {
+          const err = new Error(workEmailCheck.error || 'Enter a genuine corporate work email address.');
           err.statusCode = 400;
           throw err;
         }
         user.workEmail = normalizedWorkEmail;
-        user.workEmailVerified = false;
+        user.workEmailVerified = true;
         user.workEmailVerificationRequired = false;
       }
 

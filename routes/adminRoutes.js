@@ -2420,6 +2420,17 @@ router.post('/rapid-create', async (req, res, next) => {
         company: data.company,
         designation: data.designation,
         city: data.city,
+        ...(assignedRole === 'organizer'
+          ? {
+              workEmail: finalEmail,
+              workEmailVerified: true,
+              workEmailVerificationRequired: false,
+              emailType: 'corporate',
+              plan: 'free',
+              planStatus: 'active',
+              isPlanActive: true
+            }
+          : {}),
         isVerified: true,
         isPhoneVerified: true,
         status: 'active',
@@ -2482,20 +2493,49 @@ router.post('/rapid-create', async (req, res, next) => {
 // @route   GET /api/admin/rapid-users
 router.get('/rapid-users', async (req, res, next) => {
   try {
-    const { role } = req.query;
+    const { role, page, limit, search } = req.query;
+    const nonAdminRoles = ['organizer', 'exhibitor', 'visitor'];
     const query = {};
-    if (role && role !== 'all') {
+
+    if (role === 'dummy') {
+      query.role = { $in: nonAdminRoles };
+      query.email = { $regex: '@testexpo\\.in$', $options: 'i' };
+    } else if (role && role !== 'all') {
       query.role = role;
     } else {
-      query.role = { $in: ['organizer', 'exhibitor', 'visitor'] };
+      query.role = { $in: nonAdminRoles };
     }
 
-    const [users, orgCount, exhCount, visCount, dummyCount] = await Promise.all([
-      User.find(query)
-        .populate('organization', 'name logo address contact gst description')
-        .sort({ createdAt: -1 })
-        .limit(60)
-        .lean(),
+    if (search && String(search).trim()) {
+      const escaped = String(search).trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(escaped, 'i');
+      const matchingOrgs = await Organization.find({ name: regex }).select('_id').lean();
+      const orgIds = matchingOrgs.map((o) => o._id);
+      query.$or = [
+        { name: regex },
+        { email: regex },
+        { workEmail: regex },
+        { phone: regex },
+        { company: regex },
+        { city: regex },
+        ...(orgIds.length > 0 ? [{ organization: { $in: orgIds } }] : [])
+      ];
+    }
+
+    let userQuery = User.find(query)
+      .select('-password')
+      .populate('organization', 'name logo address contact gst description')
+      .sort({ createdAt: -1 });
+
+    const parsedLimit = parseInt(limit, 10);
+    const parsedPage = Math.max(1, parseInt(page, 10) || 1);
+    if (Number.isFinite(parsedLimit) && parsedLimit > 0) {
+      userQuery = userQuery.skip((parsedPage - 1) * parsedLimit).limit(parsedLimit);
+    }
+
+    const [users, matchingTotal, orgCount, exhCount, visCount, dummyCount] = await Promise.all([
+      userQuery.lean(),
+      User.countDocuments(query),
       User.countDocuments({ role: 'organizer' }),
       User.countDocuments({ role: 'exhibitor' }),
       User.countDocuments({ role: 'visitor' }),
@@ -2505,7 +2545,11 @@ router.get('/rapid-users', async (req, res, next) => {
     res.status(200).json({
       success: true,
       users,
+      total: matchingTotal,
+      page: parsedPage,
+      pages: Number.isFinite(parsedLimit) && parsedLimit > 0 ? Math.max(1, Math.ceil(matchingTotal / parsedLimit)) : 1,
       counts: {
+        total: orgCount + exhCount + visCount,
         organizers: orgCount,
         exhibitors: exhCount,
         visitors: visCount,
