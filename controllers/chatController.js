@@ -9,6 +9,7 @@ import Organization from '../models/Organization.js';
 import Event from '../models/Event.js';
 import Lead from '../models/Lead.js';
 import ChatConversation from '../models/ChatConversation.js';
+import DeletedOrganizer from '../models/DeletedOrganizer.js';
 import { getAggregatedOrganizers } from '../routes/adminRoutes.js';
 
 /**
@@ -25,27 +26,13 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
     // Maybe it's an Organization ID
     const org = await Organization.findById(organizerId);
     if (org) {
-      const orgUser = await User.findOne({ organization: org._id, role: 'organizer' })
+      const orgUser = await User.findOne({
+        organization: org._id,
+        role: { $in: ['organizer', 'super_admin', 'event_manager'] }
+      })
         .select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
       if (orgUser) return { user: orgUser, organization: org, source: 'organization_id' };
-      // Fallback: synthesized user object from organization
-      return {
-        user: {
-          _id: org._id,
-          name: org.name,
-          email: org.contact?.email || '',
-          role: 'organizer',
-          plan: org.plan || 'free',
-          isPlanActive: org.isPlanActive !== false,
-          isVerified: true,
-          isChatEnabled: !!org.isChatEnabled,
-          chatStatus: org.chatStatus || 'offline',
-          chatWelcomeMessage: org.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?',
-          chatAutoReply: false
-        },
-        organization: org,
-        source: 'organization_fallback'
-      };
+      return { user: null, organization: org, source: 'organization_without_user' };
     }
   }
 
@@ -68,30 +55,16 @@ async function resolveOrganizerUser({ organizerId, eventId, slug, orgEmail }) {
 
     // Check organizer organization
     if (eventDoc.organizer && mongoose.isValidObjectId(eventDoc.organizer)) {
-      const orgUser = await User.findOne({ organization: eventDoc.organizer, role: 'organizer' })
+      const orgUser = await User.findOne({
+        organization: eventDoc.organizer,
+        role: { $in: ['organizer', 'super_admin', 'event_manager'] }
+      })
         .select('name email role plan isPlanActive isVerified isChatEnabled chatStatus chatWelcomeMessage chatAutoReply organization');
       if (orgUser) return { user: orgUser, event: eventDoc, source: 'event_organizer_user' };
       
       const org = await Organization.findById(eventDoc.organizer);
       if (org) {
-        return {
-          user: {
-            _id: org._id,
-            name: org.name,
-            email: org.contact?.email || '',
-            role: 'organizer',
-            plan: org.plan || 'free',
-            isPlanActive: org.isPlanActive !== false,
-            isVerified: true,
-            isChatEnabled: !!org.isChatEnabled,
-            chatStatus: org.chatStatus || 'offline',
-            chatWelcomeMessage: org.chatWelcomeMessage || 'Hello! Welcome to our exhibition desk. How can we assist you today?',
-            chatAutoReply: false
-          },
-          event: eventDoc,
-          organization: org,
-          source: 'event_org_fallback'
-        };
+        return { user: null, event: eventDoc, organization: org, source: 'event_organization_without_user' };
       }
     }
 
@@ -1031,12 +1004,15 @@ export const getOrganizersWithExpos = async (req, res, next) => {
       : [];
 
     // 2. Fetch all registered organizer users and organizations from MongoDB
-    const [organizerUsers, mongoOrgs] = await Promise.all([
-      User.find({ role: { $in: ['organizer', 'super_admin'] } })
+    const [organizerUsers, mongoOrgs, deletedOrganizers] = await Promise.all([
+      User.find({ role: { $in: ['organizer', 'super_admin', 'event_manager'] } })
         .select('name email phone organization isChatEnabled chatStatus chatWelcomeMessage isVerified company')
         .lean(),
       Organization.find()
-        .select('name logo website contact isChatEnabled chatStatus chatWelcomeMessage')
+        .select('name logo website contact')
+        .lean(),
+      DeletedOrganizer.find()
+        .select('name slugId')
         .lean()
     ]);
 
@@ -1088,22 +1064,14 @@ export const getOrganizersWithExpos = async (req, res, next) => {
 
       const activeUser = matchedUser || eventClaimedUser;
 
-      const isChatEnabled = activeUser
-        ? !!activeUser.isChatEnabled
-        : matchedOrg
-        ? !!matchedOrg.isChatEnabled
-        : false;
+      const isChatEnabled = !!activeUser?.isChatEnabled;
 
       const chatStatus = activeUser
         ? (activeUser.chatStatus || (activeUser.isChatEnabled ? 'online' : 'offline'))
-        : matchedOrg
-        ? (matchedOrg.chatStatus || 'offline')
         : 'offline';
 
       const chatWelcomeMessage = activeUser
         ? activeUser.chatWelcomeMessage
-        : matchedOrg
-        ? matchedOrg.chatWelcomeMessage
         : 'Hello! Welcome to our exhibition desk. How can we assist you today?';
 
       const resolvedOrganizerId = activeUser
@@ -1201,7 +1169,18 @@ export const getOrganizersWithExpos = async (req, res, next) => {
       }
     });
 
-    let mergedList = Array.from(deduplicatedMap.values());
+    const deletedOrganizerKeys = new Set(
+      deletedOrganizers
+        .flatMap((organizer) => [organizer.name, organizer.slugId])
+        .map((value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+        .filter(Boolean)
+    );
+    let mergedList = Array.from(deduplicatedMap.values()).filter((organizer) => {
+      const organizerKeys = [organizer.name, organizer.shortName, organizer.id, organizer.organizerId]
+        .map((value) => String(value || '').toLowerCase().replace(/[^a-z0-9]/g, ''))
+        .filter(Boolean);
+      return !organizerKeys.some((key) => deletedOrganizerKeys.has(key));
+    });
 
     // 6. Apply filters
     if (chatOnly === 'true') {

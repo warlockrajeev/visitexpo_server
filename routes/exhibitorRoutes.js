@@ -1208,7 +1208,13 @@ router.put('/:id', protect, async (req, res, next) => {
 
     // Authorization check: either super_admin/sub_admin/admin/organizer/event_manager OR the exhibitor themselves editing their own profile
     const isMgmt = ['super_admin', 'sub_admin', 'admin', 'organizer', 'event_manager'].includes(req.user.role);
-    const isSelf = req.user.role === 'exhibitor' && exhibitor.contactEmail === req.user.email;
+    const reqEmailLower = String(req.user.email || '').trim().toLowerCase();
+    const isSelfEmail =
+      reqEmailLower &&
+      (String(exhibitor.contactEmail || '').trim().toLowerCase() === reqEmailLower ||
+        (Array.isArray(exhibitor.staff) &&
+          exhibitor.staff.some((s) => String(s?.email || '').trim().toLowerCase() === reqEmailLower)));
+    const isSelf = req.user.role === 'exhibitor' && Boolean(isSelfEmail);
 
     if (!isMgmt && !isSelf) {
       return res.status(403).json({ success: false, error: 'Not authorized to update this exhibitor profile' });
@@ -1235,6 +1241,7 @@ router.put('/:id', protect, async (req, res, next) => {
       website,
       contactEmail,
       contactPhone,
+      phoneVerificationToken,
       boothNumber,
       attendanceType,
       staff,
@@ -1243,13 +1250,57 @@ router.put('/:id', protect, async (req, res, next) => {
       leadRetrievalStatus
     } = req.body;
 
+    // Validate & verify OTP whenever an exhibitor changes their Contact Phone
+    let phoneWasUpdated = false;
+    let normalizedNewPhone = '';
+    if (contactPhone !== undefined) {
+      const existingCleanPhone = TwoFactorService.cleanPhoneNumber(exhibitor.contactPhone);
+      const incomingCleanPhone = TwoFactorService.cleanPhoneNumber(contactPhone);
+      const phoneChanged = incomingCleanPhone !== existingCleanPhone;
+
+      if (isSelf && !isMgmt && phoneChanged) {
+        if (!/^[6-9]\d{9}$/.test(incomingCleanPhone)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Please enter a valid 10-digit Indian mobile number starting with 6, 7, 8, or 9.'
+          });
+        }
+        if (!TwoFactorService.validateVerificationToken(phoneVerificationToken, incomingCleanPhone)) {
+          return res.status(400).json({
+            success: false,
+            error: 'Please verify your new contact phone number with OTP before saving.'
+          });
+        }
+        exhibitor.contactPhone = incomingCleanPhone;
+        phoneWasUpdated = true;
+        normalizedNewPhone = incomingCleanPhone;
+      } else if (String(contactPhone).trim()) {
+        exhibitor.contactPhone = isMgmt ? String(contactPhone).trim() : (incomingCleanPhone || String(contactPhone).trim());
+      }
+    }
+
     // Update fields if provided
     if (name && isMgmt) exhibitor.name = name;
-    if (description) exhibitor.description = description;
-    if (logo !== undefined) exhibitor.logo = logo;
-    if (website !== undefined) exhibitor.website = website;
+    if (description !== undefined) exhibitor.description = String(description).trim();
+    if (logo !== undefined) exhibitor.logo = String(logo).trim();
+    if (website !== undefined) {
+      let cleanWebsite = String(website).trim();
+      if (cleanWebsite && !/^https?:\/\//i.test(cleanWebsite)) {
+        cleanWebsite = `https://${cleanWebsite}`;
+      }
+      if (cleanWebsite) {
+        try {
+          const parsedUrl = new URL(cleanWebsite);
+          if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+            return res.status(400).json({ success: false, error: 'Please enter a valid website URL.' });
+          }
+        } catch {
+          return res.status(400).json({ success: false, error: 'Please enter a valid website URL (e.g. https://example.com).' });
+        }
+      }
+      exhibitor.website = cleanWebsite;
+    }
     if (contactEmail && isMgmt) exhibitor.contactEmail = contactEmail.toLowerCase();
-    if (contactPhone) exhibitor.contactPhone = contactPhone;
     if (boothNumber !== undefined && isMgmt) exhibitor.boothNumber = boothNumber;
     if (attendanceType) exhibitor.attendanceType = attendanceType;
     if (staff) exhibitor.staff = staff;
@@ -1279,25 +1330,42 @@ router.put('/:id', protect, async (req, res, next) => {
 
     await exhibitor.save();
 
-    // Sync to event if approved
-    if (exhibitor.status === 'approved') {
-      const event = await Event.findById(exhibitor.event);
-      if (event) {
-        event.exhibitors = event.exhibitors.map(e => {
-          if (e.name === exhibitor.name) {
-            return {
-              name: exhibitor.name,
-              logo: exhibitor.logo,
-              boothNumber: exhibitor.boothNumber,
-              website: exhibitor.website,
-              description: exhibitor.description
-            };
-          }
-          return e;
+    // Keep logged-in exhibitor's User.phone synced when verified phone is changed
+    if (phoneWasUpdated && normalizedNewPhone && req.user?.id) {
+      try {
+        await User.findByIdAndUpdate(req.user.id, {
+          phone: normalizedNewPhone,
+          isPhoneVerified: true
         });
-        await event.save();
+      } catch (_) {}
+    }
+
+    // Safely sync to event directory list if approved (without triggering full Event schema validation errors)
+    if (exhibitor.status === 'approved' && exhibitor.event) {
+      try {
+        const event = await Event.findById(exhibitor.event).select('exhibitors').lean();
+        if (event && Array.isArray(event.exhibitors) && event.exhibitors.length > 0) {
+          const updatedExhibitors = event.exhibitors.map(e => {
+            if (e && e.name === exhibitor.name) {
+              return {
+                ...e,
+                name: exhibitor.name,
+                logo: exhibitor.logo,
+                boothNumber: exhibitor.boothNumber,
+                website: exhibitor.website,
+                description: exhibitor.description
+              };
+            }
+            return e;
+          });
+          await Event.updateOne({ _id: exhibitor.event }, { $set: { exhibitors: updatedExhibitors } });
+        }
+      } catch (syncErr) {
+        console.warn('[Exhibitor Update] Non-fatal event sync warning:', syncErr.message);
       }
     }
+
+    await exhibitor.populate('event', 'title slug startDate endDate venue city country status');
 
     res.status(200).json({
       success: true,

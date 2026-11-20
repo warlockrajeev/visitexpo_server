@@ -221,6 +221,30 @@ router.post('/', protect, async (req, res) => {
     }
 
     const resolvedSlug = matchedEvent?.slug || cleanSlug || cleanTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const requestEventConditions = buildEventConditions({
+      eventSlug: resolvedSlug,
+      eventId: matchedEvent?._id || eventId
+    });
+    const requesterConditions = [{ email: requesterEmail }];
+    if (req.user?.id && mongoose.isValidObjectId(req.user.id)) {
+      requesterConditions.push({ userId: new mongoose.Types.ObjectId(req.user.id) });
+    }
+
+    const existingRequest = await BoothRequest.findOne({
+      $and: [
+        { $or: requestEventConditions },
+        { requestCategory: allowedCategory },
+        { $or: requesterConditions }
+      ]
+    }).sort({ createdAt: -1 });
+
+    if (existingRequest) {
+      return res.status(409).json({
+        success: false,
+        error: `You have already submitted a ${allowedCategory === 'stall' ? 'stall inquiry' : 'visitor pass request'} for this exhibition.`,
+        data: existingRequest
+      });
+    }
 
     const createdRequest = await BoothRequest.create({
       event: matchedEvent?._id || null,
