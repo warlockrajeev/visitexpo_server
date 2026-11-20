@@ -41,6 +41,7 @@ import boothRequestRoutes from './routes/boothRequestRoutes.js';
 import eventRequestRoutes from './routes/eventRequestRoutes.js';
 import followRoutes from './routes/followRoutes.js';
 import activityRoutes from './routes/activityRoutes.js';
+import exploreVenueRoutes from './routes/exploreVenueRoutes.js';
 
 // Import Error Middleware
 import errorHandler from './middlewares/errorHandler.js';
@@ -149,6 +150,7 @@ app.use('/api/booth-requests', boothRequestRoutes);
 app.use('/api/event-requests', eventRequestRoutes);
 app.use('/api/follows', followRoutes);
 app.use('/api/activity', activityRoutes);
+app.use('/api/explore-venues', exploreVenueRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
