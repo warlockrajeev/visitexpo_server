@@ -11,6 +11,7 @@ import Subscription from '../models/Subscription.js';
 import AuthService from '../services/AuthService.js';
 import TwoFactorService from '../services/twoFactorService.js';
 import EmailOtpService from '../services/emailOtpService.js';
+import PasswordResetService from '../services/passwordResetService.js';
 import { protect } from '../middlewares/auth.js';
 import { authLimiter } from '../middlewares/rateLimiter.js';
 import jwt from 'jsonwebtoken';
@@ -257,6 +258,73 @@ router.post('/email-otp/verify', authLimiter, async (req, res, next) => {
     }
 
     const result = await EmailOtpService.verifyRegistrationEmailOtp(email, otp);
+    if (!result.success) {
+      return res.status(result.statusCode || 400).json({
+        success: false,
+        error: result.error
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ============================================================================
+// FORGOT PASSWORD / PASSWORD RESET ENDPOINTS (Zoho CPaaS Email OTP)
+// ============================================================================
+
+router.post('/forgot-password/send', authLimiter, async (req, res, next) => {
+  try {
+    const { email } = req.body;
+    if (!email || !String(email).trim()) {
+      return res.status(400).json({ success: false, error: 'Email address is required' });
+    }
+
+    const result = await PasswordResetService.sendPasswordResetOtp(email);
+    if (!result.success) {
+      return res.status(result.statusCode || 400).json({
+        success: false,
+        error: result.error
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/forgot-password/verify', authLimiter, async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, error: 'Email address and 6-digit OTP code are required' });
+    }
+
+    const result = await PasswordResetService.verifyPasswordResetOtp(email, otp);
+    if (!result.success) {
+      return res.status(result.statusCode || 400).json({
+        success: false,
+        error: result.error
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/forgot-password/reset', authLimiter, async (req, res, next) => {
+  try {
+    const { email, resetToken, newPassword } = req.body;
+    if (!email || !resetToken || !newPassword) {
+      return res.status(400).json({ success: false, error: 'Email, reset token, and new password are required' });
+    }
+
+    const result = await PasswordResetService.resetPassword({ email, resetToken, newPassword });
     if (!result.success) {
       return res.status(result.statusCode || 400).json({
         success: false,
@@ -995,14 +1063,11 @@ router.put('/profile', protect, async (req, res, next) => {
 // Update Security & Password Credentials
 router.put('/change-password', protect, async (req, res, next) => {
   try {
-    const { currentPassword, newPassword } = req.body;
+    const { currentPassword, newPassword, resetToken } = req.body;
 
-    if (!newPassword || newPassword.length < 6) {
-      return res.status(400).json({ success: false, error: 'New password must be at least 6 characters long' });
-    }
-
-    if (!/(?=.*[a-zA-Z])(?=.*\d)/.test(newPassword)) {
-      return res.status(400).json({ success: false, error: 'New password must contain at least one letter and one number' });
+    const passCheck = PasswordResetService.validateNewPassword(newPassword);
+    if (!passCheck.valid) {
+      return res.status(400).json({ success: false, error: passCheck.error });
     }
 
     const userDoc = await User.findById(req.user.id).select('+password');
@@ -1011,8 +1076,11 @@ router.put('/change-password', protect, async (req, res, next) => {
     }
 
     const isGoogleWithoutPassword = (userDoc.authProvider === 'google' && !userDoc.hasCustomPassword);
+    const isVerifiedViaEmailOtp = Boolean(
+      resetToken && PasswordResetService.validateResetToken(resetToken, userDoc.email)
+    );
 
-    if (!isGoogleWithoutPassword) {
+    if (!isGoogleWithoutPassword && !isVerifiedViaEmailOtp) {
       if (!currentPassword) {
         return res.status(400).json({ success: false, error: 'Current password is required to change password' });
       }
@@ -1033,19 +1101,26 @@ router.put('/change-password', protect, async (req, res, next) => {
     await userDoc.save();
 
     const updatedUser = await User.findById(userDoc._id).select('-password').populate('organization');
+    const resolvedCompany = await resolveUserCompany(updatedUser);
 
     res.status(200).json({
       success: true,
       message: isGoogleWithoutPassword
         ? 'Password set successfully! You can now log in using your email and password as well as Google.'
+        : isVerifiedViaEmailOtp
+        ? 'Password reset and updated successfully!'
         : 'Password changed successfully!',
       hasCustomPassword: true,
       user: {
         id: updatedUser._id,
         name: updatedUser.name,
         email: updatedUser.email,
+        workEmail: updatedUser.workEmail || '',
+        workEmailVerified: !!updatedUser.workEmailVerified,
+        workEmailVerificationRequired: !!updatedUser.workEmailVerificationRequired,
+        emailType: updatedUser.emailType || (isUserCorporateEmail(updatedUser) ? 'corporate' : 'general'),
         phone: updatedUser.phone || '',
-        company: updatedUser.company || '',
+        company: resolvedCompany || updatedUser.company || '',
         designation: updatedUser.designation || '',
         city: updatedUser.city || '',
         avatar: updatedUser.avatar || updatedUser.photoURL || '',
