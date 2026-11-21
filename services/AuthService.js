@@ -10,6 +10,7 @@ import Subscription from '../models/Subscription.js';
 import Plan from '../models/Plan.js';
 import TwoFactorService from './twoFactorService.js';
 import EmailOtpService from './emailOtpService.js';
+import { sendAccountCreatedWelcomeEmail } from './welcomeEmailService.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
 import { isCorporateEmail, isUserCorporateEmail, verifyGenuineCorporateWorkEmail } from '../utils/emailValidator.js';
 
@@ -236,6 +237,17 @@ class AuthService {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7); // 7 days
     await UserRepository.addRefreshToken(user._id, refreshToken, expiresAt);
+
+    // 7. Automatically dispatch first-time Account Created welcome email via Zoho CPaaS (non-blocking)
+    void sendAccountCreatedWelcomeEmail({
+      userId: user._id,
+      name: user.name,
+      email: user.email,
+      role: user.role,
+      organizationName: orgName ? orgName.trim() : ''
+    }).catch((err) => {
+      console.error('[AuthService] Welcome email error on signup:', err.message);
+    });
 
     return {
       user: {
@@ -693,6 +705,17 @@ class AuthService {
         user.organization = organization._id;
         await user.save();
       }
+
+      // Automatically dispatch first-time Account Created welcome email via Zoho CPaaS (non-blocking)
+      void sendAccountCreatedWelcomeEmail({
+        userId: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        organizationName: company || organizationName || ''
+      }).catch((err) => {
+        console.error('[AuthService] Welcome email error on Google registration:', err.message);
+      });
     } else {
       // Auto-verify existing account if created under prior pending rule
       if (!user.isVerified) {
