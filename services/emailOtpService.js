@@ -29,15 +29,27 @@ const getRoleLabel = (role) => {
 const getJwtSecret = () =>
   process.env.JWT_SECRET || 'visitexpo_access_key_super_secret_change_me_in_production';
 
+const sanitizeEnvValue = (val) => {
+  let cleaned = String(val || '').trim();
+  while (
+    (cleaned.startsWith('"') && cleaned.endsWith('"')) ||
+    (cleaned.startsWith("'") && cleaned.endsWith("'"))
+  ) {
+    cleaned = cleaned.slice(1, -1).trim();
+  }
+  return cleaned.replace(/[\r\n]+/g, ' ').trim();
+};
+
 const getZohoAuthHeader = () => {
-  const raw = String(process.env.ZOHO_CPAAS_API_KEY || '').trim();
+  const raw = sanitizeEnvValue(process.env.ZOHO_CPAAS_API_KEY).replace(/\s+/g, ' ');
   if (!raw) return '';
-  return raw.toLowerCase().startsWith('zoho-enczapikey') ? raw : `Zoho-enczapikey ${raw}`;
+  const tokenOnly = raw.replace(/^(?:zoho-enczapikey\s+)+/i, '').trim();
+  return tokenOnly ? `Zoho-enczapikey ${tokenOnly}` : '';
 };
 
 const getZohoSender = () => ({
-  address: (process.env.ZOHO_CPAAS_FROM_EMAIL || 'noreply@visitexpo.in').trim(),
-  name: (process.env.ZOHO_CPAAS_FROM_NAME || 'VisitExpo').trim()
+  address: sanitizeEnvValue(process.env.ZOHO_CPAAS_FROM_EMAIL) || 'noreply@visitexpo.in',
+  name: sanitizeEnvValue(process.env.ZOHO_CPAAS_FROM_NAME) || 'VisitExpo'
 });
 
 const buildOtpEmailContent = ({ code, recipientName }) => {
@@ -133,7 +145,7 @@ export class EmailOtpService {
    * Dispatch transactional email via Zoho CPaaS REST API (https://cpaas.zoho.in/v1.1/email)
    */
   static async sendViaZohoCpaasRest({ toEmail, toName, subject, html, text }) {
-    const apiUrl = (process.env.ZOHO_CPAAS_API_URL || 'https://cpaas.zoho.in/v1.1/email').trim();
+    const apiUrl = sanitizeEnvValue(process.env.ZOHO_CPAAS_API_URL) || 'https://cpaas.zoho.in/v1.1/email';
     const authHeader = getZohoAuthHeader();
     if (!authHeader) {
       return { success: false, error: 'ZOHO_CPAAS_API_KEY is not configured on the server.' };
@@ -220,10 +232,10 @@ export class EmailOtpService {
    * Optional SMTP fallback using Zoho CPaaS (ZeptoMail) SMTP credentials
    */
   static async sendViaZohoCpaasSmtp({ toEmail, subject, html, text }) {
-    const host = (process.env.ZOHO_CPAAS_SMTP_HOST || 'smtp.zeptomail.in').trim();
-    const port = parseInt(process.env.ZOHO_CPAAS_SMTP_PORT || '587', 10);
-    const user = (process.env.ZOHO_CPAAS_SMTP_USER || 'emailapikey').trim();
-    const pass = String(process.env.ZOHO_CPAAS_SMTP_PASS || '').trim();
+    const host = sanitizeEnvValue(process.env.ZOHO_CPAAS_SMTP_HOST) || 'smtp.zeptomail.in';
+    const port = parseInt(sanitizeEnvValue(process.env.ZOHO_CPAAS_SMTP_PORT) || '587', 10);
+    const user = sanitizeEnvValue(process.env.ZOHO_CPAAS_SMTP_USER) || 'emailapikey';
+    const pass = sanitizeEnvValue(process.env.ZOHO_CPAAS_SMTP_PASS);
     if (!pass) {
       return { success: false, error: 'Zoho CPaaS SMTP password is not configured.' };
     }
