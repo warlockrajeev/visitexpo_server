@@ -10,6 +10,7 @@ import Organization from '../models/Organization.js';
 import Subscription from '../models/Subscription.js';
 import AuthService from '../services/AuthService.js';
 import TwoFactorService from '../services/twoFactorService.js';
+import EmailOtpService from '../services/emailOtpService.js';
 import { protect } from '../middlewares/auth.js';
 import { authLimiter } from '../middlewares/rateLimiter.js';
 import jwt from 'jsonwebtoken';
@@ -222,9 +223,56 @@ router.post('/work-email/verify', authLimiter, async (req, res, next) => {
   }
 });
 
+// ============================================================================
+// REGISTRATION EMAIL OTP VERIFICATION ENDPOINTS (Zoho CPaaS)
+// ============================================================================
+
+router.post('/email-otp/send', authLimiter, async (req, res, next) => {
+  try {
+    const { email, name } = req.body;
+    if (!email || !String(email).trim()) {
+      return res.status(400).json({ success: false, error: 'Email address is required' });
+    }
+
+    const result = await EmailOtpService.sendRegistrationEmailOtp(email, name);
+    if (!result.success) {
+      return res.status(result.statusCode || 400).json({
+        success: false,
+        error: result.error,
+        registeredRole: result.registeredRole
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/email-otp/verify', authLimiter, async (req, res, next) => {
+  try {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, error: 'Email address and 6-digit OTP code are required' });
+    }
+
+    const result = await EmailOtpService.verifyRegistrationEmailOtp(email, otp);
+    if (!result.success) {
+      return res.status(result.statusCode || 400).json({
+        success: false,
+        error: result.error
+      });
+    }
+
+    return res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/signup', authLimiter, async (req, res, next) => {
   try {
-    const { name, email, password, organizationName, role, phone, city, interests, phoneVerificationToken, otpSessionId, otp, workEmail } = req.body;
+    const { name, email, password, organizationName, role, phone, city, interests, phoneVerificationToken, emailVerificationToken, otpSessionId, otp, workEmail } = req.body;
     
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, error: 'Full Name is required' });
@@ -260,7 +308,7 @@ router.post('/signup', authLimiter, async (req, res, next) => {
       });
     }
 
-    const data = await AuthService.signup(name, email, password, resolvedOrgName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail);
+    const data = await AuthService.signup(name, email, password, resolvedOrgName, role, phone, city, phoneVerificationToken, otpSessionId, otp, interests, workEmail, emailVerificationToken);
     
     // Set refresh token cookie
     setRefreshTokenCookie(res, data.refreshToken, req);

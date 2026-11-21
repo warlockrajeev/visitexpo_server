@@ -9,6 +9,7 @@ import Organization from '../models/Organization.js';
 import Subscription from '../models/Subscription.js';
 import Plan from '../models/Plan.js';
 import TwoFactorService from './twoFactorService.js';
+import EmailOtpService from './emailOtpService.js';
 import { generateAccessToken, generateRefreshToken, verifyRefreshToken } from '../utils/jwt.js';
 import { isCorporateEmail, isUserCorporateEmail, verifyGenuineCorporateWorkEmail } from '../utils/emailValidator.js';
 
@@ -23,7 +24,7 @@ export const getRoleLabel = (role) => {
 };
 
 class AuthService {
-  async signup(name, email, password, orgName = '', role = 'organizer', phone = '', city = '', phoneVerificationToken = '', otpSessionId = '', otp = '', interests = [], workEmail = '') {
+  async signup(name, email, password, orgName = '', role = 'organizer', phone = '', city = '', phoneVerificationToken = '', otpSessionId = '', otp = '', interests = [], workEmail = '', emailVerificationToken = '') {
     // 1. Check if email already registered
     const normalizedEmail = (email || '').toLowerCase().trim();
     const existingUser = await UserRepository.findOne({ email: normalizedEmail });
@@ -32,6 +33,13 @@ class AuthService {
       const err = new Error(`This email address is already registered as an ${existingLabel}. Please switch to the ${existingLabel} tab to sign in.`);
       err.statusCode = 409;
       err.registeredRole = existingUser.role;
+      throw err;
+    }
+
+    // 1b. Mandatory Email OTP verification check
+    if (!emailVerificationToken || !EmailOtpService.validateEmailVerificationToken(emailVerificationToken, normalizedEmail)) {
+      const err = new Error('Mandatory email verification failed. Please verify your email address with the 6-digit OTP sent to your inbox.');
+      err.statusCode = 400;
       throw err;
     }
 
@@ -183,6 +191,7 @@ class AuthService {
       planPaidAmount,
       isVerified,
       status: 'active',
+      isEmailVerified: true,
       isPhoneVerified: true,
       authProvider: 'local',
       hasCustomPassword: true
@@ -648,6 +657,7 @@ class AuthService {
         planPaidAmount: 0,
         isVerified,
         status: 'active',
+        isEmailVerified: true,
         isPhoneVerified: true,
         authProvider: 'google',
         hasCustomPassword: false

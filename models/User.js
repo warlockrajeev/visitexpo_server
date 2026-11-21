@@ -96,6 +96,10 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: true
     },
+    isEmailVerified: {
+      type: Boolean,
+      default: false
+    },
     isPhoneVerified: {
       type: Boolean,
       default: false
