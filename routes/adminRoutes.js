@@ -1898,9 +1898,24 @@ router.get('/users', async (req, res, next) => {
       }
     }
 
+    // Ensure all registered users (Email OTP & Google Auth) have isEmailVerified set to true
+    await User.updateMany(
+      { isEmailVerified: { $ne: true }, email: { $exists: true, $nin: [null, ''] } },
+      { $set: { isEmailVerified: true } }
+    ).catch(() => {});
+
     if (verification === 'email_verified') {
-      query.authProvider = 'google';
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { isEmailVerified: true },
+          { isVerified: true },
+          { authProvider: 'google' }
+        ]
+      });
     } else if (verification === 'email_unverified') {
+      query.isEmailVerified = false;
+      query.isVerified = false;
       query.authProvider = { $ne: 'google' };
     } else if (verification === 'phone_verified') {
       query.isPhoneVerified = true;

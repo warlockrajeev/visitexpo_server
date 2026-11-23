@@ -11,6 +11,7 @@ import Subscription from '../models/Subscription.js';
 import AuthService from '../services/AuthService.js';
 import TwoFactorService from '../services/twoFactorService.js';
 import EmailOtpService from '../services/emailOtpService.js';
+import ValidEmailService from '../services/validEmailService.js';
 import PasswordResetService from '../services/passwordResetService.js';
 import { protect } from '../middlewares/auth.js';
 import { authLimiter } from '../middlewares/rateLimiter.js';
@@ -225,8 +226,77 @@ router.post('/work-email/verify', authLimiter, async (req, res, next) => {
 });
 
 // ============================================================================
-// REGISTRATION EMAIL OTP VERIFICATION ENDPOINTS (Zoho CPaaS)
+// REGISTRATION EMAIL OTP VERIFICATION ENDPOINTS (ValidEmail + Zoho CPaaS)
 // ============================================================================
+
+router.post('/email-otp/validate', async (req, res, next) => {
+  try {
+    const { email, checkDuplicate = true } = req.body || {};
+    const normalizedEmail = ValidEmailService.normalizeEmail(email);
+
+    if (!ValidEmailService.hasValidSyntax(normalizedEmail)) {
+      return res.status(400).json({
+        success: false,
+        valid: false,
+        error: 'Please enter a valid email address (e.g. name@example.com).'
+      });
+    }
+
+    // Check duplicate before spending a ValidEmail credit
+    if (checkDuplicate !== false) {
+      const existingUser = await User.findOne({ email: normalizedEmail }).select('role').lean();
+      if (existingUser) {
+        const r = String(existingUser.role || '').toLowerCase();
+        const roleLabel =
+          r === 'organizer'
+            ? 'Organiser'
+            : r === 'exhibitor'
+            ? 'Exhibitor'
+            : r === 'visitor'
+            ? 'Visitor'
+            : r === 'super_admin' || r === 'admin'
+            ? 'Administrator'
+            : 'User';
+        return res.status(409).json({
+          success: false,
+          valid: false,
+          alreadyRegistered: true,
+          registeredRole: existingUser.role,
+          error: `This email address is already registered as an ${roleLabel}. Please switch to the ${roleLabel} tab to sign in.`
+        });
+      }
+    }
+
+    const result = await ValidEmailService.validateEmail(normalizedEmail);
+    if (!result.valid) {
+      return res.status(result.serviceError ? 503 : 400).json({
+        success: false,
+        valid: false,
+        email: normalizedEmail,
+        score: result.score ?? null,
+        state: result.state || '',
+        reason: result.reason || '',
+        disposable: Boolean(result.disposable),
+        error: result.error || 'Please enter a genuine, deliverable email address.'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      valid: true,
+      email: normalizedEmail,
+      score: result.score ?? null,
+      state: result.state || 'Deliverable',
+      reason: result.reason || '',
+      disposable: false,
+      domain: result.domain || '',
+      cached: Boolean(result.cached),
+      message: result.message || 'Genuine email address verified'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.post('/email-otp/send', authLimiter, async (req, res, next) => {
   try {

@@ -721,6 +721,9 @@ class AuthService {
       if (!user.isVerified) {
         user.isVerified = true;
       }
+      if (!user.isEmailVerified) {
+        user.isEmailVerified = true;
+      }
 
       // If user exists, sync corporate email plan if organizer
       if (user.role === 'organizer' && workEmail) {

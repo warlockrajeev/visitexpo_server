@@ -10,6 +10,7 @@ import jwt from 'jsonwebtoken';
 import nodemailer from 'nodemailer';
 import EmailOtpVerification from '../models/EmailOtpVerification.js';
 import User from '../models/User.js';
+import ValidEmailService from './validEmailService.js';
 
 const EMAIL_PATTERN = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
@@ -305,7 +306,7 @@ export class EmailOtpService {
       };
     }
 
-    // Reject early if email is already registered so users don't waste OTPs
+    // Reject early if email is already registered so users don't waste OTPs or validation credits
     const existingUser = await User.findOne({ email }).select('role').lean();
     if (existingUser) {
       const existingLabel = getRoleLabel(existingUser.role);
@@ -314,6 +315,16 @@ export class EmailOtpService {
         statusCode: 409,
         registeredRole: existingUser.role,
         error: `This email address is already registered as an ${existingLabel}. Please switch to the ${existingLabel} tab to sign in.`
+      };
+    }
+
+    // Validate email genuineness & deliverability via ValidEmail.net before sending OTP (cached)
+    const validation = await ValidEmailService.validateEmail(email);
+    if (!validation.valid) {
+      return {
+        success: false,
+        statusCode: validation.serviceError ? 503 : 400,
+        error: validation.error || 'Please enter a genuine, deliverable email address to receive an OTP.'
       };
     }
 
