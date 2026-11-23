@@ -25,9 +25,9 @@ router.get('/:slug/hotels', getVenueHotels);
 router.get('/:slug/events', getVenueEvents);
 
 // Protected routes (admin/superadmin management)
-router.post('/', protect, authorize('superadmin', 'admin'), createVenue);
-router.put('/:slug', protect, authorize('superadmin', 'admin'), updateVenue);
-router.post('/:slug/images', protect, authorize('superadmin', 'admin'), addVenueImages);
-router.delete('/:slug/images', protect, authorize('superadmin', 'admin'), removeVenueImage);
+router.post('/', protect, authorize('super_admin', 'superadmin', 'admin', 'sub_admin'), createVenue);
+router.put('/:slug', protect, authorize('super_admin', 'superadmin', 'admin', 'sub_admin'), updateVenue);
+router.post('/:slug/images', protect, authorize('super_admin', 'superadmin', 'admin', 'sub_admin'), addVenueImages);
+router.delete('/:slug/images', protect, authorize('super_admin', 'superadmin', 'admin', 'sub_admin'), removeVenueImage);
 
 export default router;

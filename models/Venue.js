@@ -101,7 +101,7 @@ const venueSchema = new mongoose.Schema(
     },
     followersCount: {
       type: String,
-      default: '25K+'
+      default: '0'
     },
     bestSuited: {
       type: String,
@@ -109,11 +109,11 @@ const venueSchema = new mongoose.Schema(
     },
     eventsHosted: {
       type: String,
-      default: '50+'
+      default: '0'
     },
     upcomingEventsCount: {
       type: String,
-      default: '12+'
+      default: '0'
     },
     reputationText: {
       type: String,
@@ -122,6 +122,60 @@ const venueSchema = new mongoose.Schema(
     isFeatured: {
       type: Boolean,
       default: false
+    },
+    status: {
+      type: String,
+      enum: ['published', 'draft'],
+      default: 'published'
+    },
+    visibility: {
+      type: String,
+      enum: ['public', 'private'],
+      default: 'public'
+    },
+    venueCategories: {
+      type: [String],
+      default: []
+    },
+    seo: {
+      seoTitle: {
+        type: String,
+        trim: true,
+        default: ''
+      },
+      metaDescription: {
+        type: String,
+        trim: true,
+        default: ''
+      },
+      focusKeyword: {
+        type: String,
+        trim: true,
+        default: ''
+      },
+      relatedKeyphrases: {
+        type: [String],
+        default: []
+      },
+      isCornerstone: {
+        type: Boolean,
+        default: false
+      },
+      canonicalUrl: {
+        type: String,
+        trim: true,
+        default: ''
+      },
+      metaRobotsIndex: {
+        type: String,
+        enum: ['index', 'noindex'],
+        default: 'index'
+      },
+      metaRobotsFollow: {
+        type: String,
+        enum: ['follow', 'nofollow'],
+        default: 'follow'
+      }
     }
   },
   {

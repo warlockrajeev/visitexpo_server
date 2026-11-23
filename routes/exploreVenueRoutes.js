@@ -1,81 +1,63 @@
 import express from 'express';
 import ExploreVenue from '../models/ExploreVenue.js';
+import Event from '../models/Event.js';
 import { protect, authorize } from '../middlewares/auth.js';
 
 const router = express.Router();
 
-const BASELINE_VENUES = [
-  {
-    name: 'Bharat Mandapam Exhibition Complex',
-    slug: 'bharat-mandapam',
-    city: 'New Delhi',
-    state: 'Delhi',
-    country: 'India',
-    totalEvents: 342,
-    upcomingEvents: 88,
-    searchTerm: 'Pragati Maidan',
-    displayOrder: 1
-  },
-  {
-    name: 'Yashobhoomi Convention Centre',
-    slug: 'yashobhoomi',
-    city: 'New Delhi',
-    state: 'Delhi',
-    country: 'India',
-    totalEvents: 229,
-    upcomingEvents: 57,
-    searchTerm: 'Yashobhoomi',
-    displayOrder: 2
-  },
-  {
-    name: 'Jio World Convention Centre',
-    slug: 'jio-world',
-    city: 'Mumbai',
-    state: 'Maharashtra',
-    country: 'India',
-    totalEvents: 285,
-    upcomingEvents: 64,
-    searchTerm: 'Jio World',
-    displayOrder: 3
-  },
-  {
-    name: 'Bombay Exhibition Centre (NESCO)',
-    slug: 'bec-mumbai',
-    city: 'Mumbai',
-    state: 'Maharashtra',
-    country: 'India',
-    totalEvents: 651,
-    upcomingEvents: 105,
-    searchTerm: 'Bombay Exhibition Centre',
-    displayOrder: 4
-  },
-  {
-    name: 'Bangalore International Exhibition Centre (BIEC)',
-    slug: 'biec-bengaluru',
-    city: 'Bengaluru',
-    state: 'Karnataka',
-    country: 'India',
-    totalEvents: 312,
-    upcomingEvents: 52,
-    searchTerm: 'BIEC',
-    displayOrder: 5
-  },
-  {
-    name: 'India Expo Centre & Mart',
-    slug: 'india-expo-centre',
-    city: 'Greater Noida',
-    state: 'Uttar Pradesh',
-    country: 'India',
-    totalEvents: 390,
-    upcomingEvents: 76,
-    searchTerm: 'India Expo Centre',
-    displayOrder: 6
-  }
-];
+const enrichExploreVenuesWithLiveCounts = async (items = []) => {
+  if (!Array.isArray(items) || items.length === 0) return [];
+  try {
+    const now = new Date();
+    const countsAgg = await Event.aggregate([
+      { $match: { venue: { $exists: true, $ne: '' } } },
+      {
+        $group: {
+          _id: { $toLower: { $trim: { input: '$venue' } } },
+          total: { $sum: 1 },
+          upcoming: {
+            $sum: {
+              $cond: [
+                { $or: [{ $gte: ['$endDate', now] }, { $gte: ['$startDate', now] }] },
+                1,
+                0
+              ]
+            }
+          }
+        }
+      }
+    ]);
 
-const ensureSeedData = async () => {
-  if ((await ExploreVenue.countDocuments()) === 0) {
-    await ExploreVenue.insertMany(BASELINE_VENUES);
+    return items.map((item) => {
+      const nameKey = String(item.name || '').toLowerCase().trim();
+      const searchKey = String(item.searchTerm || '').toLowerCase().trim();
+      const slugWords = String(item.slug || '').toLowerCase().replace(/-/g, ' ').trim();
+
+      let liveTotal = 0;
+      let liveUpcoming = 0;
+
+      for (const row of countsAgg) {
+        const vKey = row._id || '';
+        if (!vKey) continue;
+        if (
+          vKey === nameKey ||
+          (nameKey.length > 4 && vKey.includes(nameKey)) ||
+          (searchKey.length > 3 && vKey.includes(searchKey)) ||
+          (slugWords.length > 4 && vKey.includes(slugWords))
+        ) {
+          liveTotal += row.total;
+          liveUpcoming += row.upcoming;
+        }
+      }
+
+      return {
+        ...item,
+        totalEvents: liveTotal,
+        upcomingEvents: liveUpcoming
+      };
+    });
+  } catch {
+    return items;
   }
 };
 
@@ -99,10 +81,10 @@ const normalizePayload = (body) => ({
 
 router.get('/', async (req, res, next) => {
   try {
-    await ensureSeedData();
-    const data = await ExploreVenue.find({ isActive: true })
+    const rawData = await ExploreVenue.find({ isActive: true })
       .sort({ displayOrder: 1, createdAt: 1 })
       .lean();
+    const data = await enrichExploreVenuesWithLiveCounts(rawData);
 
     res.status(200).json({ success: true, data });
   } catch (error) {
@@ -112,10 +94,10 @@ router.get('/', async (req, res, next) => {
 
 router.get('/admin/all', protect, authorize('super_admin', 'admin', 'sub_admin'), async (req, res, next) => {
   try {
-    await ensureSeedData();
-    const data = await ExploreVenue.find()
+    const rawData = await ExploreVenue.find()
       .sort({ displayOrder: 1, createdAt: 1 })
       .lean();
+    const data = await enrichExploreVenuesWithLiveCounts(rawData);
 
     res.status(200).json({ success: true, data });
   } catch (error) {
@@ -159,6 +141,18 @@ router.put('/admin/:id', protect, authorize('super_admin', 'admin', 'sub_admin')
     }
 
     res.status(200).json({ success: true, data: venue });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete('/admin/:id', protect, authorize('super_admin', 'admin', 'sub_admin'), async (req, res, next) => {
+  try {
+    const deleted = await ExploreVenue.findByIdAndDelete(req.params.id);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'Explore venue not found.' });
+    }
+    res.status(200).json({ success: true, message: 'Venue removed from Explore Venues.' });
   } catch (error) {
     next(error);
   }
