@@ -483,6 +483,14 @@ function doesEventMatchLocations(ev, selectedLocations) {
 
 class RecommendationService {
   /**
+   * Clear candidate events cache so newly synced banners or events appear immediately
+   */
+  invalidateCache() {
+    candidateEventsCache = null;
+    candidateCacheTimestamp = 0;
+  }
+
+  /**
    * Main recommendation engine query method
    */
   async getRecommendations({

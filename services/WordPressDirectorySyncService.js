@@ -17,19 +17,19 @@ import EventEngagement from '../models/EventEngagement.js';
 import Visitor from '../models/Visitor.js';
 import Organization from '../models/Organization.js';
 import { parseWpLocation } from '../routes/adminRoutes.js';
+import {
+  BROKEN_WP_URLS,
+  LEGACY_POOL_URL_SET,
+  normalizeEventImageUrl,
+  isValidEventImageUrl,
+  isMismatchedPoolImage,
+  isGenuineEventImageUrl,
+  fetchLiveWpEventImage,
+  fetchLiveWpEventImageWithStatus
+} from '../utils/wpEventImageHelper.js';
 
 const WORDPRESS_URL = process.env.WORDPRESS_URL || 'https://visitexpo.in';
 const WORDPRESS_API_KEY = process.env.WORDPRESS_API_KEY || '';
-
-const BROKEN_WP_URLS = new Set([
-  'https://visitexpo.in/wp-content/uploads/2026/09/India-International-EV-Show-2026_new.jpg',
-  'https://visitexpo.in/wp-content/uploads/2026/08/Medicall-Expo-2026.jpg',
-  'https://visitexpo.in/wp-content/uploads/2026/08/ET-TECH-X-2026_new.jpg',
-  'https://visitexpo.in/wp-content/uploads/2026/09/FINETECH-JAPAN_new.jpg',
-  'https://visitexpo.in/wp-content/uploads/2026/09/Cosmobeaute-Indonesia_new.jpg',
-  'https://visitexpo.in/wp-content/uploads/2026/09/Watch-Jewellery-Middle-East-Show_new.jpg',
-  'https://visitexpo.in/wp-content/uploads/2026/09/Feria-Habitat-Valencia_new.jpg'
-]);
 
 // Precomputed category pools for high-quality fallback images (verified 200-OK)
 const CATEGORY_IMAGE_POOLS = {
@@ -119,27 +119,7 @@ function inferCategory(title = '', desc = '') {
   return 'Trade & Industry';
 }
 
-const CATEGORY_POOL_URL_SET = new Set([
-  ...Object.values(CATEGORY_IMAGE_POOLS).flat(),
-  ...BROKEN_WP_URLS
-]);
-
-function isValidEventImageUrl(url) {
-  if (!url || typeof url !== 'string') return false;
-  const trimmed = normalizeEventImageUrl(url);
-  if (!trimmed || trimmed.includes('unsplash') || trimmed.includes('cropped-Untitled')) return false;
-  if (BROKEN_WP_URLS.has(trimmed)) return false;
-  return (
-    trimmed.includes('wp-content/uploads') ||
-    trimmed.includes('res.cloudinary.com') ||
-    /^https?:\/\//i.test(trimmed)
-  );
-}
-
-function normalizeEventImageUrl(url) {
-  if (!url || typeof url !== 'string') return '';
-  return url.trim().replace(/^http:\/\/visitexpo\.in/i, 'https://visitexpo.in');
-}
+const CATEGORY_POOL_URL_SET = LEGACY_POOL_URL_SET;
 
 function getCategoryFallback(category, title = '') {
   const pool = CATEGORY_IMAGE_POOLS[category] || CATEGORY_IMAGE_POOLS['Trade & Industry'];
@@ -230,35 +210,217 @@ class WordPressDirectorySyncService {
 
   findImage(slug, id, wpPostId, title) {
     this.refreshImageMapIfNeeded();
-    if (slug && this.imageLookupMap.has(slug)) return this.imageLookupMap.get(slug);
+    const candidates = [];
+    if (slug && this.imageLookupMap.has(slug)) candidates.push(this.imageLookupMap.get(slug));
     if (slug) {
       const cleanSlug = String(slug).toLowerCase().trim();
-      if (this.imageLookupMap.has(cleanSlug)) return this.imageLookupMap.get(cleanSlug);
+      if (this.imageLookupMap.has(cleanSlug)) candidates.push(this.imageLookupMap.get(cleanSlug));
       const norm = cleanSlug.replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-      if (norm && this.imageLookupMap.has(norm)) return this.imageLookupMap.get(norm);
+      if (norm && this.imageLookupMap.has(norm)) candidates.push(this.imageLookupMap.get(norm));
     }
-    if (id && this.imageLookupMap.has(String(id))) return this.imageLookupMap.get(String(id));
-    if (wpPostId && this.imageLookupMap.has(String(wpPostId))) return this.imageLookupMap.get(String(wpPostId));
+    if (id && this.imageLookupMap.has(String(id))) candidates.push(this.imageLookupMap.get(String(id)));
+    if (wpPostId && this.imageLookupMap.has(String(wpPostId))) candidates.push(this.imageLookupMap.get(String(wpPostId)));
     if (title) {
       const titleSlug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
-      if (titleSlug && this.imageLookupMap.has(titleSlug)) return this.imageLookupMap.get(titleSlug);
+      if (titleSlug && this.imageLookupMap.has(titleSlug)) candidates.push(this.imageLookupMap.get(titleSlug));
+    }
+    for (const url of candidates) {
+      if (isGenuineEventImageUrl(url, slug, title)) {
+        return normalizeEventImageUrl(url);
+      }
     }
     return '';
   }
 
-  async fetchWpOembedImage(slug) {
-    if (!slug) return '';
+  /**
+   * Canonical banner resolver for any Event document (plain or Mongoose).
+   * Returns only a genuine event-specific image URL (never a mismatched legacy category-pool poster).
+   */
+  resolveEventBanner(doc) {
+    if (!doc || typeof doc !== 'object') return '';
+    const slug = String(doc.slug || '').toLowerCase().trim();
+    const id = doc._id ? String(doc._id) : (doc.id ? String(doc.id) : '');
+    const wpPostId = doc.wpPostId ? String(doc.wpPostId) : '';
+    const title = String(doc.title || '').trim();
+
+    const dbBanner = normalizeEventImageUrl(doc.banner || doc.bannerImage || doc.image || '');
+    if (dbBanner && isGenuineEventImageUrl(dbBanner, slug, title)) {
+      return dbBanner;
+    }
+
+    const mapped = this.findImage(slug, id, wpPostId, title);
+    if (mapped) {
+      return mapped;
+    }
+
+    return '';
+  }
+
+  /**
+   * Persist a newly discovered real WordPress image to MongoDB, memory cache, disk cache, and JSON maps.
+   */
+  async persistResolvedEventImage({ slug, wpPostId, eventId, title, imageUrl }) {
+    const cleanUrl = normalizeEventImageUrl(imageUrl);
+    if (!isGenuineEventImageUrl(cleanUrl, slug, title)) {
+      return '';
+    }
+
+    const cleanSlug = String(slug || '').toLowerCase().trim();
+    const cleanWpId = wpPostId ? String(wpPostId).trim() : '';
+    const cleanEventId = eventId ? String(eventId).trim() : '';
+
+    // 1. Update in-memory lookup map
+    if (cleanSlug) {
+      this.imageLookupMap.set(cleanSlug, cleanUrl);
+      const norm = cleanSlug.replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      if (norm) this.imageLookupMap.set(norm, cleanUrl);
+    }
+    if (cleanWpId) this.imageLookupMap.set(cleanWpId, cleanUrl);
+    if (title) {
+      const titleSlug = String(title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+      if (titleSlug) this.imageLookupMap.set(titleSlug, cleanUrl);
+    }
+
+    // 2. Persist to MongoDB Event.banner so ALL users and endpoints see the real image
     try {
-      const oembedUrl = `${WORDPRESS_URL}/wp-json/oembed/1.0/embed?url=${encodeURIComponent(`${WORDPRESS_URL}/event/${slug}/`)}`;
-      const res = await fetch(oembedUrl, { signal: AbortSignal.timeout(5000) });
-      if (res.ok) {
-        const data = await res.json();
-        if (isValidEventImageUrl(data.thumbnail_url)) {
-          return normalizeEventImageUrl(data.thumbnail_url);
+      const orClauses = [];
+      if (cleanSlug) orClauses.push({ slug: cleanSlug });
+      if (cleanWpId) orClauses.push({ wpPostId: cleanWpId });
+      if (cleanEventId && /^[a-fA-F0-9]{24}$/.test(cleanEventId)) {
+        orClauses.push({ _id: cleanEventId });
+      }
+      if (orClauses.length > 0) {
+        await Event.updateMany({ $or: orClauses }, { $set: { banner: cleanUrl } });
+      }
+    } catch (dbErr) {
+      console.warn('[WP-Sync] Could not persist synced banner to MongoDB:', dbErr.message);
+    }
+
+    // 3. Patch warm memory cache + disk cache immediately
+    if (Array.isArray(memoryCache.events)) {
+      let patched = false;
+      memoryCache.events = memoryCache.events.map((ev) => {
+        if (!ev) return ev;
+        const matchSlug = cleanSlug && String(ev.slug || '').toLowerCase().trim() === cleanSlug;
+        const matchWp = cleanWpId && String(ev.wpPostId || '').trim() === cleanWpId;
+        const matchId = cleanEventId && String(ev._id || ev.id || '').trim() === cleanEventId;
+        if (matchSlug || matchWp || matchId) {
+          patched = true;
+          return { ...ev, banner: cleanUrl, image: cleanUrl };
+        }
+        return ev;
+      });
+      if (patched) {
+        void this.saveDiskCache(memoryCache.events);
+      }
+    }
+
+    // 4. Best-effort persist to server & client JSON image maps on disk
+    try {
+      const serverJsonPath = path.join(__wpSyncDirname, '../data/wordpress-event-images.json');
+      const clientJsonPath = path.resolve(__wpSyncDirname, '../../client-dashboard/src/data/wordpress-event-images.json');
+      for (const targetPath of [serverJsonPath, clientJsonPath]) {
+        if (!fs.existsSync(targetPath)) continue;
+        const map = JSON.parse(fs.readFileSync(targetPath, 'utf8')) || {};
+        let changed = false;
+        if (cleanSlug && map[cleanSlug] !== cleanUrl) {
+          map[cleanSlug] = cleanUrl;
+          changed = true;
+        }
+        if (cleanWpId && map[cleanWpId] !== cleanUrl) {
+          map[cleanWpId] = cleanUrl;
+          changed = true;
+        }
+        if (title) {
+          const tSlug = String(title).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+          if (tSlug && map[tSlug] !== cleanUrl) {
+            map[tSlug] = cleanUrl;
+            changed = true;
+          }
+        }
+        if (changed) {
+          fs.writeFileSync(targetPath, JSON.stringify(map, null, 2), 'utf8');
         }
       }
     } catch {}
-    return '';
+
+    return cleanUrl;
+  }
+
+  /**
+   * Fetch the live featured image from visitexpo.in for a single event and persist it across MongoDB + caches.
+   */
+  async syncSingleEventImageFromWordPress({ slug, wpPostId, eventId, title }) {
+    const cleanSlug = String(slug || '').toLowerCase().trim();
+    if (!cleanSlug) return '';
+    const liveUrl = await fetchLiveWpEventImage(cleanSlug, title);
+    if (!liveUrl) return '';
+    return await this.persistResolvedEventImage({
+      slug: cleanSlug,
+      wpPostId,
+      eventId,
+      title,
+      imageUrl: liveUrl
+    });
+  }
+
+  /**
+   * Gentle, rate-limit-safe background harvester for WordPress events missing a genuine banner in MongoDB.
+   * Aborts cleanly on HTTP 403/429 so visitexpo.in's LiteSpeed WAF is never triggered.
+   */
+  async backfillMissingEventImages(candidates = []) {
+    if (this.isBackfillingImages || !Array.isArray(candidates) || candidates.length === 0) return;
+    this.isBackfillingImages = true;
+    const BATCH_SIZE = 2;
+    const MAX_PER_CYCLE = 40;
+    const slice = candidates.slice(0, MAX_PER_CYCLE);
+    let recovered = 0;
+
+    try {
+      console.log(`[WP-Sync] Gently harvesting real WordPress images for up to ${slice.length} (of ${candidates.length}) events...`);
+      for (let i = 0; i < slice.length; i += BATCH_SIZE) {
+        const chunk = slice.slice(i, i + BATCH_SIZE);
+        let hitRateLimit = false;
+        await Promise.all(
+          chunk.map(async (item) => {
+            try {
+              const { url: liveUrl, rateLimited } = await fetchLiveWpEventImageWithStatus(item.slug, item.title);
+              if (rateLimited) {
+                hitRateLimit = true;
+                return;
+              }
+              if (liveUrl) {
+                await this.persistResolvedEventImage({
+                  slug: item.slug,
+                  wpPostId: item.wpPostId,
+                  title: item.title,
+                  imageUrl: liveUrl
+                });
+                recovered++;
+              }
+            } catch {}
+          })
+        );
+        if (hitRateLimit) {
+          console.warn('[WP-Sync] Pausing background image harvest due to WordPress rate-limit (403/429).');
+          break;
+        }
+        if (i + BATCH_SIZE < slice.length) {
+          await new Promise((r) => setTimeout(r, 1200));
+        }
+      }
+      if (recovered > 0) {
+        console.log(`[WP-Sync] Auto-harvested and persisted ${recovered} real WordPress event images to MongoDB.`);
+        memoryCache.timestamp = 0;
+        this.refreshCacheInBackground();
+      }
+    } finally {
+      this.isBackfillingImages = false;
+    }
+  }
+
+  async fetchWpOembedImage(slug, title = '') {
+    return await fetchLiveWpEventImage(slug, title);
   }
 
   parsePhpSerializedArray(str) {
@@ -396,15 +558,25 @@ class WordPressDirectorySyncService {
       const deletedPostIds = new Set((deletedEvents || []).map(d => String(d.wpPostId || '').trim().toLowerCase()));
       const deletedTitles = new Set((deletedEvents || []).map(d => (d.title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')));
 
-      // Find existing claimed events so we don't overwrite user ownership
-      const existingEvents = await Event.find({ isClaimed: true }).select('slug wpPostId isClaimed claimedBy organizer banner').lean();
+      // Find existing events so we preserve ownership on claimed records AND identify missing/mismatched banners
+      const existingAllEvents = await Event.find({}).select('slug wpPostId isClaimed claimedBy organizer banner').lean();
       const claimedMap = new Map();
-      existingEvents.forEach(e => {
-        if (e.slug) claimedMap.set(e.slug.toLowerCase(), e);
-        if (e.wpPostId) claimedMap.set(String(e.wpPostId), e);
+      const existingBannerMap = new Map();
+      existingAllEvents.forEach(e => {
+        if (e.slug) {
+          const s = e.slug.toLowerCase();
+          existingBannerMap.set(s, e.banner || '');
+          if (e.isClaimed) claimedMap.set(s, e);
+        }
+        if (e.wpPostId) {
+          const wp = String(e.wpPostId);
+          existingBannerMap.set(wp, e.banner || '');
+          if (e.isClaimed) claimedMap.set(wp, e);
+        }
       });
 
       const bulkOps = [];
+      const missingImageCandidates = [];
       let skippedCount = 0;
 
       for (let i = 0; i < docs.length; i++) {
@@ -443,9 +615,24 @@ class WordPressDirectorySyncService {
 
         const category = inferCategory(rawTitle, cleanDesc);
         const slug = rawSlug || (rawTitle ? rawTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') : `event-${postId}`);
-        let banner = this.findImage(slug, d.id, postId, rawTitle);
-        if (!banner && d._embedded?.['wp:featuredmedia']?.[0]?.source_url && isValidEventImageUrl(d._embedded['wp:featuredmedia'][0].source_url)) {
+        const wpDirectFeatured = d.featured_image || d.banner || '';
+        let banner =
+          (wpDirectFeatured && isGenuineEventImageUrl(wpDirectFeatured, slug, rawTitle)
+            ? normalizeEventImageUrl(wpDirectFeatured)
+            : '') ||
+          this.findImage(slug, d.id, postId, rawTitle);
+        const yoastOg = m['_yoast_wpseo_opengraph-image']?.[0];
+        if (!banner && yoastOg && isGenuineEventImageUrl(yoastOg, slug, rawTitle)) {
+          banner = normalizeEventImageUrl(yoastOg);
+        }
+        if (!banner && d._embedded?.['wp:featuredmedia']?.[0]?.source_url && isGenuineEventImageUrl(d._embedded['wp:featuredmedia'][0].source_url, slug, rawTitle)) {
           banner = normalizeEventImageUrl(d._embedded['wp:featuredmedia'][0].source_url);
+        }
+        const existingDbBanner = existingBannerMap.get(slug) || existingBannerMap.get(postId) || '';
+        const hasValidExistingDbBanner = isGenuineEventImageUrl(existingDbBanner, slug, rawTitle);
+        const hasMismatchedExistingDbBanner = Boolean(existingDbBanner) && !hasValidExistingDbBanner;
+        if (!banner && !hasValidExistingDbBanner) {
+          missingImageCandidates.push({ slug, wpPostId: postId, title: rawTitle });
         }
 
         // Parse FAQs
@@ -527,6 +714,9 @@ class WordPressDirectorySyncService {
           };
           if (banner) {
             setFields.banner = banner;
+          } else if (hasMismatchedExistingDbBanner) {
+            // Clear mismatched legacy category-pool poster so auto-harvest fills the true WP featured image
+            setFields.banner = '';
           }
           bulkOps.push({
             updateOne: {
@@ -566,6 +756,11 @@ class WordPressDirectorySyncService {
       // Mark cache stale without wiping existing warm data, then refresh in background
       memoryCache.timestamp = 0;
       this.refreshCacheInBackground();
+
+      // Auto-harvest real WordPress featured images in the background for any new/unmapped events
+      if (missingImageCandidates.length > 0) {
+        void this.backfillMissingEventImages(missingImageCandidates);
+      }
 
       this.isSyncing = false;
       return {
@@ -776,16 +971,12 @@ class WordPressDirectorySyncService {
           0;
 
         const dynamicInterestedCount = engCount + visCount;
-        const mappedImg = this.findImage(slugKey, idKey, wpKey, doc.title);
-        const dbBanner = isValidEventImageUrl(doc.banner) ? normalizeEventImageUrl(doc.banner) : '';
-        const resolvedBanner =
-          mappedImg ||
-          (dbBanner && !CATEGORY_POOL_URL_SET.has(dbBanner) ? dbBanner : '') ||
-          dbBanner;
+        const resolvedBanner = this.resolveEventBanner(doc);
 
         return {
           ...doc,
           banner: resolvedBanner,
+          isRealImage: Boolean(resolvedBanner),
           organizer: cleanOrganizer,
           organizerName: cleanOrganizer,
           orgName: cleanOrganizer,

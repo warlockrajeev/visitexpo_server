@@ -130,6 +130,15 @@ router.get('/', wordpressLimiter, async (req, res, next) => {
     };
 
     const data = await EventService.queryEvents(filters, options);
+    if (data && Array.isArray(data.docs)) {
+      data.docs = data.docs.map((rawDoc) => {
+        const plain = typeof rawDoc?.toObject === 'function' ? rawDoc.toObject() : { ...rawDoc };
+        const resolvedBanner = WordPressDirectorySyncService.resolveEventBanner(plain);
+        plain.banner = resolvedBanner;
+        plain.isRealImage = Boolean(resolvedBanner);
+        return plain;
+      });
+    }
     res.status(200).json({ success: true, data });
   } catch (error) {
     next(error);
@@ -331,7 +340,55 @@ router.get('/all-directory', async (req, res, next) => {
 router.post('/sync-wordpress', async (req, res, next) => {
   try {
     const result = await WordPressDirectorySyncService.syncWordPressEventsToMongoDB({ force: true });
+    RecommendationService.invalidateCache();
     res.status(200).json(result);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Sync or persist a verified real WordPress event image into MongoDB + all caches
+router.post('/sync-image', async (req, res, next) => {
+  try {
+    const { slug, wpPostId, eventId, title, imageUrl } = req.body || {};
+    const cleanSlug = String(slug || '').toLowerCase().trim();
+    if (!cleanSlug && !wpPostId && !eventId) {
+      return res.status(400).json({ success: false, error: 'Event slug or ID is required' });
+    }
+
+    let persistedUrl = '';
+    if (imageUrl && typeof imageUrl === 'string') {
+      persistedUrl = await WordPressDirectorySyncService.persistResolvedEventImage({
+        slug: cleanSlug,
+        wpPostId,
+        eventId,
+        title,
+        imageUrl
+      });
+    }
+    if (!persistedUrl && cleanSlug) {
+      persistedUrl = await WordPressDirectorySyncService.syncSingleEventImageFromWordPress({
+        slug: cleanSlug,
+        wpPostId,
+        eventId,
+        title
+      });
+    }
+
+    if (persistedUrl) {
+      RecommendationService.invalidateCache();
+      return res.status(200).json({
+        success: true,
+        image: persistedUrl,
+        banner: persistedUrl
+      });
+    }
+
+    return res.status(200).json({
+      success: false,
+      image: '',
+      message: 'No genuine WordPress featured image found for this event'
+    });
   } catch (error) {
     next(error);
   }
@@ -604,7 +661,26 @@ router.get('/check-duplicate', async (req, res, next) => {
 // Get single event by slug
 router.get('/:slug', wordpressLimiter, async (req, res, next) => {
   try {
-    const event = await EventService.getEventBySlug(req.params.slug);
+    const eventDoc = await EventService.getEventBySlug(req.params.slug);
+    const event = typeof eventDoc?.toObject === 'function' ? eventDoc.toObject() : { ...eventDoc };
+    let resolvedBanner = WordPressDirectorySyncService.resolveEventBanner(event);
+    if (!resolvedBanner && event.slug) {
+      const liveSynced = await Promise.race([
+        WordPressDirectorySyncService.syncSingleEventImageFromWordPress({
+          slug: event.slug,
+          wpPostId: event.wpPostId,
+          eventId: event._id,
+          title: event.title
+        }),
+        new Promise((resolve) => setTimeout(() => resolve(''), 3500))
+      ]).catch(() => '');
+      if (liveSynced) {
+        resolvedBanner = liveSynced;
+        RecommendationService.invalidateCache();
+      }
+    }
+    event.banner = resolvedBanner;
+    event.isRealImage = Boolean(resolvedBanner);
     res.status(200).json({ success: true, event, data: event });
   } catch (error) {
     next(error);
