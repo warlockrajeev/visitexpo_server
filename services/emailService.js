@@ -221,3 +221,186 @@ export const sendExhibitorApprovalNotification = async ({ companyName, contactEm
 
   return sendEmail({ to: contactEmail, subject, html });
 };
+
+const escapeHtml = (value = '') =>
+  String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+
+/**
+ * Send Count-Only Booth Request Summary Notification to Event Organizer.
+ * IMPORTANT: Intentionally sends ONLY request count summary (never requester PII / contact details).
+ */
+export const sendOrganizerBoothCountNotification = async ({
+  to,
+  organizerName,
+  eventTitle,
+  eventSlug,
+  eventVenue,
+  eventCity,
+  eventDateRange,
+  reportedCount,
+  countScope = 'all',
+  stallCount = 0,
+  visitorPassCount = 0,
+  generalCount = 0,
+  customSubject,
+  customNote
+}) => {
+  const clientUrl = (process.env.CLIENT_URL || 'https://client.visitexpo.in').replace(/\/+$/, '');
+  const safeCount = Math.max(0, Number(reportedCount) || 0);
+  const safeStall = Math.max(0, Number(stallCount) || 0);
+  const safeVisitor = Math.max(0, Number(visitorPassCount) || 0);
+  const safeGeneral = Math.max(0, Number(generalCount) || 0);
+  const requestLabel = countScope === 'stall' ? 'Booth / Stall Request' : 'Booth & Event Request';
+  const pluralSuffix = safeCount === 1 ? '' : 's';
+
+  const greetingName = organizerName && organizerName.trim() ? organizerName.trim() : 'Event Organizer';
+  const cleanTitle = eventTitle && eventTitle.trim() ? eventTitle.trim() : 'Your Exhibition';
+  const locationLine = [eventVenue, eventCity].filter(Boolean).join(', ');
+  const eventPageUrl = eventSlug ? `${clientUrl}/expo/${encodeURIComponent(eventSlug)}` : clientUrl;
+  const claimPageUrl = `${clientUrl}/events/claim`;
+
+  const subject =
+    (customSubject && customSubject.trim()) ||
+    `${safeCount} ${requestLabel}${pluralSuffix} Received for ${cleanTitle} — VisitExpo`;
+
+  const breakdownRows = [];
+  if (countScope === 'stall') {
+    breakdownRows.push({ label: 'Book Stall Space Requests', value: safeStall });
+  } else {
+    if (safeStall > 0) breakdownRows.push({ label: 'Book Stall Space Requests', value: safeStall });
+    if (safeVisitor > 0) breakdownRows.push({ label: 'Visitor Entry Pass Requests', value: safeVisitor });
+    if (safeGeneral > 0) breakdownRows.push({ label: 'General Event Inquiries', value: safeGeneral });
+  }
+
+  const breakdownHtml = breakdownRows.length
+    ? breakdownRows
+        .map(
+          (row) => `
+            <tr>
+              <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;color:#475569;font-size:14px;font-weight:600;">${escapeHtml(row.label)}</td>
+              <td style="padding:10px 0;border-bottom:1px solid #e2e8f0;color:#0f172a;font-size:15px;font-weight:800;text-align:right;">${row.value}</td>
+            </tr>`
+        )
+        .join('')
+    : '';
+
+  const customNoteHtml =
+    customNote && customNote.trim()
+      ? `
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:14px;padding:18px 20px;margin:22px 0;">
+          <div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.8px;color:#b45309;margin-bottom:6px;">Message from VisitExpo Admin Team</div>
+          <div style="font-size:14px;color:#78350f;line-height:1.6;white-space:pre-line;">${escapeHtml(customNote.trim())}</div>
+        </div>`
+      : '';
+
+  const html = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>${escapeHtml(subject)}</title>
+    </head>
+    <body style="margin:0;padding:0;background-color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1e293b;">
+      <div style="width:100%;background-color:#f8fafc;padding:36px 12px;box-sizing:border-box;">
+        <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:20px;overflow:hidden;border:1px solid #e2e8f0;box-shadow:0 10px 30px rgba(15,23,42,0.06);">
+          <div style="background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);padding:34px 28px;text-align:center;color:#ffffff;">
+            <div style="display:inline-block;background:rgba(255,204,0,0.18);color:#FFCC00;border:1px solid rgba(255,204,0,0.4);padding:5px 14px;border-radius:999px;font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;margin-bottom:14px;">
+              VisitExpo Booth Demand Alert
+            </div>
+            <h1 style="margin:0;font-size:24px;font-weight:800;line-height:1.25;color:#ffffff;">
+              ${safeCount} ${escapeHtml(requestLabel)}${pluralSuffix} Received
+            </h1>
+            <p style="margin:10px 0 0 0;font-size:14px;color:#cbd5e1;">
+              ${escapeHtml(cleanTitle)}
+            </p>
+          </div>
+
+          <div style="padding:32px 28px;">
+            <p style="margin:0 0 14px 0;font-size:16px;font-weight:700;color:#0f172a;">
+              Hello ${escapeHtml(greetingName)},
+            </p>
+            <p style="margin:0 0 22px 0;font-size:14px;color:#475569;line-height:1.65;">
+              We are writing to inform you that your event <strong style="color:#0f172a;">${escapeHtml(cleanTitle)}</strong> has received
+              <strong style="color:#0f172a;">${safeCount} ${escapeHtml(requestLabel.toLowerCase())}${pluralSuffix}</strong> on VisitExpo.
+            </p>
+
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:16px;padding:22px 24px;margin-bottom:22px;text-align:center;">
+              <div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:1px;color:#64748b;">
+                Total ${escapeHtml(requestLabel)}${pluralSuffix}
+              </div>
+              <div style="font-size:44px;font-weight:900;color:#0f172a;line-height:1.1;margin:8px 0;">
+                ${safeCount}
+              </div>
+              ${locationLine ? `<div style="font-size:13px;color:#64748b;font-weight:600;">${escapeHtml(locationLine)}</div>` : ''}
+              ${eventDateRange ? `<div style="font-size:12px;color:#94a3b8;margin-top:4px;">${escapeHtml(eventDateRange)}</div>` : ''}
+            </div>
+
+            ${
+              breakdownHtml
+                ? `
+            <div style="margin-bottom:22px;">
+              <div style="font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:0.8px;color:#64748b;margin-bottom:8px;">
+                Request Count Breakdown
+              </div>
+              <table style="width:100%;border-collapse:collapse;">
+                ${breakdownHtml}
+              </table>
+            </div>`
+                : ''
+            }
+
+            ${customNoteHtml}
+
+            <div style="background:#f1f5f9;border-left:4px solid #f59e0b;border-radius:10px;padding:14px 16px;margin:22px 0;font-size:13px;color:#334155;line-height:1.6;">
+              <strong>Note on Lead Privacy:</strong> This alert shares only the request count for your exhibition. Full requester details are securely held by VisitExpo. Claim your event or connect with our team to access and follow up on these exhibitor leads.
+            </div>
+
+            <div style="text-align:center;margin:28px 0 8px 0;">
+              <a href="${claimPageUrl}" target="_blank" style="display:inline-block;background:#FFCC00;color:#0f172a !important;font-weight:800;text-decoration:none;padding:14px 28px;border-radius:12px;font-size:14px;">
+                Claim Event &amp; Access Leads &rarr;
+              </a>
+            </div>
+            <div style="text-align:center;margin-top:10px;">
+              <a href="${eventPageUrl}" target="_blank" style="font-size:12px;color:#4f46e5;font-weight:700;text-decoration:none;">
+                View Event Listing on VisitExpo
+              </a>
+            </div>
+          </div>
+
+          <div style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 24px;text-align:center;font-size:12px;color:#94a3b8;line-height:1.5;">
+            VisitExpo Admin Booth Desk &bull; <a href="mailto:support@visitexpo.in" style="color:#4f46e5;text-decoration:none;font-weight:700;">support@visitexpo.in</a> &bull; <a href="${clientUrl}" style="color:#4f46e5;text-decoration:none;font-weight:700;">client.visitexpo.in</a>
+          </div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+
+  const textLines = [
+    `Hello ${greetingName},`,
+    '',
+    `Your event "${cleanTitle}" has received ${safeCount} ${requestLabel.toLowerCase()}${pluralSuffix} on VisitExpo.`,
+    locationLine ? `Location: ${locationLine}` : '',
+    eventDateRange ? `Dates: ${eventDateRange}` : '',
+    '',
+    ...breakdownRows.map((row) => `- ${row.label}: ${row.value}`),
+    customNote && customNote.trim() ? `\nMessage from VisitExpo Admin:\n${customNote.trim()}` : '',
+    '',
+    'Note: This notification shares only the booth request count (full requester details are not included).',
+    `Claim your event or contact support@visitexpo.in to unlock full exhibitor leads: ${claimPageUrl}`,
+    `Event listing: ${eventPageUrl}`
+  ].filter((line) => line !== '');
+
+  return sendEmail({
+    to,
+    subject,
+    html,
+    text: textLines.join('\n')
+  });
+};

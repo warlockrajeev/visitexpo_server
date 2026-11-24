@@ -10,6 +10,11 @@ import EventEngagement from '../models/EventEngagement.js';
 import { DEFAULT_VENUES } from '../data/defaultVenues.js';
 import { getNearbyHotelsForVenue } from '../data/defaultHotels.js';
 
+// Helper to escape special regex characters safely
+function escapeRegex(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // Helper to normalize strings into URL-safe slugs
 function slugify(text) {
   return String(text || '')
@@ -20,23 +25,187 @@ function slugify(text) {
     .replace(/^-+|-+$/g, '');
 }
 
-// Reject noisy/garbage non-venue strings (pure numbers, floor labels, hashtag captions, generic placeholders)
-export function isValidRealVenueName(rawName) {
-  const cleaned = String(rawName || '')
+// Strip sub-hall, entrance, gate, or floor suffixes so variants map to their canonical parent venue
+// e.g. "ExCeL London (Hall N22" -> "ExCeL London", "Excel London West Entrance" -> "Excel London"
+export function stripVenueSubLocation(rawName) {
+  let cleaned = String(rawName || '')
+    .replace(/^[:\-\s]+/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // Remove parenthetical hall/entrance/gate/pavilion/floor notes (even if unclosed parenthesis)
+  cleaned = cleaned
+    .replace(/\s*\(\s*(?:halls?|pavilion|gate|entrance|west\s+entrance|east\s+entrance|north\s+entrance|south\s+entrance|floor|level|room|booth|stand|wing|block)[^)]*\)?\s*$/i, '')
+    .replace(/\s*[-–—,]\s*(?:halls?\s*(?:no\.?\s*)?[a-z0-9\s&–-]+|pavilion\s*[a-z0-9\s&–-]+|gate\s*[a-z0-9]+|(?:north|south|east|west)\s+entrance)\s*$/i, '')
+    .replace(/\s+(?:halls?\s+(?:no\.?\s*)?[a-z]?\d+[a-z0-9\s&–-]*|(?:north|south|east|west)\s+entrance|gate\s*\d+)\s*$/i, '')
+    .replace(/^hall\s+[a-z0-9]+\s+at\s+/i, '')
+    .replace(/\s*\(\s*$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return cleaned;
+}
+
+// Reject noisy/garbage/spam non-venue strings (URLs, %20 encoded slugs, standalone halls/pavilions, pure numbers, hashtags, generic placeholders)
+export function isValidRealVenueName(rawName, rawSlug = '') {
+  const rawStr = String(rawName || '').trim();
+  const slugStr = String(rawSlug || '').trim();
+
+  // Reject URL-encoded garbage or whitespace inside slugs
+  if (/%[0-9a-f]{2}/i.test(rawStr) || /%[0-9a-f]{2}/i.test(slugStr) || /\s/.test(slugStr)) {
+    return false;
+  }
+
+  const cleaned = rawStr
     .replace(/^[:\-\s]+/, '')
     .replace(/\s+/g, ' ')
     .trim();
   if (!cleaned || cleaned.length <= 3) return false;
+
+  // Reject URLs, protocols, www domains, and mangled URL names like "Https Www Excel London"
+  if (
+    /https?:\/\//i.test(cleaned) ||
+    /\bhttps?\b/i.test(cleaned) ||
+    /\bwww\b/i.test(cleaned) ||
+    /^(?:https?|www)-/i.test(slugStr) ||
+    /(?:^|\s|\.)[a-z0-9-]+\.(?:com|in|co\.uk|org|net|io|london|eu|de|ae|sg|gov|edu)\b/i.test(cleaned)
+  ) {
+    return false;
+  }
+
+  // Reject pure numbers, hashtags, and standalone floor/hall/pavilion/gate/booth labels
   if (/^(?:\d+|#.*|\d+(?:st|nd|rd|th)\s*\(?.*\)?\s*floor.*)$/i.test(cleaned)) return false;
+  if (
+    /^(?:halls?|pavilions?|gates?|entrances?|booths?|stands?|rooms?|floors?|levels?)\s*(?:no\.?\s*)?[a-z0-9\s&–,\-/().]*$/i.test(
+      cleaned
+    )
+  ) {
+    return false;
+  }
+  if (/^(?:hall|pavilion)\s*\d+\s*(?:&|and)\s*(?:convention|exhibition)\s*cent(?:er|re)$/i.test(cleaned)) {
+    return false;
+  }
+
   if ((cleaned.match(/#\w+/g) || []).length >= 2) return false;
-  if (/^(?:exhibition\s+cent(?:er|re)|tba|tbd|online|virtual|n\/a)$/i.test(cleaned)) return false;
+  if (
+    /^(?:exhibition\s+cent(?:er|re)|convention\s+cent(?:er|re)|conference\s+facility\s*\/?\s*convention\s+cent(?:er|re)|premier\s+academic\s+convention\s+cent(?:er|re)\s*\/?\s*virtual|tba|tbd|online|virtual|n\/a|india|unknown)$/i.test(
+      cleaned
+    )
+  ) {
+    return false;
+  }
   return true;
+}
+
+// Known canonical alias phrases (strict multi-word / unique identifiers ONLY — never generic single city words)
+function getCanonicalVenueAliases(slug, name, shortName) {
+  const hay = `${String(slug || '')} ${String(name || '')} ${String(shortName || '')}`.toLowerCase();
+  const aliases = [];
+
+  if (/\bexcel\s*london\b|excel-london/.test(hay)) {
+    aliases.push('excel london', 'excel, london');
+  }
+  if (hay.includes('mandapam') || hay.includes('pragati')) {
+    aliases.push('pragati maidan', 'bharat mandapam');
+  }
+  if (hay.includes('yashobhoomi') || /\biicc\b/.test(hay)) {
+    aliases.push('yashobhoomi', 'iicc');
+  }
+  if (/\bnsic\b/.test(hay)) {
+    aliases.push('nsic exhibition', 'nsic ground', 'nsic okhla');
+  }
+  if (hay.includes('bombay exhibition') || /\bnesco\b/.test(hay) || slug === 'bec-mumbai') {
+    aliases.push('bombay exhibition', 'nesco');
+  }
+  if (/\bbiec\b/.test(hay) || hay.includes('bangalore international exhibition') || hay.includes('bengaluru international exhibition')) {
+    aliases.push('biec', 'bangalore international exhibition', 'bengaluru international exhibition');
+  }
+  if (hay.includes('jio world')) {
+    aliases.push('jio world convention', 'jio world centre', 'jio world center');
+  }
+  if (/\bieml\b/.test(hay) || hay.includes('india expo centre') || hay.includes('india expo mart')) {
+    aliases.push('india expo centre', 'india expo mart', 'ieml');
+  }
+  if (/\bhitex\b/.test(hay)) {
+    aliases.push('hitex');
+  }
+  if (hay.includes('codissia')) {
+    aliases.push('codissia');
+  }
+  if (hay.includes('chennai trade centre') || hay.includes('chennai trade center')) {
+    aliases.push('chennai trade centre', 'chennai trade center');
+  }
+  if (hay.includes('biswa bangla')) {
+    aliases.push('biswa bangla');
+  }
+  if (hay.includes('helipad exhibition')) {
+    aliases.push('helipad exhibition');
+  }
+
+  return [...new Set(aliases)];
+}
+
+// Build strict, accurate MongoDB Event query for a venue (NO loose single-word token splitting!)
+function buildVenueEventQuery(venue) {
+  const vShort = stripVenueSubLocation(venue?.shortName || venue?.name || '').trim();
+  const vName = stripVenueSubLocation(venue?.name || '').trim();
+  const rawShort = String(venue?.shortName || '').trim();
+  const rawName = String(venue?.name || '').trim();
+  const vSlug = String(venue?.slug || '').toLowerCase().trim();
+
+  const phrases = [...new Set([vShort, vName, rawShort, rawName].filter((p) => p && p.length >= 4))];
+  const aliases = getCanonicalVenueAliases(vSlug, rawName, rawShort);
+
+  const conditions = [];
+  for (const phrase of phrases) {
+    const escaped = escapeRegex(phrase);
+    conditions.push({ venue: { $regex: escaped, $options: 'i' } });
+    conditions.push({ address: { $regex: escaped, $options: 'i' } });
+  }
+  for (const alias of aliases) {
+    const escaped = escapeRegex(alias);
+    conditions.push({ venue: { $regex: escaped, $options: 'i' } });
+    conditions.push({ address: { $regex: escaped, $options: 'i' } });
+  }
+
+  return conditions;
+}
+
+// Match an aggregated event venue key (lowercased) against a venue using the exact same canonical rules
+function venueMatchesEventKey(venue, eventVenueKey) {
+  const vKey = String(eventVenueKey || '').toLowerCase().trim();
+  if (!vKey) return false;
+
+  const vShort = stripVenueSubLocation(venue?.shortName || venue?.name || '').toLowerCase().trim();
+  const vName = stripVenueSubLocation(venue?.name || '').toLowerCase().trim();
+  const rawShort = String(venue?.shortName || '').toLowerCase().trim();
+  const rawName = String(venue?.name || '').toLowerCase().trim();
+
+  if (
+    (vShort && vKey === vShort) ||
+    (vName && vKey === vName) ||
+    (rawShort && vKey === rawShort) ||
+    (rawName && vKey === rawName) ||
+    (vShort.length > 4 && vKey.includes(vShort)) ||
+    (vName.length > 5 && vKey.includes(vName))
+  ) {
+    return true;
+  }
+
+  const aliases = getCanonicalVenueAliases(venue?.slug, rawName, rawShort);
+  for (const alias of aliases) {
+    if (alias && vKey.includes(alias.toLowerCase())) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 let defaultVenuesSynced = false;
 
 /**
- * Cleans noisy non-venue records and reconciles ratings in background.
+ * Cleans noisy/spam non-venue records and reconciles ratings in background.
  */
 async function ensureDefaultVenuesSeeded() {
   if (defaultVenuesSynced) return;
@@ -44,11 +213,14 @@ async function ensureDefaultVenuesSeeded() {
 
   void (async () => {
     try {
-      // Remove noisy/garbage records and normalize dummy '12+' upcoming counts in DB
+      // Remove noisy/garbage/URL/encoded-slug records and normalize dummy '12+' upcoming counts in DB
       await Venue.deleteMany({
         $or: [
           { name: { $regex: /^(?:\d+|#.*|\d+(?:st|nd|rd|th)\s*\(?.*\)?\s*floor.*)$/i } },
-          { name: { $regex: /^(?:exhibition\s+cent(?:er|re)|jio|tba|tbd|online|virtual)$/i } }
+          { name: { $regex: /^(?:exhibition\s+cent(?:er|re)|jio|tba|tbd|online|virtual)$/i } },
+          { name: { $regex: /\bhttps?\b|\bwww\b|https?:\/\//i } },
+          { slug: { $regex: /^(?:https?|www)-|%[0-9a-f]{2}|\s/i } },
+          { name: { $regex: /^(?:halls?|pavilions?|gates?)\s*(?:no\.?\s*)?[a-z0-9\s&–,\-/().]*$/i } }
         ]
       });
       await Venue.updateMany(
@@ -83,34 +255,40 @@ async function syncDiscoveredVenuesFromEvents() {
     ]);
 
     for (const ev of eventVenues) {
-      const rawName = String(ev._id).trim();
-      if (!isValidRealVenueName(rawName)) continue;
+      const normalizedName = stripVenueSubLocation(ev._id);
+      if (!isValidRealVenueName(normalizedName)) continue;
 
-      const slug = slugify(rawName);
+      const slug = slugify(normalizedName);
+      if (!slug) continue;
+
       const existing = await Venue.findOne({
-        $or: [{ slug }, { name: rawName }]
+        $or: [
+          { slug },
+          { name: { $regex: `^${escapeRegex(normalizedName)}$`, $options: 'i' } },
+          { shortName: { $regex: `^${escapeRegex(normalizedName)}$`, $options: 'i' } }
+        ]
       });
 
       if (!existing && !DEFAULT_VENUES.some((d) => d.slug === slug)) {
         await Venue.create({
           slug,
-          name: rawName,
-          shortName: rawName.split(',')[0],
+          name: normalizedName,
+          shortName: normalizedName.split(',')[0],
           tagline: `Convention & Exhibition Facility in ${ev.city || 'India'}`,
           city: ev.city || 'India',
           country: ev.country || 'India',
-          address: ev.address || `${rawName}, ${ev.city || ''}, ${ev.country || 'India'}`,
+          address: ev.address || `${normalizedName}, ${ev.city || ''}, ${ev.country || 'India'}`,
           heroBanner:
             ev.sampleImage ||
             'https://images.unsplash.com/photo-1540575467063-178a50c2df87?q=80&w=1600&auto=format&fit=crop',
           logoThumbnail:
             'https://images.unsplash.com/photo-1541971875076-8f970d573be6?q=80&w=300&auto=format&fit=crop',
           gallery: ev.sampleImage ? [ev.sampleImage] : [],
-          eventsHosted: `${ev.eventCount}+`,
+          eventsHosted: `${ev.eventCount}`,
           rating: 0,
           ratingsCount: 0,
           ratingSource: 'No reviews yet',
-          overviewDescription: `${rawName} is a prominent venue host for conferences, exhibitions, and trade shows.`
+          overviewDescription: `${normalizedName} is a prominent venue host for conferences, exhibitions, and trade shows.`
         });
       }
     }
@@ -218,22 +396,14 @@ async function _computeAllVenuesPayload() {
   });
 
   const enrichedVenues = venues
-    .filter((v) => isValidRealVenueName(v.name))
+    .filter((v) => isValidRealVenueName(v.name, v.slug))
     .map((v) => {
-      const vShort = (v.shortName || v.name || '').toLowerCase().trim();
-      const vName = (v.name || '').toLowerCase().trim();
-
       let liveTotal = 0;
       let liveUpcoming = 0;
 
-      // Fast in-memory lookup
+      // Fast in-memory lookup using the exact same canonical matching rules as venue detail page
       for (const [vKey, stat] of countMap.entries()) {
-        if (
-          vKey === vShort ||
-          vKey === vName ||
-          (vShort.length > 4 && vKey.includes(vShort)) ||
-          (vName.length > 5 && vKey.includes(vName))
-        ) {
+        if (venueMatchesEventKey(v, vKey)) {
           liveTotal += stat.total;
           liveUpcoming += stat.upcoming;
         }
@@ -273,6 +443,16 @@ async function _computeAllVenuesPayload() {
         eventsHosted: String(liveTotal),
         upcomingEventsCount: String(liveUpcoming)
       };
+    })
+    .filter((v) => {
+      // Hide unfeatured auto-generated 0-event dummy venues (e.g. legacy getVenueBySlug auto-creations)
+      const isAutoDummy =
+        v.liveTotalEvents === 0 &&
+        !v.isFeatured &&
+        /^Premier Convention & Exhibition Facility in India$/i.test(String(v.tagline || '').trim()) &&
+        String(v.city || '').trim().toLowerCase() === 'india' &&
+        String(v.country || '').trim().toLowerCase() === 'india';
+      return !isAutoDummy;
     })
     .sort((a, b) => {
       if (Boolean(a.isFeatured) !== Boolean(b.isFeatured)) {
@@ -378,16 +558,28 @@ export async function getAllVenues(req, res) {
 export async function getVenueBySlug(req, res) {
   try {
     const { slug } = req.params;
-    const cleanSlug = String(slug || '').toLowerCase().trim();
+    let decodedRaw = String(slug || '').trim();
+    try {
+      decodedRaw = decodeURIComponent(decodedRaw);
+    } catch {}
+    const cleanSlug = slugify(decodedRaw);
+
+    // Reject spam/URL/garbage slugs immediately — NEVER auto-create dummy venues on GET requests
+    if (!cleanSlug || !isValidRealVenueName(decodedRaw.replace(/-/g, ' '), cleanSlug)) {
+      return res.status(404).json({
+        success: false,
+        message: `Venue '${slug}' not found`
+      });
+    }
 
     let venue = await Venue.findOne({
       $or: [
         { slug: cleanSlug },
-        { _id: cleanSlug.match(/^[0-9a-fA-F]{24}$/) ? cleanSlug : null }
+        { _id: /^[0-9a-fA-F]{24}$/.test(decodedRaw) ? decodedRaw : null }
       ].filter(Boolean)
     });
 
-    // Fallback to default venues if not found
+    // Fallback to curated default venues if not yet stored
     if (!venue) {
       const defaultVenue = DEFAULT_VENUES.find((d) => d.slug === cleanSlug);
       if (defaultVenue) {
@@ -395,109 +587,51 @@ export async function getVenueBySlug(req, res) {
       }
     }
 
-    // Fallback by slug regex pattern or name matching
+    // Fallback: resolve sub-hall / entrance variant (e.g. "excel-london-hall-n22") to its canonical parent venue
     if (!venue) {
-      const slugPattern = cleanSlug.replace(/-/g, '.*');
-      const namePattern = cleanSlug.replace(/-/g, ' ');
-      venue = await Venue.findOne({
-        $or: [
-          { slug: { $regex: `^${slugPattern}$`, $options: 'i' } },
-          { name: { $regex: namePattern, $options: 'i' } },
-          { shortName: { $regex: namePattern, $options: 'i' } }
-        ]
-      });
+      const strippedName = stripVenueSubLocation(decodedRaw.replace(/-/g, ' '));
+      const parentSlug = slugify(strippedName);
+      if (parentSlug && parentSlug !== cleanSlug && isValidRealVenueName(strippedName, parentSlug)) {
+        venue = await Venue.findOne({
+          $or: [
+            { slug: parentSlug },
+            { shortName: { $regex: `^${escapeRegex(strippedName)}$`, $options: 'i' } },
+            { name: { $regex: `^${escapeRegex(strippedName)}$`, $options: 'i' } }
+          ]
+        });
+      }
     }
 
-    // Auto-discover venue from events if not registered yet
+    // Strict case-insensitive exact name/shortName lookup (never loose wildcard creation)
     if (!venue) {
-      const rawSearch = cleanSlug.replace(/-/g, ' ');
-      const sampleEvent = await Event.findOne({
-        $or: [
-          { venue: { $regex: rawSearch, $options: 'i' } },
-          { address: { $regex: rawSearch, $options: 'i' } }
-        ]
-      });
-
-      const titleName = rawSearch.replace(/\b\w/g, (c) => c.toUpperCase());
-      const cityName = sampleEvent?.city || 'India';
-      venue = await Venue.create({
-        slug: cleanSlug,
-        name: sampleEvent?.venue || titleName,
-        shortName: (sampleEvent?.venue || titleName).split(',')[0],
-        tagline: `Premier Convention & Exhibition Facility in ${cityName}`,
-        city: cityName,
-        country: sampleEvent?.country || 'India',
-        address: sampleEvent?.address || `${titleName}, ${cityName}, India`,
-        heroBanner: 'https://images.unsplash.com/photo-1540575467063-178a50c2df87?q=80&w=1600&auto=format&fit=crop',
-        logoThumbnail: 'https://images.unsplash.com/photo-1541971875076-8f970d573be6?q=80&w=300&auto=format&fit=crop',
-        gallery: [],
-        overviewDescription: `${titleName} is one of ${cityName}'s foremost venues for trade fairs, international conventions, and industry conclaves.`,
-        rating: 0,
-        ratingsCount: 0,
-        followersCount: '0',
-        bestSuited: sampleEvent?.category || 'Industrial & Trade Expos',
-        eventsHosted: '0',
-        upcomingEventsCount: '0'
-      });
+      const nameExact = decodedRaw.replace(/-/g, ' ').trim();
+      if (nameExact.length >= 4) {
+        venue = await Venue.findOne({
+          $or: [
+            { name: { $regex: `^${escapeRegex(nameExact)}$`, $options: 'i' } },
+            { shortName: { $regex: `^${escapeRegex(nameExact)}$`, $options: 'i' } }
+          ]
+        });
+      }
     }
 
-    if (!venue) {
+    if (!venue || !isValidRealVenueName(venue.name, venue.slug)) {
       return res.status(404).json({
         success: false,
         message: `Venue '${slug}' not found`
       });
     }
 
-    const vShort = (venue.shortName || venue.name).trim();
-    const vName = (venue.name || '').trim();
-    const vSlugTokens = venue.slug.split('-').filter((t) => t.length > 2 && !['ground', 'centre', 'center', 'complex', 'hall', 'india', 'expo'].includes(t));
-
-    const eventQueryConditions = [
-      { venue: { $regex: vShort, $options: 'i' } },
-      { address: { $regex: vShort, $options: 'i' } },
-      { venue: { $regex: vName, $options: 'i' } }
-    ];
-
-    if (vSlugTokens.length > 0) {
-      vSlugTokens.forEach((token) => {
-        eventQueryConditions.push({ venue: { $regex: `\\b${token}\\b`, $options: 'i' } });
-      });
-    }
-
-    // Specific known venue aliases
-    if (cleanSlug.includes('mandapam') || cleanSlug.includes('pragati') || venue.slug.includes('mandapam') || venue.slug.includes('pragati')) {
-      eventQueryConditions.push({ venue: { $regex: 'pragati maidan', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'bharat mandapam', $options: 'i' } });
-    }
-    if (cleanSlug.includes('yashobhoomi') || cleanSlug.includes('iicc') || venue.slug.includes('yashobhoomi') || venue.slug.includes('iicc')) {
-      eventQueryConditions.push({ venue: { $regex: 'yashobhoomi', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'iicc', $options: 'i' } });
-    }
-    if (cleanSlug.includes('nsic') || venue.slug.includes('nsic')) {
-      eventQueryConditions.push({ venue: { $regex: 'nsic', $options: 'i' } });
-    }
-    if (cleanSlug.includes('bec') || cleanSlug.includes('bombay') || cleanSlug.includes('nesco')) {
-      eventQueryConditions.push({ venue: { $regex: 'bombay exhibition', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'nesco', $options: 'i' } });
-    }
-    if (cleanSlug.includes('biec') || cleanSlug.includes('bangalore')) {
-      eventQueryConditions.push({ venue: { $regex: 'biec', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'bangalore exhibition', $options: 'i' } });
-    }
-    if (cleanSlug.includes('jio')) {
-      eventQueryConditions.push({ venue: { $regex: 'jio', $options: 'i' } });
-    }
-    if (cleanSlug.includes('ieml') || cleanSlug.includes('greater-noida') || cleanSlug.includes('india-expo')) {
-      eventQueryConditions.push({ venue: { $regex: 'expo centre', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'greater noida', $options: 'i' } });
-    }
-
-    const liveEvents = await Event.find({
-      $or: eventQueryConditions
-    })
-      .select('_id slug title name startDate endDate dates category categories image banner city venue address attendeesCount expectedAttendees turnout')
-      .sort({ startDate: 1 })
-      .lean();
+    const eventQueryConditions = buildVenueEventQuery(venue);
+    const liveEvents =
+      eventQueryConditions.length > 0
+        ? await Event.find({
+            $or: eventQueryConditions
+          })
+            .select('_id slug title name startDate endDate dates category categories image banner city venue address attendeesCount expectedAttendees turnout')
+            .sort({ startDate: 1 })
+            .lean()
+        : [];
 
     const now = new Date();
     const upcomingCount = liveEvents.filter((e) => {
@@ -597,8 +731,11 @@ export async function getVenueBySlug(req, res) {
 export async function createVenue(req, res) {
   try {
     const data = req.body;
-    if (!data.name) {
-      return res.status(400).json({ success: false, message: 'Venue name is required' });
+    if (!data.name || !isValidRealVenueName(data.name, data.slug || '')) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a valid exhibition venue name (URLs, standalone hall labels, and placeholder names are not allowed).'
+      });
     }
 
     const slug = data.slug ? slugify(data.slug) : slugify(data.name);
@@ -890,78 +1027,75 @@ export const getVenueHotels = async (req, res) => {
 export const getVenueEvents = async (req, res) => {
   try {
     const { slug } = req.params;
-    const cleanSlug = (slug || '').toLowerCase().trim();
+    let decodedRaw = String(slug || '').trim();
+    try {
+      decodedRaw = decodeURIComponent(decodedRaw);
+    } catch {}
+    const cleanSlug = slugify(decodedRaw);
+
+    if (!cleanSlug || !isValidRealVenueName(decodedRaw.replace(/-/g, ' '), cleanSlug)) {
+      return res.status(404).json({
+        success: false,
+        count: 0,
+        data: [],
+        events: [],
+        message: `Venue '${slug}' not found`
+      });
+    }
 
     let venue = await Venue.findOne({
       $or: [
         { slug: cleanSlug },
-        { _id: cleanSlug.match(/^[0-9a-fA-F]{24}$/) ? cleanSlug : null }
+        { _id: /^[0-9a-fA-F]{24}$/.test(decodedRaw) ? decodedRaw : null }
       ].filter(Boolean)
     });
 
     if (!venue) {
-      const slugPattern = cleanSlug.replace(/-/g, '.*');
-      const namePattern = cleanSlug.replace(/-/g, ' ');
-      venue = await Venue.findOne({
-        $or: [
-          { slug: { $regex: `^${slugPattern}$`, $options: 'i' } },
-          { name: { $regex: namePattern, $options: 'i' } },
-          { shortName: { $regex: namePattern, $options: 'i' } }
-        ]
+      const strippedName = stripVenueSubLocation(decodedRaw.replace(/-/g, ' '));
+      const parentSlug = slugify(strippedName);
+      if (parentSlug && parentSlug !== cleanSlug && isValidRealVenueName(strippedName, parentSlug)) {
+        venue = await Venue.findOne({
+          $or: [
+            { slug: parentSlug },
+            { shortName: { $regex: `^${escapeRegex(strippedName)}$`, $options: 'i' } },
+            { name: { $regex: `^${escapeRegex(strippedName)}$`, $options: 'i' } }
+          ]
+        });
+      }
+    }
+
+    if (!venue) {
+      const nameExact = decodedRaw.replace(/-/g, ' ').trim();
+      if (nameExact.length >= 4) {
+        venue = await Venue.findOne({
+          $or: [
+            { name: { $regex: `^${escapeRegex(nameExact)}$`, $options: 'i' } },
+            { shortName: { $regex: `^${escapeRegex(nameExact)}$`, $options: 'i' } }
+          ]
+        });
+      }
+    }
+
+    if (!venue || !isValidRealVenueName(venue.name, venue.slug)) {
+      return res.status(404).json({
+        success: false,
+        count: 0,
+        data: [],
+        events: [],
+        message: `Venue '${slug}' not found`
       });
     }
 
-    const vShort = (venue?.shortName || venue?.name || cleanSlug.replace(/-/g, ' ')).trim();
-    const vName = (venue?.name || '').trim();
-    const vSlugTokens = cleanSlug.split('-').filter((t) => t.length > 2 && !['ground', 'centre', 'center', 'complex', 'hall', 'india', 'expo'].includes(t));
-
-    const eventQueryConditions = [
-      { venue: { $regex: vShort, $options: 'i' } },
-      { address: { $regex: vShort, $options: 'i' } }
-    ];
-    if (vName) {
-      eventQueryConditions.push({ venue: { $regex: vName, $options: 'i' } });
-    }
-    if (vSlugTokens.length > 0) {
-      vSlugTokens.forEach((token) => {
-        eventQueryConditions.push({ venue: { $regex: `\\b${token}\\b`, $options: 'i' } });
-      });
-    }
-
-    // Specific known aliases
-    if (cleanSlug.includes('mandapam') || cleanSlug.includes('pragati')) {
-      eventQueryConditions.push({ venue: { $regex: 'pragati maidan', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'bharat mandapam', $options: 'i' } });
-    }
-    if (cleanSlug.includes('yashobhoomi') || cleanSlug.includes('iicc')) {
-      eventQueryConditions.push({ venue: { $regex: 'yashobhoomi', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'iicc', $options: 'i' } });
-    }
-    if (cleanSlug.includes('nsic')) {
-      eventQueryConditions.push({ venue: { $regex: 'nsic', $options: 'i' } });
-    }
-    if (cleanSlug.includes('bec') || cleanSlug.includes('bombay') || cleanSlug.includes('nesco')) {
-      eventQueryConditions.push({ venue: { $regex: 'bombay exhibition', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'nesco', $options: 'i' } });
-    }
-    if (cleanSlug.includes('biec') || cleanSlug.includes('bangalore')) {
-      eventQueryConditions.push({ venue: { $regex: 'biec', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'bangalore exhibition', $options: 'i' } });
-    }
-    if (cleanSlug.includes('jio')) {
-      eventQueryConditions.push({ venue: { $regex: 'jio', $options: 'i' } });
-    }
-    if (cleanSlug.includes('ieml') || cleanSlug.includes('greater-noida') || cleanSlug.includes('india-expo')) {
-      eventQueryConditions.push({ venue: { $regex: 'expo centre', $options: 'i' } });
-      eventQueryConditions.push({ venue: { $regex: 'greater noida', $options: 'i' } });
-    }
-
-    const liveEvents = await Event.find({
-      $or: eventQueryConditions
-    })
-      .select('_id slug title name startDate endDate dates category categories image banner city venue address attendeesCount expectedAttendees turnout')
-      .sort({ startDate: 1 })
-      .lean();
+    const eventQueryConditions = buildVenueEventQuery(venue);
+    const liveEvents =
+      eventQueryConditions.length > 0
+        ? await Event.find({
+            $or: eventQueryConditions
+          })
+            .select('_id slug title name startDate endDate dates category categories image banner city venue address attendeesCount expectedAttendees turnout')
+            .sort({ startDate: 1 })
+            .lean()
+        : [];
 
     return res.status(200).json({
       success: true,
