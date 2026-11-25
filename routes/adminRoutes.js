@@ -5669,7 +5669,8 @@ router.get('/activity-monitor', async (req, res, next) => {
       allUniqueUsersCountAgg,
       registeredUsersCountAgg,
       guestUsersCountAgg,
-      userSummaryFacetAgg,
+      directoryUsersCountAgg,
+      userSummaryDocs,
       topEventsAgg,
       topPagesAgg
     ] = await Promise.all([
@@ -5683,41 +5684,54 @@ router.get('/activity-monitor', async (req, res, next) => {
       UserActivity.aggregate([
         { $group: { _id: '$activityType', count: { $sum: 1 } } },
         { $sort: { count: -1 } }
-      ]),
+      ]).allowDiskUse(true),
       UserActivity.aggregate([
         { $group: { _id: userGroupingKey } },
         { $count: 'total' }
-      ]),
+      ]).allowDiskUse(true),
       UserActivity.aggregate([
         { $match: { userRole: registeredRoleCondition } },
         { $group: { _id: userGroupingKey } },
         { $count: 'total' }
-      ]),
+      ]).allowDiskUse(true),
       UserActivity.aggregate([
         { $match: guestRoleFilter },
         { $group: { _id: userGroupingKey } },
         { $count: 'total' }
-      ]),
+      ]).allowDiskUse(true),
+      Object.keys(directoryMatch).length > 0
+        ? UserActivity.aggregate([
+            { $match: directoryMatch },
+            { $group: { _id: userGroupingKey } },
+            { $count: 'total' }
+          ]).allowDiskUse(true)
+        : Promise.resolve(null),
       UserActivity.aggregate([
         ...(Object.keys(directoryMatch).length > 0 ? [{ $match: directoryMatch }] : []),
-        { $sort: { createdAt: -1 } },
         {
           $group: {
             _id: userGroupingKey,
             userId: { $max: '$user' },
-            userName: { $first: '$userName' },
+            latestAction: {
+              $top: {
+                sortBy: { createdAt: -1 },
+                output: {
+                  userName: '$userName',
+                  userRole: '$userRole',
+                  actionLabel: '$actionLabel',
+                  pagePath: '$pagePath',
+                  lastEventTitle: '$targetEvent.title'
+                }
+              }
+            },
             userEmail: { $max: '$userEmail' },
             userPhone: { $max: '$userPhone' },
-            userRole: { $first: '$userRole' },
             userCompany: { $max: '$userCompany' },
             sessionId: { $max: '$sessionId' },
             ipAddress: { $max: '$ipAddress' },
             totalActions: { $sum: 1 },
             lastActionAt: { $max: '$createdAt' },
             firstActionAt: { $min: '$createdAt' },
-            lastActionLabel: { $first: '$actionLabel' },
-            lastPagePath: { $first: '$pagePath' },
-            lastEventTitle: { $first: '$targetEvent.title' },
             pageVisitsCount: {
               $sum: { $cond: [{ $in: ['$activityType', ['page_visit', 'event_view']] }, 1, 0] }
             },
@@ -5736,13 +5750,9 @@ router.get('/activity-monitor', async (req, res, next) => {
           }
         },
         { $sort: { lastActionAt: -1, totalActions: -1 } },
-        {
-          $facet: {
-            metadata: [{ $count: 'total' }],
-            docs: [{ $skip: uSkip }, { $limit: uPgLimit }]
-          }
-        }
-      ]),
+        { $skip: uSkip },
+        { $limit: uPgLimit }
+      ]).allowDiskUse(true),
       UserActivity.aggregate([
         { $match: { 'targetEvent.title': { $exists: true, $ne: '' } } },
         {
@@ -5772,7 +5782,7 @@ router.get('/activity-monitor', async (req, res, next) => {
         },
         { $sort: { totalInteractions: -1, latestAt: -1 } },
         { $limit: 20 }
-      ]),
+      ]).allowDiskUse(true),
       UserActivity.aggregate([
         { $match: { pagePath: { $exists: true, $ne: '' }, activityType: { $in: ['page_visit', 'event_view'] } } },
         {
@@ -5786,7 +5796,7 @@ router.get('/activity-monitor', async (req, res, next) => {
         },
         { $sort: { visitsCount: -1, lastVisitedAt: -1 } },
         { $limit: 15 }
-      ])
+      ]).allowDiskUse(true)
     ]);
 
     const typeBreakdown = {};
@@ -5794,10 +5804,12 @@ router.get('/activity-monitor', async (req, res, next) => {
       if (t?._id) typeBreakdown[t._id] = t.count;
     });
 
-    const userFacet = userSummaryFacetAgg?.[0] || {};
-    const usersTotal = userFacet.metadata?.[0]?.total || 0;
-    const userSummaryDocs = Array.isArray(userFacet.docs) ? userFacet.docs : [];
-    const uniqueUsersTotal = allUniqueUsersCountAgg?.[0]?.total || usersTotal;
+    const uniqueUsersTotal = allUniqueUsersCountAgg?.[0]?.total || 0;
+    const usersTotal =
+      directoryUsersCountAgg !== null
+        ? (directoryUsersCountAgg?.[0]?.total || 0)
+        : uniqueUsersTotal;
+    const safeUserSummaryDocs = Array.isArray(userSummaryDocs) ? userSummaryDocs : [];
     const registeredUsersTotal = registeredUsersCountAgg?.[0]?.total || 0;
     const guestUsersTotal = guestUsersCountAgg?.[0]?.total || 0;
 
@@ -5822,22 +5834,22 @@ router.get('/activity-monitor', async (req, res, next) => {
           guestUsersCount: guestUsersTotal
         },
         typeBreakdown,
-        userSummaries: userSummaryDocs.map((u) => ({
+        userSummaries: safeUserSummaryDocs.map((u) => ({
           userKey: u._id,
           userId: u.userId || null,
-          userName: u.userName || 'Guest Visitor',
+          userName: u.latestAction?.userName || 'Guest Visitor',
           userEmail: u.userEmail || '',
           userPhone: u.userPhone || '',
-          userRole: u.userRole || 'guest',
+          userRole: u.latestAction?.userRole || 'guest',
           userCompany: u.userCompany || '',
           sessionId: u.sessionId || '',
           ipAddress: u.ipAddress || '',
           totalActions: u.totalActions || 0,
           lastActionAt: u.lastActionAt,
           firstActionAt: u.firstActionAt,
-          lastActionLabel: u.lastActionLabel || '',
-          lastPagePath: u.lastPagePath || '/',
-          lastEventTitle: u.lastEventTitle || '',
+          lastActionLabel: u.latestAction?.actionLabel || '',
+          lastPagePath: u.latestAction?.pagePath || '/',
+          lastEventTitle: u.latestAction?.lastEventTitle || '',
           pageVisitsCount: u.pageVisitsCount || 0,
           eventClicksCount: u.eventClicksCount || 0,
           interestedCount: u.interestedCount || 0,
