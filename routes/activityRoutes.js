@@ -5,7 +5,7 @@
  */
 
 import express from 'express';
-import { logUserActivity } from '../utils/activityLogger.js';
+import { isBotUserAgent, logUserActivity } from '../utils/activityLogger.js';
 
 const router = express.Router();
 
@@ -14,6 +14,10 @@ const router = express.Router();
 // @access  Public / Optional Auth
 router.post('/track', async (req, res) => {
   try {
+    if (isBotUserAgent(req.headers?.['user-agent'])) {
+      return res.status(200).json({ success: true, tracked: 0, skippedBot: true });
+    }
+
     const body = req.body || {};
     const items = Array.isArray(body.events) ? body.events.slice(0, 25) : [body];
 

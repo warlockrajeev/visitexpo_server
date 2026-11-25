@@ -20,6 +20,38 @@ import { verifyAccessToken } from './jwt.js';
 
 const SENSITIVE_FIELD_REGEX = /(pass|pwd|otp|token|secret|cvv|pin|card|auth|cookie|credential)/i;
 
+export const BOT_USER_AGENT_REGEX =
+  /bot|crawler|spider|slurp|headless|lighthouse|pagespeed|gtmetrix|pingdom|uptimerobot|googlebot|bingbot|yandex|baiduspider|duckduckbot|applebot|ahrefs|semrush|mj12bot|dotbot|bytespider|petalbot|oai-searchbot|gptbot|claudebot|anthropic-ai|perplexitybot|ccbot|meta-externalagent|meta-webindexer|facebookexternalhit|twitterbot|linkedinbot|whatsapp|telegrambot|slackbot|discordbot|curl\/|wget\/|python-requests|axios\/|go-http-client|java\/|scrapy|playwright|puppeteer/i;
+
+export function isBotUserAgent(userAgent = '') {
+  const ua = String(userAgent || '').trim();
+  if (!ua) return false;
+  return BOT_USER_AGENT_REGEX.test(ua);
+}
+
+// 5-minute in-memory deduplication cache for anonymous guest page/event views
+const GUEST_VIEW_DEDUP_MS = 5 * 60 * 1000;
+const GUEST_DEDUP_MAX_SIZE = 10000;
+const guestViewDedupCache = new Map();
+
+function isDuplicateGuestView(key) {
+  const now = Date.now();
+  const prev = guestViewDedupCache.get(key);
+  if (prev && now - prev < GUEST_VIEW_DEDUP_MS) {
+    return true;
+  }
+  if (guestViewDedupCache.size >= GUEST_DEDUP_MAX_SIZE) {
+    for (const [k, ts] of guestViewDedupCache.entries()) {
+      if (now - ts >= GUEST_VIEW_DEDUP_MS) guestViewDedupCache.delete(k);
+    }
+    if (guestViewDedupCache.size >= GUEST_DEDUP_MAX_SIZE) {
+      guestViewDedupCache.clear();
+    }
+  }
+  guestViewDedupCache.set(key, now);
+  return false;
+}
+
 export function sanitizeFormFields(input) {
   if (!input || typeof input !== 'object') return null;
   const output = {};
@@ -148,16 +180,47 @@ export async function logUserActivity({
   sourceRefId = ''
 }) {
   try {
+    const rawUserAgent = String(req?.headers?.['user-agent'] || '').slice(0, 300);
+    const normalizedType = String(activityType || 'page_visit').trim().slice(0, 60);
+    const normalizedSource = String(source || 'server_hook').trim();
+
+    // 1. Ignore search engine crawlers, AI bots & scrapers for client telemetry
+    if (normalizedSource === 'client_tracker' && isBotUserAgent(rawUserAgent)) {
+      return null;
+    }
+
     const userCtx = await resolveUserContext(req, user);
+    const isGuest =
+      !userCtx.user &&
+      !userCtx.userEmail &&
+      (!userCtx.userRole || userCtx.userRole === 'guest');
+
+    // 2. Skip noisy low-value micro-events for anonymous guests
+    if (isGuest && normalizedSource === 'client_tracker' && (normalizedType === 'button_click' || normalizedType === 'form_interaction')) {
+      return null;
+    }
+
+    const cleanSessionId = String(sessionId || '').trim().slice(0, 120);
+    const cleanPagePath = String(pagePath || '').trim().slice(0, 300);
+    const clientIp = extractClientIp(req);
+
+    // 3. Deduplicate repeat guest page_visit / event_view hits within 5 minutes
+    if (isGuest && normalizedSource === 'client_tracker' && (normalizedType === 'page_visit' || normalizedType === 'event_view')) {
+      const dedupTarget = cleanPagePath || String(targetEvent?.slug || '').toLowerCase().trim();
+      const dedupKey = `${cleanSessionId || clientIp}|${normalizedType}|${dedupTarget}`;
+      if (dedupTarget && isDuplicateGuestView(dedupKey)) {
+        return null;
+      }
+    }
 
     const doc = {
       ...userCtx,
-      sessionId: String(sessionId || '').trim().slice(0, 120),
-      activityType: String(activityType || 'page_visit').trim().slice(0, 60),
+      sessionId: cleanSessionId,
+      activityType: normalizedType,
       category: String(category || 'navigation').trim().slice(0, 40),
       actionLabel: String(actionLabel || 'Activity Recorded').trim().slice(0, 240),
       description: String(description || '').trim().slice(0, 500),
-      pagePath: String(pagePath || '').trim().slice(0, 300),
+      pagePath: cleanPagePath,
       pageTitle: String(pageTitle || '').trim().slice(0, 200),
       referrerPath: String(referrerPath || '').trim().slice(0, 300),
       targetEvent: targetEvent
@@ -186,9 +249,9 @@ export async function logUserActivity({
           }
         : undefined,
       metadata: sanitizeFormFields(metadata),
-      ipAddress: extractClientIp(req),
-      userAgent: String(req?.headers?.['user-agent'] || '').slice(0, 300),
-      source: String(source || 'server_hook').trim(),
+      ipAddress: clientIp,
+      userAgent: rawUserAgent,
+      source: normalizedSource,
       sourceRefId: String(sourceRefId || '').trim()
     };
 

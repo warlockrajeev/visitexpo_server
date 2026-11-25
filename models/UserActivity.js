@@ -136,6 +136,15 @@ const UserActivitySchema = new mongoose.Schema(
 );
 
 UserActivitySchema.index({ createdAt: -1 });
+// Smart Partial TTL: automatically expire anonymous guest logs after 14 days while preserving registered user history
+UserActivitySchema.index(
+  { createdAt: 1 },
+  {
+    name: 'guest_activity_ttl_14d',
+    expireAfterSeconds: 14 * 24 * 60 * 60,
+    partialFilterExpression: { userRole: 'guest' }
+  }
+);
 UserActivitySchema.index({ userEmail: 1, createdAt: -1 });
 UserActivitySchema.index({ activityType: 1, createdAt: -1 });
 UserActivitySchema.index({ 'targetEvent.slug': 1, createdAt: -1 });
