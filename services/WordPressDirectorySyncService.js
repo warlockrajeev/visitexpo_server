@@ -558,20 +558,31 @@ class WordPressDirectorySyncService {
       const deletedPostIds = new Set((deletedEvents || []).map(d => String(d.wpPostId || '').trim().toLowerCase()));
       const deletedTitles = new Set((deletedEvents || []).map(d => (d.title || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '')));
 
-      // Find existing events so we preserve ownership on claimed records AND identify missing/mismatched banners
-      const existingAllEvents = await Event.find({}).select('slug wpPostId isClaimed claimedBy organizer banner').lean();
-      const claimedMap = new Map();
+      // Find existing events so we preserve ownership, rich descriptions, gallery, promoVideoUrl,
+      // and moderation status on platform/organizer-created or claimed records.
+      const existingAllEvents = await Event.find({})
+        .select('slug wpPostId isClaimed claimedBy organizer createdBy status banner')
+        .lean();
+      const platformOwnedMap = new Map();
       const existingBannerMap = new Map();
       existingAllEvents.forEach(e => {
+        const isPlatformManaged = Boolean(
+          e.isClaimed ||
+          e.claimedBy ||
+          e.createdBy ||
+          e.organizer ||
+          e.status === 'draft' ||
+          e.status === 'cancelled'
+        );
         if (e.slug) {
           const s = e.slug.toLowerCase();
           existingBannerMap.set(s, e.banner || '');
-          if (e.isClaimed) claimedMap.set(s, e);
+          if (isPlatformManaged) platformOwnedMap.set(s, e);
         }
         if (e.wpPostId) {
           const wp = String(e.wpPostId);
           existingBannerMap.set(wp, e.banner || '');
-          if (e.isClaimed) claimedMap.set(wp, e);
+          if (isPlatformManaged) platformOwnedMap.set(wp, e);
         }
       });
 
@@ -585,6 +596,12 @@ class WordPressDirectorySyncService {
         const rawTitle = (d.title || '').trim();
         const normTitle = rawTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
         const postId = String(d.id || '');
+
+        // Never import WordPress drafts/pending/trash as published directory events
+        if (d.status && String(d.status).toLowerCase() !== 'publish') {
+          skippedCount++;
+          continue;
+        }
 
         // Check if admin explicitly deleted this event
         if (
@@ -657,32 +674,24 @@ class WordPressDirectorySyncService {
         const orgDesc = (m.ovaem_org_desc?.[0] || '').trim();
         const orgLogo = (m.ovaem_org_logo?.[0] || '').trim();
 
-        const isClaimedMatch = claimedMap.get(slug) || claimedMap.get(postId);
+        const platformManagedMatch = platformOwnedMap.get(slug) || platformOwnedMap.get(postId);
 
         // Upsert operation
-        if (isClaimedMatch) {
-          // If already claimed in MongoDB, preserve ownership while updating event timing and meta
-          bulkOps.push({
-            updateOne: {
-              filter: { slug },
-              update: {
-                $set: {
-                  wpPostId: postId,
-                  wpUrl: `${WORDPRESS_URL}/event/${slug}/`,
-                  startDate,
-                  endDate,
-                  venue: loc.venue,
-                  city: loc.city,
-                  country: loc.country || 'India',
-                  categories: [category],
-                  faqsList: faqsList.length > 0 ? faqsList : undefined,
-                  schedules: schedules.length > 0 ? schedules : undefined,
-                  sponsorsList: sponsorsList.length > 0 ? sponsorsList : undefined,
-                  status: 'published'
-                }
+        if (platformManagedMatch) {
+          // Platform/organizer-created or claimed event: NEVER overwrite status (draft/moderation),
+          // rich description, gallery, promoVideoUrl, or organizer profile from WordPress meta.
+          // Only backfill wpPostId / wpUrl linkage if missing.
+          const linkFields = {};
+          if (!platformManagedMatch.wpPostId && postId) linkFields.wpPostId = postId;
+          if (slug) linkFields.wpUrl = `${WORDPRESS_URL}/event/${slug}/`;
+          if (Object.keys(linkFields).length > 0) {
+            bulkOps.push({
+              updateOne: {
+                filter: { _id: platformManagedMatch._id },
+                update: { $set: linkFields }
               }
-            }
-          });
+            });
+          }
         } else {
           // Unclaimed or new event: complete upsert (never overwrite an existing valid banner with empty string)
           const setFields = {
@@ -819,7 +828,7 @@ class WordPressDirectorySyncService {
       // Query directly from indexed MongoDB with truncated descriptions (~3x faster & smaller payload)
       const [rawEvents, engagementAgg, visitorAgg, deletedDocs] = await Promise.all([
         Event.aggregate([
-          { $match: { status: { $ne: 'cancelled' } } },
+          { $match: { status: 'published' } },
           { $sort: { startDate: 1 } },
           {
             $project: {

@@ -1244,45 +1244,64 @@ router.post('/', protect, authorize('super_admin', 'organizer', 'event_manager')
       return res.status(400).json({ success: false, error: priceError });
     }
 
+    const isAdminActor = ['super_admin', 'admin'].includes(String(req.user.role || '').toLowerCase());
+
     const normalizedPayload =
       req.body.ticketingMode !== undefined ||
       req.body.isFreeEvent !== undefined ||
       req.body.paidTicketPrice !== undefined
         ? { ...req.body, ...normalizeTicketingFields(req.body) }
-        : req.body;
+        : { ...req.body };
+
+    // Non-admin organizer submissions ALWAYS enter as 'draft' for Admin Moderation approval
+    if (!isAdminActor) {
+      normalizedPayload.status = 'draft';
+    } else if (!normalizedPayload.status) {
+      normalizedPayload.status = 'published';
+    }
 
     const event = await EventService.createEvent(normalizedPayload, req.user.organization, req.user.id);
 
     // Auto-create default ticket tier if ticketing data is provided
     await syncDefaultTicketTier(event._id, normalizedPayload);
 
-    // Automatically sync event to WordPress and reload updated WP metadata
-    await syncEventToWordPress(event._id);
-    const createdEvent = await Event.findById(event._id);
+    // Only sync to WordPress and notify public followers when the event is actually published (admin-approved)
+    let createdEvent = event;
+    if (event.status === 'published') {
+      await syncEventToWordPress(event._id);
+      createdEvent = (await Event.findById(event._id)) || event;
 
-    try { invalidateVenuesCache(); } catch (_) {}
-    WordPressDirectorySyncService.clearCache();
-    WordPressDirectorySyncService.notifyFrontendCacheRefresh();
+      try { invalidateVenuesCache(); } catch (_) {}
+      WordPressDirectorySyncService.clearCache();
+      WordPressDirectorySyncService.notifyFrontendCacheRefresh();
 
-    // Notify followers of the creator when a new event is created
-    try {
-      const actor = await User.findById(req.user.id).select('name email').lean();
-      const actorName = actor?.name || event.orgName || req.user.email || 'An organizer you follow';
-      notifyFollowersOnActivity({
-        actorUserId: req.user.id,
-        actorEmail: actor?.email || req.user.email,
-        actorName,
-        eventId: event._id,
-        eventSlug: (createdEvent || event).slug,
-        eventTitle: event.title,
-        activityType: 'event_created',
-        title: `New Event by ${actorName}`,
-        message: `${actorName} created a new event: "${event.title}"${event.city ? ` in ${event.city}` : ''}.`,
-        url: `/expo/${(createdEvent || event).slug}`
-      });
-    } catch (_) {}
+      // Notify followers of the creator when a new event is published
+      try {
+        const actor = await User.findById(req.user.id).select('name email').lean();
+        const actorName = actor?.name || event.orgName || req.user.email || 'An organizer you follow';
+        notifyFollowersOnActivity({
+          actorUserId: req.user.id,
+          actorEmail: actor?.email || req.user.email,
+          actorName,
+          eventId: event._id,
+          eventSlug: createdEvent.slug,
+          eventTitle: event.title,
+          activityType: 'event_created',
+          title: `New Event by ${actorName}`,
+          message: `${actorName} created a new event: "${event.title}"${event.city ? ` in ${event.city}` : ''}.`,
+          url: `/expo/${createdEvent.slug}`
+        });
+      } catch (_) {}
+    }
 
-    res.status(201).json({ success: true, message: 'Event created successfully', event: createdEvent || event });
+    res.status(201).json({
+      success: true,
+      message:
+        createdEvent.status === 'draft'
+          ? 'Event submitted for admin approval! It will go live once approved.'
+          : 'Event created successfully',
+      event: createdEvent
+    });
   } catch (error) {
     if (error.statusCode === 409) {
       return res.status(409).json({
@@ -1303,6 +1322,8 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
       return res.status(400).json({ success: false, error: priceError });
     }
 
+    const isAdminActor = ['super_admin', 'admin'].includes(String(req.user.role || '').toLowerCase());
+
     const normalizedPayload =
       req.body.ticketingMode !== undefined ||
       req.body.isFreeEvent !== undefined ||
@@ -1310,7 +1331,15 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
       req.body.freePassQuota !== undefined ||
       req.body.freePassUntil !== undefined
         ? { ...req.body, ...normalizeTicketingFields(req.body) }
-        : req.body;
+        : { ...req.body };
+
+    // Prevent non-admin organizers from self-publishing an unapproved draft/cancelled event
+    if (!isAdminActor && normalizedPayload.status === 'published') {
+      const existingBeforeUpdate = await Event.findById(req.params.id).select('status').lean();
+      if (existingBeforeUpdate && existingBeforeUpdate.status !== 'published') {
+        normalizedPayload.status = existingBeforeUpdate.status || 'draft';
+      }
+    }
 
     const event = await EventService.updateEvent(req.params.id, normalizedPayload, {
       userId: req.user.id,
@@ -1321,33 +1350,36 @@ router.put('/:id', protect, authorize('super_admin', 'organizer', 'event_manager
     // Sync default ticket tier if ticketing data changed
     await syncDefaultTicketTier(event._id, normalizedPayload);
 
-    // Automatically sync event to WordPress and reload updated WP metadata
-    await syncEventToWordPress(event._id);
-    const updatedEvent = await Event.findById(event._id);
+    // Only sync to WordPress and refresh public caches when the event is published
+    let updatedEvent = event;
+    if (event.status === 'published') {
+      await syncEventToWordPress(event._id);
+      updatedEvent = (await Event.findById(event._id)) || event;
 
-    try { invalidateVenuesCache(); } catch (_) {}
-    WordPressDirectorySyncService.clearCache();
-    WordPressDirectorySyncService.notifyFrontendCacheRefresh();
+      try { invalidateVenuesCache(); } catch (_) {}
+      WordPressDirectorySyncService.clearCache();
+      WordPressDirectorySyncService.notifyFrontendCacheRefresh();
 
-    // Notify followers of the actor or event when event details are updated
-    try {
-      const actor = await User.findById(req.user.id).select('name email').lean();
-      const actorName = actor?.name || event.orgName || req.user.email || 'An organizer';
-      notifyFollowersOnActivity({
-        actorUserId: req.user.id,
-        actorEmail: actor?.email || req.user.email,
-        actorName,
-        eventId: event._id,
-        eventSlug: (updatedEvent || event).slug,
-        eventTitle: event.title,
-        activityType: 'event_updated',
-        title: `Event Update: ${event.title}`,
-        message: `${actorName} posted updates for "${event.title}"${event.city ? ` (${event.city})` : ''}.`,
-        url: `/expo/${(updatedEvent || event).slug}`
-      });
-    } catch (_) {}
+      // Notify followers of the actor or event when published event details are updated
+      try {
+        const actor = await User.findById(req.user.id).select('name email').lean();
+        const actorName = actor?.name || event.orgName || req.user.email || 'An organizer';
+        notifyFollowersOnActivity({
+          actorUserId: req.user.id,
+          actorEmail: actor?.email || req.user.email,
+          actorName,
+          eventId: event._id,
+          eventSlug: updatedEvent.slug,
+          eventTitle: event.title,
+          activityType: 'event_updated',
+          title: `Event Update: ${event.title}`,
+          message: `${actorName} posted updates for "${event.title}"${event.city ? ` (${event.city})` : ''}.`,
+          url: `/expo/${updatedEvent.slug}`
+        });
+      } catch (_) {}
+    }
 
-    res.status(200).json({ success: true, message: 'Event updated successfully', event: updatedEvent || event });
+    res.status(200).json({ success: true, message: 'Event updated successfully', event: updatedEvent });
   } catch (error) {
     next(error);
   }

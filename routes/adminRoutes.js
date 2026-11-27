@@ -2811,7 +2811,7 @@ router.get('/pending-summary', async (req, res, next) => {
       Promise.resolve(0),
       Exhibitor.countDocuments({ status: 'pending' }),
       Event.countDocuments({ isClaimed: true, status: 'draft' }),
-      Event.countDocuments({ status: 'pending' }),
+      Event.countDocuments({ status: 'draft', isClaimed: { $ne: true } }),
       FeaturedOrganizer.countDocuments({ status: 'pending' }),
       BoothRequest.countDocuments({ status: 'new' }),
       EventRequest.countDocuments({ status: 'new' }),
