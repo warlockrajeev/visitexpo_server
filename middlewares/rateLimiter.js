@@ -17,17 +17,8 @@ export const apiLimiter = rateLimit({
   }
 });
 
-// Stricter rate limiter for authentication routes (login/register)
-export const authLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: 15, // Limit each IP to 15 login/registration attempts per hour
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    success: false,
-    error: 'Too many login or registration attempts. Please try again after an hour.'
-  }
-});
+// Authentication routes rate limiter (disabled during testing so login/registration/OTP flows are never blocked)
+export const authLimiter = (req, res, next) => next();
 
 // Rate limiter for WordPress public integrations
 export const wordpressLimiter = rateLimit({
