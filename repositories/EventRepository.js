@@ -27,7 +27,10 @@ class EventRepository extends BaseRepository {
   async findUpcoming(limit = 5) {
     return await this.model.find({
       status: 'published',
-      startDate: { $gte: new Date() }
+      $or: [
+        { startDate: { $gte: new Date() } },
+        { dateTBA: true }
+      ]
     })
       .sort({ startDate: 1 })
       .limit(limit)
@@ -189,6 +192,7 @@ class EventRepository extends BaseRepository {
         ...(filter.$and || []),
         {
           $or: [
+            { dateTBA: true },
             { endDate: { $gte: today } },
             { endDate: { $exists: false }, startDate: { $gte: today } }
           ]

@@ -2806,7 +2806,8 @@ router.get('/pending-summary', async (req, res, next) => {
       pendingFeatured,
       pendingBoothRequests,
       pendingEventRequests,
-      pendingPassRequests
+      pendingPassRequests,
+      postponedEvents
     ] = await Promise.all([
       Promise.resolve(0),
       Exhibitor.countDocuments({ status: 'pending' }),
@@ -2815,7 +2816,8 @@ router.get('/pending-summary', async (req, res, next) => {
       FeaturedOrganizer.countDocuments({ status: 'pending' }),
       BoothRequest.countDocuments({ status: 'new' }),
       EventRequest.countDocuments({ status: 'new' }),
-      Visitor.countDocuments({ registrationStatus: 'pending' })
+      Visitor.countDocuments({ registrationStatus: 'pending' }),
+      Event.countDocuments({ $or: [{ isPostponed: true }, { dateTBA: true }] })
     ]);
 
     const pendingExhibitors = pendingExhibitorsCount;
@@ -2833,6 +2835,7 @@ router.get('/pending-summary', async (req, res, next) => {
         pendingBoothRequests,
         pendingEventRequests,
         pendingPassRequests,
+        postponedEvents,
         totalPending
       }
     });
@@ -5889,6 +5892,182 @@ router.delete('/activity-monitor/:id', async (req, res, next) => {
       return res.status(404).json({ success: false, error: 'Activity record not found.' });
     }
     res.status(200).json({ success: true, message: 'Activity record deleted.' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==========================================
+// POSTPONED & RESCHEDULED EVENTS MANAGEMENT
+// ==========================================
+
+// @desc    List postponed/TBA events and optionally search all events to postpone/reschedule
+// @route   GET /api/admin/postponed-events
+router.get('/postponed-events', async (req, res, next) => {
+  try {
+    const search = String(req.query.search || '').trim();
+    const filterMode = String(req.query.filter || 'all').toLowerCase();
+
+    const postponedMatch =
+      filterMode === 'tba'
+        ? { dateTBA: true }
+        : filterMode === 'rescheduled'
+          ? { isPostponed: true, dateTBA: { $ne: true } }
+          : { $or: [{ isPostponed: true }, { dateTBA: true }] };
+
+    const selectFields =
+      'title slug banner city venue country startDate endDate status isPostponed dateTBA postponedReason originalStartDate originalEndDate postponedAt orgName categories wpPostId wpUrl updatedAt';
+
+    const queries = [
+      Event.find(postponedMatch).select(selectFields).sort({ postponedAt: -1, updatedAt: -1 }).limit(200).lean(),
+      Event.countDocuments({ $or: [{ isPostponed: true }, { dateTBA: true }] }),
+      Event.countDocuments({ dateTBA: true }),
+      Event.countDocuments({ isPostponed: true, dateTBA: { $ne: true } })
+    ];
+
+    if (search.length >= 2) {
+      const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const rx = new RegExp(escaped, 'i');
+      queries.push(
+        Event.find({
+          $or: [{ title: rx }, { slug: rx }, { city: rx }, { venue: rx }]
+        })
+          .select(selectFields)
+          .sort({ startDate: -1 })
+          .limit(30)
+          .lean()
+      );
+    } else {
+      queries.push(Promise.resolve([]));
+    }
+
+    const [postponedEvents, totalPostponed, tbaCount, rescheduledCount, searchResults] = await Promise.all(queries);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        postponedEvents,
+        searchResults,
+        stats: {
+          totalPostponed,
+          tbaCount,
+          rescheduledCount
+        }
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// @desc    Postpone event (set specific new date or To Be Announced) or restore normal schedule
+// @route   PUT /api/admin/events/:id/postpone
+router.put('/events/:id/postpone', async (req, res, next) => {
+  try {
+    const { mode, newStartDate, newEndDate, reason, restoreOriginalDates } = req.body || {};
+    const actionMode = String(mode || '').toLowerCase().trim();
+
+    if (!['reschedule', 'tba', 'restore'].includes(actionMode)) {
+      return res.status(400).json({
+        success: false,
+        error: 'mode must be "reschedule", "tba", or "restore".'
+      });
+    }
+
+    const event = await Event.findById(req.params.id).lean();
+    if (!event) {
+      return res.status(404).json({ success: false, error: 'Event not found.' });
+    }
+
+    const cleanReason = typeof reason === 'string' ? reason.trim().slice(0, 500) : '';
+    const updateFields = {};
+
+    if (actionMode === 'tba') {
+      if (!event.originalStartDate && event.startDate) {
+        updateFields.originalStartDate = event.startDate;
+      }
+      if (!event.originalEndDate && event.endDate) {
+        updateFields.originalEndDate = event.endDate;
+      }
+      updateFields.isPostponed = true;
+      updateFields.dateTBA = true;
+      updateFields.postponedReason = cleanReason;
+      updateFields.postponedAt = new Date();
+    } else if (actionMode === 'reschedule') {
+      if (!newStartDate) {
+        return res.status(400).json({
+          success: false,
+          error: 'Please provide a new start date, or choose "To Be Announced" if the new date is not finalized.'
+        });
+      }
+      const parsedStart = new Date(newStartDate);
+      const parsedEnd = new Date(newEndDate || newStartDate);
+      if (Number.isNaN(parsedStart.getTime()) || Number.isNaN(parsedEnd.getTime())) {
+        return res.status(400).json({ success: false, error: 'Invalid new start or end date.' });
+      }
+      if (parsedEnd.getTime() < parsedStart.getTime()) {
+        return res.status(400).json({
+          success: false,
+          error: 'New end date must be on or after the new start date.'
+        });
+      }
+
+      if (!event.originalStartDate && event.startDate) {
+        updateFields.originalStartDate = event.startDate;
+      }
+      if (!event.originalEndDate && event.endDate) {
+        updateFields.originalEndDate = event.endDate;
+      }
+      updateFields.startDate = parsedStart;
+      updateFields.endDate = parsedEnd;
+      updateFields.isPostponed = true;
+      updateFields.dateTBA = false;
+      updateFields.postponedReason = cleanReason;
+      updateFields.postponedAt = new Date();
+    } else if (actionMode === 'restore') {
+      if (restoreOriginalDates && event.originalStartDate) {
+        updateFields.startDate = event.originalStartDate;
+        updateFields.endDate = event.originalEndDate || event.originalStartDate;
+      }
+      updateFields.isPostponed = false;
+      updateFields.dateTBA = false;
+      updateFields.postponedReason = '';
+      updateFields.originalStartDate = null;
+      updateFields.originalEndDate = null;
+      updateFields.postponedAt = null;
+    }
+
+    // Use findByIdAndUpdate so legacy WP-imported events with missing optional/empty venue/city fields never fail full-doc save validation
+    const updatedEvent = await Event.findByIdAndUpdate(
+      event._id,
+      { $set: updateFields },
+      { new: true, runValidators: false }
+    );
+
+    // Sync updated confirmed dates to WordPress if published and not TBA
+    if (updatedEvent && updatedEvent.status === 'published' && !updatedEvent.dateTBA) {
+      syncEventToWordPress(updatedEvent._id).catch((wpErr) => {
+        console.warn(`[Postpone WP Sync] Note for event ${updatedEvent._id}:`, wpErr.message);
+      });
+    }
+
+    try {
+      WordPressDirectorySyncService.clearCache();
+      WordPressDirectorySyncService.notifyFrontendCacheRefresh();
+    } catch (_) {}
+
+    const message =
+      actionMode === 'tba'
+        ? `"${updatedEvent.title}" marked as Postponed — Date set to To Be Announced.`
+        : actionMode === 'reschedule'
+          ? `"${updatedEvent.title}" rescheduled to the new date successfully.`
+          : `"${updatedEvent.title}" restored to regular schedule.`;
+
+    res.status(200).json({
+      success: true,
+      message,
+      event: updatedEvent
+    });
   } catch (error) {
     next(error);
   }

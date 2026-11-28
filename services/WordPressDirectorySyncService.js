@@ -561,7 +561,7 @@ class WordPressDirectorySyncService {
       // Find existing events so we preserve ownership, rich descriptions, gallery, promoVideoUrl,
       // and moderation status on platform/organizer-created or claimed records.
       const existingAllEvents = await Event.find({})
-        .select('slug wpPostId isClaimed claimedBy organizer createdBy status banner')
+        .select('slug wpPostId isClaimed claimedBy organizer createdBy status banner isPostponed dateTBA')
         .lean();
       const platformOwnedMap = new Map();
       const existingBannerMap = new Map();
@@ -571,6 +571,8 @@ class WordPressDirectorySyncService {
           e.claimedBy ||
           e.createdBy ||
           e.organizer ||
+          e.isPostponed ||
+          e.dateTBA ||
           e.status === 'draft' ||
           e.status === 'cancelled'
         );
@@ -842,6 +844,11 @@ class WordPressDirectorySyncService {
               country: 1,
               startDate: 1,
               endDate: 1,
+              isPostponed: 1,
+              dateTBA: 1,
+              postponedReason: 1,
+              originalStartDate: 1,
+              originalEndDate: 1,
               timings: 1,
               categories: 1,
               organizer: 1,

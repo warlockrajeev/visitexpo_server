@@ -115,13 +115,24 @@ const EventSchema = new mongoose.Schema(
     },
     startDate: {
       type: Date,
-      required: [true, 'Start date is required']
+      required: [
+        function () {
+          return !this.dateTBA;
+        },
+        'Start date is required'
+      ]
     },
     endDate: {
       type: Date,
-      required: [true, 'End date is required'],
+      required: [
+        function () {
+          return !this.dateTBA;
+        },
+        'End date is required'
+      ],
       validate: {
         validator: function (value) {
+          if (this?.dateTBA) return true;
           if (!value) return false;
           const end = new Date(value);
           if (Number.isNaN(end.getTime())) return false;
@@ -137,6 +148,32 @@ const EventSchema = new mongoose.Schema(
         },
         message: 'End date must be greater than or equal to start date'
       }
+    },
+    isPostponed: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+    dateTBA: {
+      type: Boolean,
+      default: false,
+      index: true
+    },
+    postponedReason: {
+      type: String,
+      default: ''
+    },
+    originalStartDate: {
+      type: Date,
+      default: null
+    },
+    originalEndDate: {
+      type: Date,
+      default: null
+    },
+    postponedAt: {
+      type: Date,
+      default: null
     },
     timings: {
       type: String, // E.g. "10:00 AM - 6:00 PM"
